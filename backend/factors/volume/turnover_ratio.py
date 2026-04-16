@@ -8,7 +8,7 @@
 - ``close`` 读 qfq 前复权——保持和其它 close 因子的参照一致；
 - 两个序列取同一 rolling window 均值后相除。
 
-预热期 = ``window + 5`` 自然日。
+预热期 = ``int(window * 1.5) + 10`` 自然日（交易日 → 自然日折算 + 长假 buffer）。
 """
 from __future__ import annotations
 
@@ -39,7 +39,8 @@ class TurnoverRatio(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        return window + 5
+        # 1.5× 折算交易日到自然日 + 10 天长假 buffer。
+        return int(window * 1.5) + 10
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))

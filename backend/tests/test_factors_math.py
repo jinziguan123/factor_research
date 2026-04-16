@@ -147,8 +147,13 @@ def test_turnover_uses_amount_and_close() -> None:
 
 
 def test_required_warmup_values() -> None:
-    """对照设计文档的 warmup 公式，避免未来改动后出现不一致。"""
-    assert ReversalN().required_warmup({"window": 20}) == 25
-    assert MomentumN().required_warmup({"window": 120, "skip": 5}) == 130
-    assert RealizedVol().required_warmup({"window": 20}) == 25
-    assert TurnoverRatio().required_warmup({"window": 20}) == 25
+    """对照设计文档的 warmup 公式，避免未来改动后出现不一致。
+
+    新公式：``int(N * 1.5) + 10``（MomentumN 用 ``window + skip``）。
+    - window=20 → int(30) + 10 = 40
+    - window=120, skip=5 → int(187.5) + 10 = 197
+    """
+    assert ReversalN().required_warmup({"window": 20}) == 40
+    assert MomentumN().required_warmup({"window": 120, "skip": 5}) == 197
+    assert RealizedVol().required_warmup({"window": 20}) == 40
+    assert TurnoverRatio().required_warmup({"window": 20}) == 40

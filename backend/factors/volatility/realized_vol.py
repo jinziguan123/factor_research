@@ -4,7 +4,7 @@
 即过去 window 日日收益率的标准差并年化。
 
 直觉：高波动通常隐含高风险溢价（或高不确定性）；是低波动异象的输入。
-预热期 = ``window + 5`` 自然日。
+预热期 = ``int(window * 1.5) + 10`` 自然日（交易日 → 自然日折算 + 长假 buffer）。
 """
 from __future__ import annotations
 
@@ -33,7 +33,8 @@ class RealizedVol(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        return window + 5
+        # 1.5× 折算交易日到自然日 + 10 天长假 buffer。
+        return int(window * 1.5) + 10
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))

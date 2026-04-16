@@ -154,11 +154,43 @@ class FactorRegistry:
             return out
 
     def current_version(self, factor_id: str) -> int:
-        """返回 factor_id 当前的 version（未注册则抛 KeyError）。"""
+        """返回 factor_id 当前的 **进程内缓存 version**（未注册则抛 KeyError）。
+
+        语义说明：
+        - 这是"最近一次 ``scan_and_register`` 后写入本进程内存的快照"，不保证
+          是 MySQL ``fr_factor_meta`` 里的最新值。
+        - 其它进程（例如 Task 8 的 ProcessPool worker）若更新了 fr_factor_meta，
+          本进程在下次 ``scan_and_register`` 之前看到的仍是旧 version。
+        - 需要实时 / 跨进程一致的 version，请用 ``latest_version_from_db``。
+        """
         with self._lock:
             if factor_id not in self._version:
                 raise KeyError(f"未注册的 factor_id: {factor_id!r}")
             return self._version[factor_id]
+
+    def latest_version_from_db(self, factor_id: str) -> int:
+        """从 MySQL 读取 factor_id 的最新 version。
+
+        用于任务提交时固化 version，避免计算中途被热加载更新导致
+        任务记录与实际执行版本错位。调用方应在同一刻把此 version 写入
+        任务记录（例如 eval_run / factor_value 行的 factor_version 字段）。
+
+        Raises:
+            KeyError: factor_id 尚未写入 fr_factor_meta（需要先 ``scan_and_register``）。
+        """
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT version FROM fr_factor_meta WHERE factor_id=%s",
+                    (factor_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise KeyError(
+                f"factor {factor_id!r} 在 fr_factor_meta 中不存在，"
+                "请先 scan_and_register()"
+            )
+        return int(row["version"])
 
     def reload_module(self, module_name: str) -> list[str]:
         """热加载入口：``importlib.reload`` 指定模块后重新扫描。
@@ -217,12 +249,22 @@ class FactorRegistry:
     def _persist_meta(
         self, cls: type[BaseFactor], code_hash: str
     ) -> int:
-        """UPSERT ``fr_factor_meta``，返回当前（可能刚 +1 的）version。
+        """原子 UPSERT ``fr_factor_meta``，返回写入后的 version。
 
-        逻辑：
+        语义：
         - 表里不存在 → INSERT，version=1；
-        - 存在且 code_hash 相同 → 保持 version 不变（但也更新其它元数据字段）；
-        - 存在但 code_hash 变动 → version+1，update 所有字段。
+        - 存在且 code_hash 相同 → 只更新展示字段，version 保持不变；
+        - 存在但 code_hash 变动 → version = 旧值 + 1，并覆盖所有字段。
+
+        为什么要单条 SQL 而不是 SELECT → INSERT/UPDATE 两步：
+        - Task 8 的 ProcessPool 会在多个 worker 进程里各自调用
+          ``scan_and_register``；两步写法在"A 查不到 / B 查不到 → 两个 INSERT"
+          之间存在竞态，即便本进程有 threading.Lock 也挡不住跨进程并发。
+        - ``INSERT ... ON DUPLICATE KEY UPDATE`` 在 MySQL 层面由行锁串行化，
+          ``version = IF(code_hash = VALUES(code_hash), version, version + 1)``
+          能原子表达"代码变了才递增、代码没变保持"。
+        - UPSERT 后再补一个 SELECT 回读 version，纯粹是把新值带回进程内缓存
+          （LAST_INSERT_ID 的 trick 对 UPDATE-only 分支不直观，干脆显式 SELECT）。
         """
         factor_id: str = cls.factor_id
         display_name: str = getattr(cls, "display_name", factor_id)
@@ -239,48 +281,24 @@ class FactorRegistry:
         with mysql_conn() as c:
             with c.cursor() as cur:
                 cur.execute(
-                    "SELECT version, code_hash FROM fr_factor_meta WHERE factor_id = %s",
-                    (factor_id,),
-                )
-                existing = cur.fetchone()
-                if existing is None:
-                    cur.execute(
-                        "INSERT INTO fr_factor_meta "
-                        "(factor_id, display_name, category, description, "
-                        "params_schema, default_params, supported_freqs, "
-                        "code_hash, version, is_active) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1)",
-                        (
-                            factor_id,
-                            display_name,
-                            category,
-                            description,
-                            params_schema,
-                            default_params,
-                            supported_freqs,
-                            code_hash,
-                            1,
-                        ),
-                    )
-                    c.commit()
-                    logger.info("注册新因子 %s (version=1)", factor_id)
-                    return 1
-
-                prev_version = int(existing["version"])
-                prev_hash = existing["code_hash"]
-                if prev_hash == code_hash:
-                    # code_hash 未变：仍 UPDATE 其他元字段（例如 display_name
-                    # 在不改代码的前提下……实际上类属性就是代码，所以 hash 一致
-                    # 这些字段也一定一致）。保留 version 不变。
-                    return prev_version
-                new_version = prev_version + 1
-                cur.execute(
-                    "UPDATE fr_factor_meta SET "
-                    "display_name=%s, category=%s, description=%s, "
-                    "params_schema=%s, default_params=%s, supported_freqs=%s, "
-                    "code_hash=%s, version=%s, is_active=1 "
-                    "WHERE factor_id=%s",
+                    "INSERT INTO fr_factor_meta "
+                    "(factor_id, display_name, category, description, "
+                    "params_schema, default_params, supported_freqs, "
+                    "code_hash, version, is_active) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, 1) "
+                    "ON DUPLICATE KEY UPDATE "
+                    "display_name    = VALUES(display_name), "
+                    "category        = VALUES(category), "
+                    "description     = VALUES(description), "
+                    "params_schema   = VALUES(params_schema), "
+                    "default_params  = VALUES(default_params), "
+                    "supported_freqs = VALUES(supported_freqs), "
+                    "version         = IF(code_hash = VALUES(code_hash), "
+                    "version, version + 1), "
+                    "code_hash       = VALUES(code_hash), "
+                    "is_active       = 1",
                     (
+                        factor_id,
                         display_name,
                         category,
                         description,
@@ -288,15 +306,25 @@ class FactorRegistry:
                         default_params,
                         supported_freqs,
                         code_hash,
-                        new_version,
-                        factor_id,
                     ),
                 )
-                c.commit()
-                logger.info(
-                    "更新因子 %s：version %d -> %d（code_hash 变动）",
-                    factor_id,
-                    prev_version,
-                    new_version,
+                # 回读 UPSERT 后的 version，作为进程内缓存的真值。
+                cur.execute(
+                    "SELECT version FROM fr_factor_meta WHERE factor_id=%s",
+                    (factor_id,),
                 )
-                return new_version
+                row = cur.fetchone()
+            c.commit()
+        if not row:
+            # 理论不可达：我们刚 INSERT/UPDATE 过同一行。真走到这里说明 DB 异常。
+            raise RuntimeError(
+                f"UPSERT fr_factor_meta 后找不到 factor_id={factor_id!r}"
+            )
+        new_version = int(row["version"])
+        logger.info(
+            "UPSERT 因子 %s (version=%d, code_hash=%s...)",
+            factor_id,
+            new_version,
+            code_hash[:8],
+        )
+        return new_version

@@ -4,7 +4,8 @@
 
 直觉：观察"更早的 window 天"涨幅，跳过最近 ``skip`` 天以避开短期反转噪声。
 典型参数是 12-1：window=252、skip=20（月），此处 MVP 默认 120-5。
-预热期 = ``window + skip + 5`` 自然日。
+预热期 = ``int((window + skip) * 1.5) + 10`` 自然日（交易日 → 自然日折算 +
+长假 buffer）。
 """
 from __future__ import annotations
 
@@ -40,7 +41,8 @@ class MomentumN(BaseFactor):
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
         skip = int(params.get("skip", self.default_params["skip"]))
-        return window + skip + 5
+        # (window + skip) 是总回看的交易日跨度；× 1.5 + 10 折算自然日并覆盖长假。
+        return int((window + skip) * 1.5) + 10
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))

@@ -3,7 +3,10 @@
 定义：``factor_t = -(close_t / close_{t-N} - 1)``。
 
 直觉：过去 N 日**跌得多**的股票更有回升空间，取负号后因子值越高越看多。
-预热期 = ``N + 5`` 自然日（+5 为周末 / 假期 buffer，确保至少拿到 N 个交易日）。
+预热期 = ``int(N * 1.5) + 10`` 自然日：
+- 周末 / 节假日会让 N 个交易日对应更长的自然日（约 1.4 倍）；
+- 再加 10 天兜住春节 / 国庆等长假；
+- 相比旧公式 ``N + 5``，新公式在 N≥20 时都能稳定覆盖。
 """
 from __future__ import annotations
 
@@ -31,9 +34,9 @@ class ReversalN(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        # +5 自然日 buffer：抵消 pct_change 需要 window 个"前值"，
-        # 再加周末 / 节假日导致 window 交易日 > window 自然日的空窗。
-        return window + 5
+        # 1.5× + 10 的 buffer：交易日 → 自然日折算约 1.4×（每周去掉 2 个周末），
+        # 1.5× 留余量；+10 抵御春节 / 国庆这类长假。
+        return int(window * 1.5) + 10
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))

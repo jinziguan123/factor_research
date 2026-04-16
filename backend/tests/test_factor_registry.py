@@ -74,8 +74,8 @@ def test_get_instance():
     reg.scan_and_register("backend.factors")
 
     inst = reg.get("reversal_n")
-    # required_warmup 按 params 计算：window=20 + 5 = 25。
-    assert inst.required_warmup({"window": 20}) == 25
+    # required_warmup 按 params 计算：int(20 * 1.5) + 10 = 40。
+    assert inst.required_warmup({"window": 20}) == 40
     # 类级属性被正确保留。
     assert inst.factor_id == "reversal_n"
     assert inst.category == "reversal"
