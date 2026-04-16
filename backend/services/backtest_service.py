@@ -33,6 +33,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from backend.config import settings
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
 from backend.services.params_hash import params_hash as _hash
@@ -41,11 +42,9 @@ from backend.storage.mysql_client import mysql_conn
 
 log = logging.getLogger(__name__)
 
-# parquet 产物根目录：工程内 data/artifacts/<run_id>/...，方便本地开发直接看；
-# 生产 Docker 化时 mount 到卷上即可，无需改代码。
-ARTIFACT_DIR = Path(
-    "/Users/jinziguan/Desktop/quantitativeTradeProject/factor_research/data/artifacts"
-)
+# parquet 产物根目录：由 settings.artifact_dir 驱动，运行时按 <run_id> 建子目录；
+# 生产 Docker 化时通过 FR_ARTIFACT_DIR 环境变量指向挂载卷即可，无需改代码。
+ARTIFACT_DIR = Path(settings.artifact_dir)
 
 
 # ---------------------------- 内部辅助 ----------------------------
@@ -205,6 +204,14 @@ def _build_weights(
             # top / bottom 可能拿到同样 label（n_groups=1 等极端），前面已挡掉；
             # 这里若 bottom 空仍回退 top-only（避免单边无腿就强行 0 权重）。
             if len(bottom_syms) == 0 or top_label == bottom_label:
+                # duplicates="drop" 吃掉重复分位后，实际组数可能 < n_groups，
+                # 此时 long_short 无法成对，静默退化会误导用户，这里显式告警。
+                n_unique = int(labels.nunique())
+                log.warning(
+                    "因子值在 %s 上唯一分位只有 %d 组，long_short 退回 top-only",
+                    dt,
+                    n_unique,
+                )
                 W.loc[dt, top_syms] = 1.0 / len(top_syms)
             else:
                 W.loc[dt, top_syms] = 0.5 / len(top_syms)
@@ -424,11 +431,13 @@ def run_backtest(run_id: str, body: dict) -> None:
                     """,
                     (
                         run_id,
-                        _nan_to_none(total_return) or 0.0,
-                        _nan_to_none(annual_return) or 0.0,
-                        _nan_to_none(sharpe_ratio) or 0.0,
-                        _nan_to_none(max_drawdown) or 0.0,
-                        _nan_to_none(win_rate) or 0.0,
+                        # 注意：不能用 `_nan_to_none(x) or 0.0`，0.0 是 falsy 会把合法 0
+                        # 也替成 0.0（结果碰巧一样但语义错），海象写法只在 None 时兜底。
+                        x if (x := _nan_to_none(total_return)) is not None else 0.0,
+                        x if (x := _nan_to_none(annual_return)) is not None else 0.0,
+                        x if (x := _nan_to_none(sharpe_ratio)) is not None else 0.0,
+                        x if (x := _nan_to_none(max_drawdown)) is not None else 0.0,
+                        x if (x := _nan_to_none(win_rate)) is not None else 0.0,
                         trade_count,
                         json.dumps(stats_payload, ensure_ascii=False, allow_nan=False),
                     ),

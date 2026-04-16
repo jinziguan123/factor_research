@@ -43,6 +43,12 @@ class Settings(BaseSettings):
         default=str(_PROJECT_ROOT / "data" / "merged_adjust_factors.parquet"),
         alias="QFQ_FACTOR_PATH",
     )
+    # 回测产物（equity / orders / trades parquet）根目录；运行时按 <run_id> 建子目录。
+    # 绝对路径默认值与 qfq_factor_path 风格一致，避免 ProcessPool 子进程 cwd 漂移。
+    artifact_dir: str = Field(
+        default=str(_PROJECT_ROOT / "data" / "artifacts"),
+        alias="FR_ARTIFACT_DIR",
+    )
 
     # ---------- 因子研究平台自身参数 ----------
     # 任务进程池大小；设为 >=1 以保证至少串行执行一个任务。

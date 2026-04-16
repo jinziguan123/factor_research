@@ -37,6 +37,9 @@ def test_default_values_locked():
     # factors_dir 应落在 backend/ 目录下；qfq_factor_path 应落在项目根 data/ 下。
     assert s.factors_dir.endswith("/backend/factors")
     assert s.qfq_factor_path.endswith("/data/merged_adjust_factors.parquet")
+    # artifact_dir 默认落在项目根 data/artifacts 下，Docker 卷挂载点在此命中。
+    assert os.path.isabs(s.artifact_dir), f"artifact_dir 应为绝对路径，实际={s.artifact_dir}"
+    assert s.artifact_dir.endswith("/data/artifacts")
 
 
 def test_task_workers_ge_1(monkeypatch):
