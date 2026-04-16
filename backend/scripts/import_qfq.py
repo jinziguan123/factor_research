@@ -128,9 +128,20 @@ def run_import(
     all_symbols = _list_symbol_columns(path)
     resolver = SymbolResolver()
 
+    # 一次性批量解析，避免在 chunk 循环内对每个 symbol 触发单点 SELECT（N+1）。
+    # resolve_many 内部走 `WHERE symbol IN (...)` 一次往返；未知 symbol 会被过滤掉。
+    mapping = resolver.resolve_many(all_symbols)
+    skipped_count = len(all_symbols) - len(mapping)
+    if skipped_count > 0:
+        missing = [s for s in all_symbols if s not in mapping]
+        logger.warning(
+            "import_qfq: %d symbols not in stock_symbol, will skip; first 10: %s",
+            skipped_count,
+            missing[:10],
+        )
+
     symbol_count = 0
     row_count = 0
-    skipped_count = 0
 
     with mysql_conn() as conn:
         for batch, frame in _iter_column_chunks(path, all_symbols, chunk_size):
@@ -141,13 +152,9 @@ def run_import(
 
             rows: list[tuple] = []
             for symbol in batch:
-                sid = resolver.resolve_symbol_id(symbol)
+                sid = mapping.get(symbol)
                 if sid is None:
-                    logger.warning(
-                        "import_qfq: skip unknown symbol=%s (not in stock_symbol)",
-                        symbol,
-                    )
-                    skipped_count += 1
+                    # 未知 symbol 已在前置 WARN 一次性提示并计入 skipped_count，这里静默跳过。
                     continue
 
                 col = frame[symbol]
