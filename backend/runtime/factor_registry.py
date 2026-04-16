@@ -26,6 +26,7 @@ import inspect
 import json
 import logging
 import pkgutil
+import sys
 import threading
 from typing import Any
 
@@ -163,14 +164,28 @@ class FactorRegistry:
         """热加载入口：``importlib.reload`` 指定模块后重新扫描。
 
         watchdog 的 on_any_event 会把变动文件映射到 module_name 传进来；
-        这里用 ``reload`` 而非 ``import_module`` 以保证拿到**最新字节码**。
+        这里用 ``reload`` 而非 ``import_module`` 以保证拿到**最新字节码**
+        （否则 Python 会复用 ``sys.modules`` 缓存，热加载事实上失效）。
+
+        设计说明：
+        - 只对**已 import** 的模块调 reload（``sys.modules`` 里存在）；
+          新文件未曾 import，直接交给随后的 ``scan_and_register`` 走
+          ``import_module`` 首次加载即可。
+        - reload 失败不阻塞后续扫描：有可能是 syntax error 等半成品状态，
+          记录日志后仍然执行一次全量 scan，保证其他模块元数据正常更新。
         """
-        try:
-            module = importlib.import_module(module_name)
-            importlib.reload(module)
-        except Exception:  # noqa: BLE001
-            logger.exception("reload 模块失败：%s", module_name)
-            return []
+        if module_name in sys.modules:
+            try:
+                importlib.reload(sys.modules[module_name])
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "importlib.reload 失败：%s（将继续触发 scan）", module_name
+                )
+        else:
+            logger.debug(
+                "reload_module: %s 未在 sys.modules 中，跳过 reload 直接 scan",
+                module_name,
+            )
         return self.scan_and_register()
 
     # ---------------------------- 内部实现 ----------------------------

@@ -127,3 +127,80 @@ def test_rescan_same_code_is_idempotent():
     for fid in ("reversal_n", "momentum_n", "realized_vol", "turnover_ratio"):
         assert fid not in second
         assert reg.current_version(fid) == 1
+
+
+@pytest.mark.integration
+def test_reload_module_picks_up_source_change():
+    """修改因子源文件后 ``reload_module`` 应真正 importlib.reload，version +1。
+
+    通过写入一个临时因子文件到 ``backend/factors/custom/_hot_reload_probe.py``
+    验证端到端：首次 scan → 注册 version=1 → 改写源码 → reload_module →
+    version=2。测试结束清理文件 + sys.modules + MySQL 行。
+
+    为什么不用 tmp_path：``FactorRegistry.scan_and_register`` 走的是
+    ``pkgutil.walk_packages(backend.factors.__path__)``，只能扫到真实包目录
+    下的文件；放到 tmp_path 里 registry 根本看不见。
+    """
+    import importlib
+    import sys
+    from pathlib import Path
+
+    from backend.runtime.factor_registry import FactorRegistry
+    from backend.storage.mysql_client import mysql_conn
+
+    factors_root = Path(
+        importlib.import_module("backend.factors").__path__[0]
+    )
+    probe_path = factors_root / "custom" / "_hot_reload_probe.py"
+    mod_name = "backend.factors.custom._hot_reload_probe"
+    factor_id = "_hot_reload_probe"
+
+    # 源码 v1：description 里带 "v1" 标识以保证 hash 不同于 v2。
+    src_v1 = (
+        '"""Hot reload probe factor v1."""\n'
+        "from __future__ import annotations\n\n"
+        "import pandas as pd\n\n"
+        "from backend.factors.base import BaseFactor, FactorContext\n\n\n"
+        "class HotReloadProbe(BaseFactor):\n"
+        f'    factor_id = "{factor_id}"\n'
+        '    display_name = "Hot Reload Probe"\n'
+        '    category = "custom"\n'
+        '    description = "v1"\n'
+        "    params_schema = {}\n"
+        "    default_params = {}\n"
+        '    supported_freqs = ("1d",)\n\n'
+        "    def required_warmup(self, params: dict) -> int:\n"
+        "        return 1\n\n"
+        "    def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:\n"
+        "        return pd.DataFrame()\n"
+    )
+    src_v2 = src_v1.replace('description = "v1"', 'description = "v2"')
+
+    try:
+        probe_path.write_text(src_v1, encoding="utf-8")
+        reg = _fresh_registry()
+        updated_first = reg.scan_and_register("backend.factors")
+        assert factor_id in updated_first
+        assert reg.current_version(factor_id) == 1
+
+        # 改写源码：必须真的写到文件系统，inspect.getsource 才能读到新内容。
+        probe_path.write_text(src_v2, encoding="utf-8")
+
+        updated_second = reg.reload_module(mod_name)
+        # reload_module 返回 list 类型是弱保证，真正关键：
+        # - reload 真的发生 → inspect.getsource 看到 v2 → code_hash 变 → version+1
+        assert isinstance(updated_second, list)
+        assert factor_id in updated_second
+        assert reg.current_version(factor_id) == 2
+    finally:
+        # 清理磁盘文件 + sys.modules 缓存 + MySQL 行，避免污染后续测试。
+        if probe_path.exists():
+            probe_path.unlink()
+        sys.modules.pop(mod_name, None)
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM fr_factor_meta WHERE factor_id = %s",
+                    (factor_id,),
+                )
+            c.commit()
