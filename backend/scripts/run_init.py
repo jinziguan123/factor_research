@@ -17,10 +17,10 @@ import os
 import sys
 from pathlib import Path
 
-import pymysql
 from clickhouse_driver import Client
 
 from backend.config import settings
+from backend.storage.mysql_client import mysql_conn
 
 # 脚本自身所在目录；SQL 资源文件与本模块同目录。
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -184,33 +184,27 @@ def _safety_check() -> None:
 
 
 def _run_mysql() -> None:
-    """对 MySQL 逐句执行 ``init_mysql.sql``。"""
+    """对 MySQL 逐句执行 ``init_mysql.sql``。
+
+    用 ``storage.mysql_client.mysql_conn``（autocommit=False, DictCursor）
+    确保连接参数与运行时一致；DDL 不关心 cursor 类型。
+    """
     sql_text = (SCRIPTS_DIR / "init_mysql.sql").read_text(encoding="utf-8")
-    conn = pymysql.connect(
-        host=settings.mysql_host,
-        port=settings.mysql_port,
-        user=settings.mysql_user,
-        password=settings.mysql_password,
-        database=settings.mysql_database,
-        charset="utf8mb4",
-        autocommit=False,
-    )
-    try:
+    with mysql_conn() as conn:
         with conn.cursor() as cur:
             for stmt in _split_sql(sql_text):
                 if stmt.strip():
                     cur.execute(stmt)
         conn.commit()
-    finally:
-        conn.close()
 
 
 def _run_clickhouse() -> None:
     """对 ClickHouse 逐句执行 ``init_clickhouse.sql``。
 
     注意：``CREATE DATABASE`` 必须先执行，之后的 ``CREATE TABLE`` 才能走
-    全限定名 ``quant_data.xxx``。我们用一个全局 Client（不指定 database），
-    让每条语句都显式带库名。
+    全限定名 ``quant_data.xxx``。这里**不能**复用 ``storage.clickhouse_client.ch_client``，
+    因为它连接时就要求 ``database=quant_data`` 已经存在；run_init 的职责就是
+    创建这个库。本脚本保留裸 ``Client`` 并省略 ``database`` 参数。
     """
     sql_text = (SCRIPTS_DIR / "init_clickhouse.sql").read_text(encoding="utf-8")
     ch = Client(
