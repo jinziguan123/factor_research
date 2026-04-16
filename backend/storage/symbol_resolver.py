@@ -2,9 +2,9 @@
 
 设计要点：
 - ``stock_symbol`` 由生产链路（timing_driven）维护，本模块**只读**，不做插入；
-- ``@lru_cache`` 绑定在方法上，同一进程内多 ``SymbolResolver`` 实例共享缓存，
-  这里故意保留——因为 symbol_id 是稳定不变的业务主键，多实例共享缓存不会
-  产生不一致；
+- ``@lru_cache`` 绑定在**方法**上，``self`` 参与 hash key，因此缓存按实例隔离；
+  实践中同一进程内 ``DataService`` 只持有一个 ``SymbolResolver``，缓存命中率依旧
+  充足；若未来有频繁创建短生命周期 resolver 的场景，再重构为模块级缓存即可；
 - symbol 统一 ``strip().upper()`` 后查询，避免调用方传入小写/带空格时查不到。
 """
 from __future__ import annotations

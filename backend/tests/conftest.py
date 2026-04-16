@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import numpy as np
 import pytest
 
 # Settings 关心的所有环境变量别名；autouse fixture 会在每个用例开始前清理它们，
@@ -155,12 +156,28 @@ def seed_bar_1d(clean_stock_bar_1d):
             seq += 1
 
     with ch_client() as ch:
-        # 显式列出列名避免依赖表定义顺序；updated_at 让 DEFAULT now() 生效。
+        # clickhouse-driver 在 use_numpy=True 时要求 INSERT 走列式，且每列是
+        # ndarray / DatetimeIndex / ExtensionArray。这里把行式转列式、并按
+        # 表的物理类型选 dtype：整型列用 int64（driver 会收口到 UInt 类型），
+        # 日期列用 object dtype（保留 datetime.date），浮点列用 float64。
+        cols = list(zip(*rows))
+        columns_np = [
+            np.asarray(cols[0], dtype=np.uint32),  # symbol_id
+            np.asarray(cols[1], dtype=object),  # trade_date (datetime.date)
+            np.asarray(cols[2], dtype=np.float32),  # open
+            np.asarray(cols[3], dtype=np.float32),  # high
+            np.asarray(cols[4], dtype=np.float32),  # low
+            np.asarray(cols[5], dtype=np.float32),  # close
+            np.asarray(cols[6], dtype=np.uint64),  # volume
+            np.asarray(cols[7], dtype=np.uint32),  # amount_k
+            np.asarray(cols[8], dtype=np.uint64),  # version
+        ]
         ch.execute(
             "INSERT INTO quant_data.stock_bar_1d "
             "(symbol_id, trade_date, open, high, low, close, volume, amount_k, version) "
             "VALUES",
-            rows,
+            columns_np,
+            columnar=True,
         )
         # OPTIMIZE FINAL：让 ReplacingMergeTree 立刻合并掉重复版本，
         # 后续 SELECT ... FINAL 读到的是稳定状态。
