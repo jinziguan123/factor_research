@@ -243,10 +243,10 @@ class DataService:
         long["trade_date"] = pd.to_datetime(long["trade_date"]).dt.date
 
         n = len(long)
-        # 毫秒时间戳作 ReplacingMergeTree 的 version：单机 ms 级单调足够；
-        # 若未来出现同进程毫秒级连写同一 (factor_id, version, phash, sid, date)，
+        # 纳秒时间戳作 ReplacingMergeTree 的 version：单机纳秒级并发碰撞概率极低；
+        # 若未来出现同进程同一纳秒连写同一 (factor_id, version, phash, sid, date)，
         # 新版本号仍 > 旧版本号（batch 全行共用同一版本号时，后写的 batch 覆盖前一个）。
-        version = int(time.time() * 1000)
+        version = time.time_ns()
 
         # clickhouse-driver 在 use_numpy=True + columnar=True 下，
         # **只接受 list-of-ndarray**（按列顺序）；传 dict 会让驱动静默挂起。

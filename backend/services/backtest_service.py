@@ -418,7 +418,15 @@ def run_backtest(run_id: str, body: dict) -> None:
         # 年化（粗估）：日频 ~252 个交易日；用净值序列长度归一化避免短窗口虚高。
         n_bars = len(equity_df)
         years = max(n_bars / 252.0, 1e-9)
-        annual_return = (1.0 + total_return) ** (1.0 / years) - 1.0 if n_bars > 0 else 0.0
+        # total_return ≤ -100% 时 (1+tr) ≤ 0，幂运算对非整指数会抛 ValueError 或得复数；
+        # 策略亏光本金的极端情形语义上年化就是 -100%，直接兜底 -1.0 避免数值异常。
+        base = 1.0 + total_return
+        if n_bars == 0:
+            annual_return = 0.0
+        elif base <= 0:
+            annual_return = -1.0
+        else:
+            annual_return = base ** (1.0 / years) - 1.0
 
         with mysql_conn() as c:
             with c.cursor() as cur:
