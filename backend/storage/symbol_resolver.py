@@ -45,12 +45,28 @@ class SymbolResolver:
     def resolve_many(self, symbols: list[str]) -> dict[str, int]:
         """批量 resolve；**未知 symbol 会被过滤掉**，而不是返回 ``None``。
 
-        返回 ``{原始 symbol: symbol_id}`` 映射。注意 key 保留调用方传入的
-        原始写法（不 strip/upper），便于后续按用户输入回查；值统一为 int。
+        实现说明：
+        - 走一次批量 ``SELECT ... WHERE symbol IN (...)``，避免逐个走
+          ``resolve_symbol_id`` 导致的 N 次单点查询（即使命中 LRU，冷启动仍会放大 IO）；
+        - 不复用 ``resolve_symbol_id`` 的 ``lru_cache``，后者留给真正的单值场景；
+        - 规范化采用 ``strip().upper()``，与 ``resolve_symbol_id`` 一致；
+        - 返回 ``{原始 symbol: symbol_id}``：key 保留调用方原始写法，便于回查。
         """
-        out: dict[str, int] = {}
-        for s in symbols:
-            sid = self.resolve_symbol_id(s)
-            if sid is not None:
-                out[s] = sid
-        return out
+        if not symbols:
+            return {}
+        normalized = {s: s.strip().upper() for s in symbols}
+        norm_values = list(set(normalized.values()))
+        placeholders = ",".join(["%s"] * len(norm_values))
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    f"SELECT symbol, symbol_id FROM stock_symbol WHERE symbol IN ({placeholders})",
+                    norm_values,
+                )
+                rows = cur.fetchall()
+        sym_to_id = {r["symbol"]: int(r["symbol_id"]) for r in rows}
+        return {
+            orig: sym_to_id[norm]
+            for orig, norm in normalized.items()
+            if norm in sym_to_id
+        }

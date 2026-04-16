@@ -78,12 +78,21 @@ def _isolate_settings_env(monkeypatch):
 def _integration_db_settings(request, monkeypatch):
     """为带 ``@pytest.mark.integration`` 的用例把 settings 指向本地测试库。
 
-    为什么是“直接 monkeypatch settings 单例属性”而不是 setenv：
+    为什么是"直接 monkeypatch settings 单例属性"而不是 setenv：
     - ``backend.config.settings`` 是模块级单例，导入时已经固化；
       setenv 对已加载单例无效；
     - ``Settings(_env_file=None)`` 重建实例只能影响局部引用，
       storage 层早已 ``from backend.config import settings`` 拿到旧对象。
     monkeypatch.setattr 在用例结束后会自动回滚，不会污染后续用例。
+
+    NOTE（跨进程测试注意事项）：
+    本 fixture 只影响**当前测试进程**的 settings 单例。如果将来 Task 8 的
+    ProcessPool 集成测试从子进程发起 DB 访问，子进程会重新 ``import backend.config``
+    并拿到 ``Settings()`` 的默认值——默认 host/port/user 恰好也是 127.0.0.1 / 3306
+    / myuser，因此短期内"能跑"；但生产环境凭据走 ``.env`` 路径，完全绕过本
+    fixture。跨进程集成测试应通过：(a) 父进程先 ``monkeypatch.setenv`` 再 spawn
+    让子进程 import 时读到测试配置；或 (b) 在 ProcessPool initializer 里显式注入
+    settings；**不能依赖本 fixture 的 attr 覆盖**。
     """
     if request.node.get_closest_marker("integration") is None:
         yield

@@ -157,6 +157,58 @@ def test_qfq_adjustment_applies_to_ohlc(seed_bar_1d, seed_qfq_factor):
 
 
 @pytest.mark.integration
+def test_qfq_handles_factor_before_window(seed_bar_1d):
+    """验证：即使 fr_qfq_factor 里的因子记录远早于查询窗口，复权仍然正确。
+
+    场景：sid=2 在 2023-06-01 有一条 factor=0.3（远早于查询窗口 2024-01-x），
+    查询窗口内无任何因子。旧实现把窗口向左扩展 30 天，取不到这条 seed 因子，
+    最终 ffill 失败被 1.0 兜底 → 产出错误的未复权价；新实现的 seed 查询
+    应能把 0.3 传播到整个查询窗口。
+    """
+    from backend.storage.data_service import DataService
+    from backend.storage.mysql_client import mysql_conn
+
+    # 清空 sid=2 的既有因子（seed_bar_1d 不触发 clean_qfq_factor，所以手工处理），
+    # 再插一条远早于查询窗口的记录。
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=2")
+            cur.execute(
+                "INSERT INTO fr_qfq_factor "
+                "(symbol_id, trade_date, factor, source_file_mtime) "
+                "VALUES (2, '2023-06-01', 0.3, 1700000000)"
+            )
+        c.commit()
+    try:
+        svc = DataService()
+        raw = svc.load_panel(
+            ["000002.SZ"],
+            date(2024, 1, 2),
+            date(2024, 1, 10),
+            field="close",
+            adjust="none",
+        )
+        adj = svc.load_panel(
+            ["000002.SZ"],
+            date(2024, 1, 2),
+            date(2024, 1, 10),
+            field="close",
+            adjust="qfq",
+        )
+        # 查询窗口远晚于 2023-06-01 的唯一因子；seed 查询应把 0.3 传上来。
+        assert not raw.empty, "seed_bar_1d 应为 sid=2 写入了 2024-01 的行情"
+        for ts in raw.index:
+            assert adj.loc[ts, "000002.SZ"] == pytest.approx(
+                raw.loc[ts, "000002.SZ"] * 0.3, rel=1e-6
+            ), f"日期 {ts} 的复权价不等于 raw * 0.3"
+    finally:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=2")
+            c.commit()
+
+
+@pytest.mark.integration
 def test_resolve_pool_returns_ordered_symbols():
     """resolve_pool 需按 stock_pool_symbol.sort_order 返回 symbol 列表。"""
     from backend.storage.data_service import DataService
