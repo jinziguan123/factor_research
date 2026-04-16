@@ -63,7 +63,7 @@ QFQ_FACTOR_PATH=./data/merged_adjust_factors.parquet
 FR_TASK_WORKERS=2
 FR_LOG_LEVEL=INFO
 FR_HOT_RELOAD=true
-FR_OWNER_KEY=default
+FR_OWNER_KEY=factor_research
 FR_FACTORS_DIR=./backend/factors
 ```
 
@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     task_workers: int = 2
     log_level: str = "INFO"
     hot_reload: bool = True
-    owner_key: str = "default"
+    owner_key: str = "factor_research"
     factors_dir: str = "./backend/factors"
 
     class Config:
@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     task_workers: int = Field(2, alias="FR_TASK_WORKERS")
     log_level: str = Field("INFO", alias="FR_LOG_LEVEL")
     hot_reload: bool = Field(True, alias="FR_HOT_RELOAD")
-    owner_key: str = Field("default", alias="FR_OWNER_KEY")
+    owner_key: str = Field("factor_research", alias="FR_OWNER_KEY")
     factors_dir: str = Field("./backend/factors", alias="FR_FACTORS_DIR")
 
 settings = Settings()
@@ -196,50 +196,33 @@ git commit -m "feat(backend): 初始化 FastAPI 脚手架与配置"
 
 **Step 1: 写 init_mysql.sql**
 
-完整包含 §3.1 里的三张新表（`factor_meta`、`factor_eval_runs`、`factor_eval_metrics`）+ `ALTER TABLE backtest_runs`。对已有表（stock_pool / stock_pool_symbol / stock_bar_import_job / backtest_runs / backtest_metrics / backtest_artifacts）用 `CREATE TABLE IF NOT EXISTS`。
+只包含 factor_research 专属的新表（全部 `fr_` 前缀）。生产已有的 `stock_symbol` / `stock_pool` / `stock_pool_symbol` 等不动。所有 DDL 完整版见设计文档 §3.1。
 
 ```sql
--- stock_basic（新增，记录 symbol_id ↔ symbol 映射）
-CREATE TABLE IF NOT EXISTS `stock_basic` (
-  `symbol_id`  int unsigned NOT NULL AUTO_INCREMENT,
-  `symbol`     varchar(16) NOT NULL,
-  `name`       varchar(64) DEFAULT NULL,
-  `exchange`   varchar(8)  DEFAULT NULL,
-  `list_date`  date        DEFAULT NULL,
-  `delist_date` date       DEFAULT NULL,
-  `is_active`  tinyint(1) NOT NULL DEFAULT 1,
-  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`symbol_id`),
-  UNIQUE KEY `uk_symbol` (`symbol`)
+-- 【新增】前复权因子（生产库无此表）
+CREATE TABLE IF NOT EXISTS `fr_qfq_factor` (
+  `symbol_id`         int unsigned NOT NULL,
+  `trade_date`        date NOT NULL,
+  `factor`            double NOT NULL,
+  `source_file_mtime` bigint unsigned NOT NULL DEFAULT 0,
+  `created_at`        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`symbol_id`, `trade_date`),
+  KEY `idx_trade_date` (`trade_date`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- qfq_factor（复用 timing_driven 表结构）
-CREATE TABLE IF NOT EXISTS `qfq_factor` (
-  `symbol_id`    int unsigned NOT NULL,
-  `trade_date`   date NOT NULL,
-  `factor`       double NOT NULL,
-  `source_mtime` bigint unsigned NOT NULL,
-  PRIMARY KEY (`symbol_id`, `trade_date`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- 【新增】factor_meta
-CREATE TABLE IF NOT EXISTS `factor_meta` (...);   -- 完整 DDL 见设计文档 §3.1
-
--- 【新增】factor_eval_runs / factor_eval_metrics
-CREATE TABLE IF NOT EXISTS `factor_eval_runs` (...);
-CREATE TABLE IF NOT EXISTS `factor_eval_metrics` (...);
-
--- 既有 stock_pool / stock_pool_symbol / stock_bar_import_job / backtest_runs / backtest_metrics / backtest_artifacts 保持用户提供的 DDL
-
--- 扩 backtest_runs
-ALTER TABLE `backtest_runs`
-  ADD COLUMN IF NOT EXISTS `factor_id`      varchar(64) DEFAULT NULL,
-  ADD COLUMN IF NOT EXISTS `factor_version` int unsigned DEFAULT NULL,
-  ADD COLUMN IF NOT EXISTS `pool_id`        bigint unsigned DEFAULT NULL,
-  ADD COLUMN IF NOT EXISTS `params_hash`    char(40) DEFAULT NULL,
-  ADD COLUMN IF NOT EXISTS `freq`           varchar(8) NOT NULL DEFAULT '1d';
+-- 【新增】fr_factor_meta / fr_factor_eval_runs / fr_factor_eval_metrics
+-- 【新增】fr_backtest_runs / fr_backtest_metrics / fr_backtest_artifacts
+-- 完整 DDL 见设计文档 §3.1，所有表均有 IF NOT EXISTS
+CREATE TABLE IF NOT EXISTS `fr_factor_meta` (...);
+CREATE TABLE IF NOT EXISTS `fr_factor_eval_runs` (...);
+CREATE TABLE IF NOT EXISTS `fr_factor_eval_metrics` (...);
+CREATE TABLE IF NOT EXISTS `fr_backtest_runs` (...);
+CREATE TABLE IF NOT EXISTS `fr_backtest_metrics` (...);
+CREATE TABLE IF NOT EXISTS `fr_backtest_artifacts` (...);
 ```
+
+**不建**：`stock_symbol` / `stock_pool` / `stock_pool_symbol` / `stock_bar_import_job` / `backtest_runs` 等 —— 生产已有，仅复用（读）或隔离 owner_key（读写 stock_pool）。
 
 **Step 2: 写 init_clickhouse.sql**
 
@@ -348,11 +331,11 @@ SCRIPTS = Path(__file__).parent.parent / "scripts"
 
 def test_mysql_sql_exists():
     sql = (SCRIPTS / "init_mysql.sql").read_text(encoding="utf-8")
-    assert "factor_meta" in sql
-    assert "factor_eval_runs" in sql
-    assert "factor_eval_metrics" in sql
-    assert "stock_basic" in sql
-    assert "qfq_factor" in sql
+    assert "fr_factor_meta" in sql
+    assert "fr_factor_eval_runs" in sql
+    assert "fr_factor_eval_metrics" in sql
+    assert "stock_symbol" in sql
+    assert "fr_qfq_factor" in sql
 
 def test_clickhouse_sql_exists():
     sql = (SCRIPTS / "init_clickhouse.sql").read_text(encoding="utf-8")
@@ -439,7 +422,7 @@ def mysql_conn():
 **Step 3: 写测试 test_symbol_resolver.py**
 
 ```python
-def test_resolve_symbol_roundtrip(stock_basic_seeded):
+def test_resolve_symbol_roundtrip(stock_symbol_seeded):
     from backend.storage.symbol_resolver import SymbolResolver
     r = SymbolResolver()
     sid = r.resolve_symbol_id("000001.SZ")
@@ -468,7 +451,7 @@ class SymbolResolver:
         symbol = symbol.strip().upper()
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute("SELECT symbol_id FROM stock_basic WHERE symbol=%s", (symbol,))
+                cur.execute("SELECT symbol_id FROM stock_symbol WHERE symbol=%s", (symbol,))
                 row = cur.fetchone()
         return int(row["symbol_id"]) if row else None
 
@@ -476,7 +459,7 @@ class SymbolResolver:
     def resolve_symbol(self, symbol_id: int) -> str | None:
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute("SELECT symbol FROM stock_basic WHERE symbol_id=%s", (symbol_id,))
+                cur.execute("SELECT symbol FROM stock_symbol WHERE symbol_id=%s", (symbol_id,))
                 row = cur.fetchone()
         return row["symbol"] if row else None
 
@@ -484,7 +467,7 @@ class SymbolResolver:
         return {s: self.resolve_symbol_id(s) for s in symbols if self.resolve_symbol_id(s)}
 ```
 
-Run → PASS（前置：先在 stock_basic 表插入测试数据；fixture 在 conftest.py）
+Run → PASS（前置：先在 stock_symbol 表插入测试数据；fixture 在 conftest.py）
 
 **Step 5: data_service.py 核心**
 
@@ -564,7 +547,7 @@ class DataService:
                 cur.execute(
                     """
                     SELECT b.symbol FROM stock_pool_symbol s
-                    JOIN stock_basic b ON b.symbol_id = s.symbol_id
+                    JOIN stock_symbol b ON b.symbol_id = s.symbol_id
                     WHERE s.pool_id=%s ORDER BY s.sort_order
                     """, (pool_id,),
                 )
@@ -575,7 +558,7 @@ class DataService:
             with c.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT symbol_id, trade_date, factor FROM qfq_factor
+                    SELECT symbol_id, trade_date, factor FROM fr_qfq_factor
                     WHERE symbol_id IN %s AND trade_date BETWEEN %s AND %s
                     """,
                     (tuple(sid_list), start, end),
@@ -649,36 +632,100 @@ git commit -m "feat(backend): 数据读取层 (ClickHouse/MySQL/SymbolResolver/D
 
 **Step 1: import_qfq.py**
 
-从 `/Users/jinziguan/Desktop/quantitativeTradeProject/timing_driven_backtest/backend/adjust_factor_importer.py` 拷贝代码，改 import 为：
+从 `/Users/jinziguan/Desktop/quantitativeTradeProject/timing_driven_backtest/backend/adjust_factor_importer.py` 拷贝代码骨架，重写如下（关键区别：**不再插入 stock_symbol**，因为生产 `stock_symbol.code` 和 `market` 字段是 NOT NULL，由 timing_driven 负责维护；本脚本遇到 parquet 中 stock_symbol 不存在的 symbol 时直接跳过并记录 WARN）：
+
 ```python
+from __future__ import annotations
+import argparse, logging
+from pathlib import Path
+import pandas as pd
+import pyarrow.parquet as pq
 from backend.storage.mysql_client import mysql_conn
 from backend.storage.symbol_resolver import SymbolResolver
-```
-并把 `MysqlBarStorage.upsert_symbol` / `upsert_qfq_factor_rows` 改写为直接 SQL：
+from backend.config import settings
 
-```python
-def upsert_symbol(conn, symbol: str) -> int:
-    symbol = symbol.strip().upper()
-    with conn.cursor() as cur:
-        cur.execute("INSERT IGNORE INTO stock_basic (symbol) VALUES (%s)", (symbol,))
-        cur.execute("SELECT symbol_id FROM stock_basic WHERE symbol=%s", (symbol,))
-        return int(cur.fetchone()["symbol_id"])
+log = logging.getLogger(__name__)
 
-def upsert_qfq_rows(conn, rows: list[tuple]) -> int:
-    if not rows:
-        return 0
+def _list_symbol_columns(file_path: Path) -> list[str]:
+    schema = pq.read_schema(file_path)
+    names = list(schema.names)
+    # 剔除 pandas 索引列
+    import json
+    meta = schema.metadata or {}
+    pandas_meta = meta.get(b"pandas")
+    if pandas_meta:
+        idx_cols = set()
+        for item in json.loads(pandas_meta.decode()).get("index_columns", []):
+            if isinstance(item, str):
+                idx_cols.add(item)
+            elif isinstance(item, dict) and item.get("field_name"):
+                idx_cols.add(item["field_name"])
+        names = [n for n in names if n not in idx_cols]
+    return names
+
+def _iter_column_chunks(file_path: Path, chunk_size: int = 500):
+    syms = _list_symbol_columns(file_path)
+    for start in range(0, len(syms), chunk_size):
+        batch = syms[start:start + chunk_size]
+        yield batch, pd.read_parquet(file_path, columns=batch)
+
+def _upsert_qfq_rows(conn, rows: list[tuple]) -> int:
+    if not rows: return 0
     with conn.cursor() as cur:
         cur.executemany(
-            """
-            INSERT INTO qfq_factor (symbol_id, trade_date, factor, source_mtime)
-            VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE factor=VALUES(factor), source_mtime=VALUES(source_mtime)
-            """, rows,
+            """INSERT INTO fr_qfq_factor (symbol_id, trade_date, factor, source_file_mtime)
+               VALUES (%s, %s, %s, %s)
+               ON DUPLICATE KEY UPDATE
+                 factor=VALUES(factor),
+                 source_file_mtime=VALUES(source_file_mtime)""",
+            rows,
         )
         return cur.rowcount
+
+def run_import(file_path: Path | str | None = None, chunk_size: int = 500) -> dict:
+    file_path = Path(file_path or settings.qfq_factor_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"parquet 不存在: {file_path}")
+    source_mtime = int(file_path.stat().st_mtime)
+    resolver = SymbolResolver()
+    total_rows = 0; total_symbols = 0; skipped: list[str] = []
+
+    for batch_syms, frame in _iter_column_chunks(file_path, chunk_size):
+        rows: list[tuple] = []
+        for symbol in batch_syms:
+            sid = resolver.resolve_symbol_id(symbol)
+            if not sid:
+                skipped.append(symbol); continue
+            series = frame[symbol].dropna()
+            for trade_date, factor in series.items():
+                rows.append((sid, pd.Timestamp(trade_date).date(), float(factor), source_mtime))
+        if rows:
+            with mysql_conn() as c:
+                try:
+                    total_rows += _upsert_qfq_rows(c, rows); c.commit()
+                except Exception:
+                    c.rollback(); raise
+        total_symbols += len(batch_syms) - (len(skipped) if total_symbols == 0 else 0)
+
+    if skipped:
+        log.warning("跳过 %d 个在 stock_symbol 中找不到的代码（前 10 个：%s）",
+                    len(skipped), skipped[:10])
+    return {"file_path": str(file_path), "symbol_count": total_symbols,
+            "row_count": total_rows, "skipped_count": len(skipped),
+            "source_file_mtime": source_mtime}
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--file-path", default=None, help="默认读取 settings.qfq_factor_path")
+    p.add_argument("--chunk-size", type=int, default=500)
+    args = p.parse_args()
+    print(run_import(args.file_path, args.chunk_size))
+
+if __name__ == "__main__":
+    main()
 ```
 
-入口保留 argparse 签名兼容，默认从 `settings.qfq_factor_path` 读取。
+关键设计：**stock_symbol 由 timing_driven 维护 → 本脚本只读不写**。若 parquet 含有生产 stock_symbol 里没有的股票代码，记录 WARN 跳过；待 timing_driven 补齐后重跑即可。
 
 **Step 2: aggregate_bar_1d.py**
 
@@ -884,11 +931,11 @@ class FactorRegistry:
     def _persist_meta(self, cls: type, code_hash: str) -> None:
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute("SELECT version, code_hash FROM factor_meta WHERE factor_id=%s", (cls.factor_id,))
+                cur.execute("SELECT version, code_hash FROM fr_factor_meta WHERE factor_id=%s", (cls.factor_id,))
                 row = cur.fetchone()
                 if row is None:
                     cur.execute("""
-                        INSERT INTO factor_meta
+                        INSERT INTO fr_factor_meta
                           (factor_id, display_name, category, description,
                            params_schema, default_params, supported_freqs,
                            code_hash, version, is_active)
@@ -902,7 +949,7 @@ class FactorRegistry:
                     ))
                 elif row["code_hash"] != code_hash:
                     cur.execute("""
-                        UPDATE factor_meta SET
+                        UPDATE fr_factor_meta SET
                           display_name=%s, category=%s, description=%s,
                           params_schema=%s, default_params=%s, supported_freqs=%s,
                           code_hash=%s, version=version+1
@@ -919,7 +966,7 @@ class FactorRegistry:
     def current_version(self, factor_id: str) -> int:
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute("SELECT version FROM factor_meta WHERE factor_id=%s", (factor_id,))
+                cur.execute("SELECT version FROM fr_factor_meta WHERE factor_id=%s", (factor_id,))
                 r = cur.fetchone()
                 return int(r["version"]) if r else 1
 ```
@@ -1251,7 +1298,7 @@ def _set_status(run_id, *, status=None, progress=None, error=None, started=False
     vals.append(run_id)
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute(f"UPDATE factor_eval_runs SET {','.join(sets)} WHERE run_id=%s", vals)
+            cur.execute(f"UPDATE fr_factor_eval_runs SET {','.join(sets)} WHERE run_id=%s", vals)
         c.commit()
 
 def run_eval(run_id: str, body: dict) -> None:
@@ -1311,7 +1358,7 @@ def run_eval(run_id: str, body: dict) -> None:
         with mysql_conn() as c:
             with c.cursor() as cur:
                 cur.execute("""
-                    REPLACE INTO factor_eval_metrics
+                    REPLACE INTO fr_factor_eval_metrics
                     (run_id, ic_mean, ic_std, ic_ir, ic_win_rate, ic_t_stat,
                      rank_ic_mean, rank_ic_std, rank_ic_ir,
                      turnover_mean, long_short_sharpe, long_short_annret, payload_json)
@@ -1434,7 +1481,7 @@ def _update(run_id, **kw):
     vals.append(run_id)
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute(f"UPDATE backtest_runs SET {','.join(sets)} WHERE run_id=%s", vals)
+            cur.execute(f"UPDATE fr_backtest_runs SET {','.join(sets)} WHERE run_id=%s", vals)
         c.commit()
 
 def _load_or_compute_factor(data, reg, body, params, phash):
@@ -1506,7 +1553,7 @@ def run_backtest(run_id: str, body: dict) -> None:
 
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute("""REPLACE INTO backtest_metrics
+                cur.execute("""REPLACE INTO fr_backtest_metrics
                   (run_id,total_return,annual_return,sharpe_ratio,max_drawdown,win_rate,trade_count,payload_json)
                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""", (
                     run_id,
@@ -1519,7 +1566,7 @@ def run_backtest(run_id: str, body: dict) -> None:
                     json.dumps({k: (float(v) if isinstance(v,(int,float)) else str(v)) for k,v in stats.items()}),
                 ))
                 for art_type, fname in [("equity","equity.parquet"),("orders","orders.parquet"),("trades","trades.parquet")]:
-                    cur.execute("""REPLACE INTO backtest_artifacts
+                    cur.execute("""REPLACE INTO fr_backtest_artifacts
                       (run_id, artifact_type, artifact_path) VALUES (%s,%s,%s)""",
                       (run_id, art_type, str(art_dir/fname)))
             c.commit()
@@ -1778,7 +1825,7 @@ def get_pool(pool_id: int):
             p = cur.fetchone()
             if not p: raise HTTPException(404, "pool not found")
             cur.execute("""SELECT b.symbol, b.name FROM stock_pool_symbol s
-                           JOIN stock_basic b ON b.symbol_id = s.symbol_id
+                           JOIN stock_symbol b ON b.symbol_id = s.symbol_id
                            WHERE s.pool_id=%s ORDER BY s.sort_order""", (pool_id,))
             p["symbols"] = cur.fetchall()
     return ok(p)
@@ -1854,7 +1901,7 @@ def create_eval(body: CreateEvalIn, bt: BackgroundTasks):
     run_id = uuid.uuid4().hex
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute("""INSERT INTO factor_eval_runs
+            cur.execute("""INSERT INTO fr_factor_eval_runs
               (run_id, factor_id, factor_version, params_hash, params_json,
                pool_id, freq, start_date, end_date, forward_periods, n_groups,
                status, progress, created_at)
@@ -1870,7 +1917,7 @@ def create_eval(body: CreateEvalIn, bt: BackgroundTasks):
 
 @router.get("")
 def list_evals(factor_id: str | None = None, status: str | None = None, limit: int = 50):
-    sql = "SELECT * FROM factor_eval_runs WHERE 1=1"
+    sql = "SELECT * FROM fr_factor_eval_runs WHERE 1=1"
     params = []
     if factor_id: sql += " AND factor_id=%s"; params.append(factor_id)
     if status:    sql += " AND status=%s";    params.append(status)
@@ -1883,10 +1930,10 @@ def list_evals(factor_id: str | None = None, status: str | None = None, limit: i
 def get_eval(run_id: str):
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute("SELECT * FROM factor_eval_runs WHERE run_id=%s", (run_id,))
+            cur.execute("SELECT * FROM fr_factor_eval_runs WHERE run_id=%s", (run_id,))
             run = cur.fetchone()
             if not run: raise HTTPException(404, "not found")
-            cur.execute("SELECT * FROM factor_eval_metrics WHERE run_id=%s", (run_id,))
+            cur.execute("SELECT * FROM fr_factor_eval_metrics WHERE run_id=%s", (run_id,))
             m = cur.fetchone()
     if m and m.get("payload_json"):
         m["payload"] = json.loads(m.pop("payload_json"))
@@ -1897,14 +1944,14 @@ def get_eval(run_id: str):
 def get_eval_status(run_id: str):
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute("SELECT run_id, status, progress, error_message, started_at, finished_at FROM factor_eval_runs WHERE run_id=%s",
+            cur.execute("SELECT run_id, status, progress, error_message, started_at, finished_at FROM fr_factor_eval_runs WHERE run_id=%s",
                         (run_id,))
             r = cur.fetchone()
     if not r: raise HTTPException(404, "not found")
     return ok(r)
 ```
 
-**Step 5: routers/backtests.py** —— 结构同 evals.py，只是换用 backtest_runs 表 + backtest_entry
+**Step 5: routers/backtests.py** —— 结构同 evals.py，只是换用 `fr_backtest_runs` 表 + `backtest_entry`
 
 （省略样板，参照 evals.py）
 

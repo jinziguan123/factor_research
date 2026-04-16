@@ -24,18 +24,19 @@
 | Q2 | 数据频率 | MVP 仅日频；架构保留多频率扩展位（1d/1m/5m/...） |
 | Q3 | 日频数据落地 | 新建 ClickHouse 物化表 `stock_bar_1d`，每日增量聚合 |
 | Q3a | 前复权 parquet 获取方式 | 手工从 Windows 主机拷贝到开发机 |
-| Q3b | 前复权因子存储 | 落 MySQL（复用 `QfqFactorReader`），读取时内存相乘 |
+| Q3b | 前复权因子存储 | 落 MySQL 新表 `fr_qfq_factor`（生产库原无此表），读取时内存相乘 |
 | Q4 | 因子定义方式 | Python 函数/类注册，支持热加载 |
 | Q5 | 因子值持久化 | 永久入库 ClickHouse `factor_value_1d`，按 `(factor_id, version, params_hash)` 复用 |
 | Q6 | 后端框架与任务模型 | FastAPI + ProcessPoolExecutor（经由 BackgroundTasks 提交） |
 | Q7 | 前端技术栈 | Vue3 + TypeScript + Vite + Naive UI + ECharts + Vue Query + Pinia |
-| Q8.1 | 用户体系 | 单用户（`owner_key=default`），不做登录 |
+| Q8.1 | 用户体系 | 单用户（`owner_key=factor_research`，与 timing_driven 的默认池隔离），不做登录 |
 | Q8.2 | 股票池管理 UI | 可增删改 + 批量粘贴导入 |
 | Q8.3 | MVP 评估指标 | IC / Rank IC / 分组收益 / 多空组合 / 换手率 / 因子值分布 / 累计曲线 |
 | Q8.3 | 默认参数 | 5 分组，forward_periods = 1/5/10 日 |
 | Q8.4 | 评估 vs 回测 | 两者都做（评估算指标；回测基于因子构造组合走 VectorBT） |
 | Q8.5 | 部署形态 | 本地开发 + docker-compose 内网部署 |
 | UI | 视觉风格 | Binance.US 风格（Binance Yellow `#F0B90B` 为主色） |
+| DB | 表命名规则 | 本项目新建表一律加 `fr_` 前缀与主业务表分离；复用 `stock_symbol` / `stock_pool` / `stock_pool_symbol` |
 
 ## 2. 整体架构
 
@@ -62,17 +63,19 @@
 └──────┬──────────────────────────┬──────────────────┘
        │                          │
        ▼                          ▼
-┌─────────────┐            ┌────────────────────┐
-│  MySQL      │            │  ClickHouse        │
-│ (元数据+任务)│            │  (K 线 + 因子值)    │
-│             │            │                    │
-│ stock_pool  │            │ stock_bar_1m       │
-│ stock_basic │            │ stock_bar_1d  ← 新 │
-│ qfq_factor  │            │ factor_value_1d ←新│
-│ factor_meta │            │                    │
-│ eval_runs   │            │                    │
-│ bt_runs     │            │                    │
-└─────────────┘            └────────────────────┘
+┌────────────────────┐      ┌────────────────────┐
+│  MySQL             │      │  ClickHouse        │
+│ 共享（只读/读写）    │      │  (K 线 + 因子值)    │
+│ ├─ stock_symbol    │      │ stock_bar_1m       │
+│ ├─ stock_pool      │      │ stock_bar_1d  ← 新 │
+│ └─ stock_pool_symbol│     │ factor_value_1d ←新│
+│                    │      │                    │
+│ factor_research 新建│      │                    │
+│ ├─ fr_qfq_factor   │      │                    │
+│ ├─ fr_factor_meta  │      │                    │
+│ ├─ fr_factor_eval_*│      │                    │
+│ └─ fr_backtest_*   │      │                    │
+└────────────────────┘      └────────────────────┘
                                      ▲
                                      │ 手工拷贝 parquet
                      ┌──────────────────────────────┐
@@ -83,19 +86,38 @@
 
 **关键数据流：**
 
-1. **冷启动一次性**：用 `import_qfq.py` 把前复权 parquet 导入 MySQL；用 `aggregate_bar_1d.py` 从 `stock_bar_1m` 物化出 `stock_bar_1d`
+1. **冷启动一次性**：用 `import_qfq.py` 把前复权 parquet 导入 MySQL 新表 `fr_qfq_factor`；用 `aggregate_bar_1d.py` 从 `stock_bar_1m` 物化出 `stock_bar_1d`
 2. **每日增量**：新交易日的分钟 K 线到位后，触发 `stock_bar_1d` 增量任务；新版 parquet 到来时重导复权因子
-3. **因子评估**：前端提交 → 后台 ProcessPool → 读日线（前复权）→ `factor.compute()` → 落 `factor_value_1d` → 算 IC / 分组 / 换手 → 落 `factor_eval_runs/metrics` → 前端轮询拉结果
-4. **因子回测**：从 `factor_value_1d` 查因子值（命中缓存就复用）→ 构造持仓矩阵 → `vbt.Portfolio.from_orders` → 落 `backtest_runs/metrics/artifacts`
-5. **热加载**：watchdog 监听 `backend/factors/`；文件变动时重新 import 模块、扫描 `BaseFactor` 子类、更新 `factor_meta`；worker 进程通过 `max_tasks_per_child=5` 自然 recycle 获取新版本
+3. **因子评估**：前端提交 → 后台 ProcessPool → 读日线（前复权）→ `factor.compute()` → 落 `factor_value_1d` → 算 IC / 分组 / 换手 → 落 `fr_factor_eval_runs` / `fr_factor_eval_metrics` → 前端轮询拉结果
+4. **因子回测**：从 `factor_value_1d` 查因子值（命中缓存就复用）→ 构造持仓矩阵 → `vbt.Portfolio.from_orders` → 落 `fr_backtest_runs` / `fr_backtest_metrics` / `fr_backtest_artifacts`
+5. **热加载**：watchdog 监听 `backend/factors/`；文件变动时重新 import 模块、扫描 `BaseFactor` 子类、更新 `fr_factor_meta`；worker 进程通过 `max_tasks_per_child=5` 自然 recycle 获取新版本
 
 ## 3. 数据层
 
-### 3.1 MySQL 新增/扩展表
+### 3.1 MySQL 表
+
+**复用（生产库已有，本项目只读；不做 DDL）**
+
+- `stock_symbol`（symbol_id ↔ 'SSE/SZSE 代码' ↔ name 的映射，生产库已存在 16790+ 条）
+- `stock_pool` / `stock_pool_symbol`（股票池；factor_research 用 `owner_key='factor_research'` 与 timing_driven 的数据隔离）
+
+**新建（factor_research 专属，统一加 `fr_` 前缀）**
 
 ```sql
+-- 【新增】前复权因子（生产库没有此表，本项目需建）
+CREATE TABLE `fr_qfq_factor` (
+  `symbol_id`         int unsigned NOT NULL,
+  `trade_date`        date NOT NULL,
+  `factor`            double NOT NULL,
+  `source_file_mtime` bigint unsigned NOT NULL DEFAULT 0,
+  `created_at`        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`        datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`symbol_id`, `trade_date`),
+  KEY `idx_trade_date` (`trade_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 【新增】因子元数据（由热加载机制维护）
-CREATE TABLE `factor_meta` (
+CREATE TABLE `fr_factor_meta` (
   `factor_id`       varchar(64)  NOT NULL,
   `display_name`    varchar(128) NOT NULL,
   `category`        varchar(64)  NOT NULL,
@@ -111,7 +133,7 @@ CREATE TABLE `factor_meta` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 【新增】因子评估任务
-CREATE TABLE `factor_eval_runs` (
+CREATE TABLE `fr_factor_eval_runs` (
   `run_id`          varchar(64) NOT NULL,
   `factor_id`       varchar(64) NOT NULL,
   `factor_version`  int unsigned NOT NULL,
@@ -135,7 +157,7 @@ CREATE TABLE `factor_eval_runs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 【新增】因子评估结果
-CREATE TABLE `factor_eval_metrics` (
+CREATE TABLE `fr_factor_eval_metrics` (
   `run_id`             varchar(64) NOT NULL,
   `ic_mean`            double, `ic_std` double, `ic_ir` double,
   `ic_win_rate`        double, `ic_t_stat` double,
@@ -147,13 +169,50 @@ CREATE TABLE `factor_eval_metrics` (
   PRIMARY KEY (`run_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 【扩展】既有 backtest_runs 扩列，复用其全部结构
-ALTER TABLE backtest_runs
-  ADD COLUMN factor_id      varchar(64)   NULL,
-  ADD COLUMN factor_version int unsigned  NULL,
-  ADD COLUMN pool_id        bigint unsigned NULL,
-  ADD COLUMN params_hash    char(40)      NULL,
-  ADD COLUMN freq           varchar(8)    NOT NULL DEFAULT '1d';
+-- 【新增】回测任务（独立一份，不改动生产 backtest_runs）
+CREATE TABLE `fr_backtest_runs` (
+  `run_id`          varchar(64) NOT NULL,
+  `name`            varchar(255) DEFAULT NULL,
+  `factor_id`       varchar(64) NOT NULL,
+  `factor_version`  int unsigned NOT NULL,
+  `params_hash`     char(40) NOT NULL,
+  `params_json`     longtext,
+  `pool_id`         bigint unsigned NOT NULL,
+  `freq`            varchar(8) NOT NULL DEFAULT '1d',
+  `start_date`      date NOT NULL,
+  `end_date`        date NOT NULL,
+  `status`          varchar(16) NOT NULL,
+  `progress`        tinyint unsigned NOT NULL DEFAULT 0,
+  `error_message`   text,
+  `created_at`      datetime(6) NOT NULL,
+  `started_at`      datetime(6) DEFAULT NULL,
+  `finished_at`     datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`run_id`),
+  KEY `idx_factor_status` (`factor_id`, `status`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 【新增】回测指标
+CREATE TABLE `fr_backtest_metrics` (
+  `run_id`        varchar(64) NOT NULL,
+  `total_return`  double NOT NULL DEFAULT 0,
+  `annual_return` double NOT NULL DEFAULT 0,
+  `sharpe_ratio`  double NOT NULL DEFAULT 0,
+  `max_drawdown`  double NOT NULL DEFAULT 0,
+  `win_rate`      double NOT NULL DEFAULT 0,
+  `trade_count`   int NOT NULL DEFAULT 0,
+  `payload_json`  longtext,
+  PRIMARY KEY (`run_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 【新增】回测产物路径
+CREATE TABLE `fr_backtest_artifacts` (
+  `run_id`         varchar(64) NOT NULL,
+  `artifact_type`  varchar(64) NOT NULL,
+  `artifact_path`  varchar(500) NOT NULL,
+  PRIMARY KEY (`run_id`, `artifact_type`),
+  KEY `idx_run_id` (`run_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
 ### 3.2 ClickHouse 新增表
@@ -282,8 +341,8 @@ class ReversalN(BaseFactor):
 
 ### 4.3 热加载
 
-- `backend/runtime/factor_registry.py`：单例 `FactorRegistry`，扫描 `backend/factors/`、注册子类、维护 `factor_meta`
-- `backend/runtime/hot_reload.py`：`watchdog` 监听 `.py` 文件；变动时 `importlib.reload` → 重新扫描 → 对比 `code_hash`，变化则 `version += 1` 并 UPDATE `factor_meta`
+- `backend/runtime/factor_registry.py`：单例 `FactorRegistry`，扫描 `backend/factors/`、注册子类、维护 `fr_factor_meta`
+- `backend/runtime/hot_reload.py`：`watchdog` 监听 `.py` 文件；变动时 `importlib.reload` → 重新扫描 → 对比 `code_hash`，变化则 `version += 1` 并 UPDATE `fr_factor_meta`
 - **热加载只作用于 API 进程**。Worker 进程启动时 `scan_and_register()` 一次；设置 `max_tasks_per_child=5`，每跑 5 个任务自然 recycle → 获取新版本
 - 紧急情况：`POST /api/factors/reload` 强制重建 ProcessPool
 
@@ -336,8 +395,8 @@ def params_hash(params: dict) -> str:
 6. close = data.load_panel(..., field="close", adjust="qfq")
 7. R[k] = close.shift(-k)/close - 1, k in forward_periods
 8. 计算 ic_series / rank_ic_series / group_returns / long_short / turnover / value_hist
-9. 聚合结构化 metrics + payload_json → INSERT factor_eval_metrics
-10. UPDATE factor_eval_runs.status='success'
+9. 聚合结构化 metrics + payload_json → INSERT fr_factor_eval_metrics
+10. UPDATE fr_factor_eval_runs.status='success'
 ```
 
 ### 5.3 进度阶段
@@ -376,7 +435,7 @@ init_cash=1e7
 3. size = W * init_cash / close
 4. vbt.Portfolio.from_orders(close, size, fees=cost_bps/1e4, freq=freq)
 5. 导出 equity / orders / trades / stats 到 parquet
-6. INSERT backtest_runs / backtest_metrics / backtest_artifacts
+6. INSERT fr_backtest_runs / fr_backtest_metrics / fr_backtest_artifacts
 ```
 
 ### 6.3 关键约束（本项目显式放弃以聚焦因子研究）
@@ -565,7 +624,7 @@ def _submit(run_id, body):
 
 ### 9.3 热加载与 worker 的协作
 
-- API 进程：watchdog 监听代码变动 → 更新 `factor_meta.code_hash/version`（前端立刻可看到新版本）
+- API 进程：watchdog 监听代码变动 → 更新 `fr_factor_meta.code_hash/version`（前端立刻可看到新版本）
 - Worker 进程：`max_tasks_per_child=5` 让进程跑完 5 个任务就退出，再启动时加载新代码
 - 手动触发：`POST /api/factors/reload` 关闭并重建 ProcessPool
 
@@ -667,7 +726,7 @@ factor_research/
 
 ## 12. 风险与开放问题
 
-1. **复权因子的时效性**：目前手工从 Windows 拷贝 parquet；若忘记更新会导致最新交易日因子值污染。建议在 UI 显示"qfq_factor 最新日期 = XXXX-XX-XX"。
+1. **复权因子的时效性**：目前手工从 Windows 拷贝 parquet；若忘记更新会导致最新交易日因子值污染。建议在 UI 显示"fr_qfq_factor 最新日期 = XXXX-XX-XX"。
 2. **ProcessPool 下的 pandas 内存占用**：5000 只股票 × 5000 日 × 多字段面板数据约几百 MB；并发 2 个任务时峰值可能 1-2 GB。MVP 够用，若扩展到更多 worker 需要监控。
 3. **VectorBT 的 freq 参数与真实调仓节奏**：回测默认每日可调仓（`rebalance_period=1`），若改成周调/月调，组合再平衡的现金管理逻辑要复核。
 4. **因子值表数据量**：按估算（5000 股 × 5000 日 × 100 因子 × 3 版本 = 7.5 亿行），ClickHouse 单机完全能扛，但 partition 策略需要监控是否有过多小 part。
