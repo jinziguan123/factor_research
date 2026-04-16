@@ -10,6 +10,10 @@
 7. 进度 100 → "success"。任何异常统一走 failed 分支，error_message 留 traceback。
 
 Task 6 不写 save_factor_values（那是 Task 7 的事），只算指标和直方图。
+
+MVP 注记：``run_eval`` 调用 ``_set_status`` 7 次 + ``REPLACE INTO fr_factor_eval_metrics`` 1 次，
+每次都独立开/关 MySQL 连接。pymysql 无内置连接池，单机串行场景无压力。
+若 Task 8 ProcessPool 并发 worker 数 >4 引起连接数紧张，可考虑把 conn 传入 _set_status 复用。
 """
 from __future__ import annotations
 
@@ -47,8 +51,13 @@ def _set_status(
     """统一更新 ``fr_factor_eval_runs`` 的状态字段。
 
     只更新显式传入的字段，避免把别的字段误写为 NULL。``started`` / ``finished``
-    为 True 时分别写入 ``started_at`` / ``finished_at = UTC now``。
+    为 True 时分别写入 ``started_at`` / ``finished_at``。
     无任何字段更新时直接 return（避免生成空 SET 语句）。
+
+    注意：started_at / finished_at 用本地时间（``datetime.now()``），不带时区。
+    本项目单机部署 + 单时区（Asia/Shanghai），避免 UTC 引入前端 -8h 展示偏差，
+    同时与其他业务表（例如 timing_driven 的 backtest_runs）语义一致。
+    如未来多时区部署，应改为 TIMESTAMP 列或统一 UTC + 前端 +8h 展示。
     """
     sets: list[str] = []
     vals: list[Any] = []
@@ -63,10 +72,10 @@ def _set_status(
         vals.append(error)
     if started:
         sets.append("started_at=%s")
-        vals.append(datetime.utcnow())
+        vals.append(datetime.now())
     if finished:
         sets.append("finished_at=%s")
-        vals.append(datetime.utcnow())
+        vals.append(datetime.now())
     if not sets:
         return
     vals.append(run_id)
@@ -257,9 +266,16 @@ def run_eval(run_id: str, body: dict) -> None:
     except Exception:
         # 任何异常（KeyError / DB 连不上 / 因子 compute 崩 / JSON 序列化失败）统一收口。
         log.exception("eval failed: run_id=%s", run_id)
-        _set_status(
-            run_id,
-            status="failed",
-            error=traceback.format_exc()[:4000],
-            finished=True,
-        )
+        # _set_status 自己也可能抛异常（例如 DB 挂了），再用 try/except 包一层，
+        # 避免 exception-in-exception 把 run 永远卡在 running 状态。
+        try:
+            _set_status(
+                run_id,
+                status="failed",
+                error=traceback.format_exc()[:4000],
+                finished=True,
+            )
+        except Exception:
+            log.exception(
+                "_set_status 记录失败时自身也抛异常: run_id=%s", run_id
+            )
