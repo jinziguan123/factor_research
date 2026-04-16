@@ -24,9 +24,11 @@ API 定位（严格遵守）：
 from __future__ import annotations
 
 import logging
+import time
 from datetime import date
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 
 from backend.storage.clickhouse_client import ch_client
@@ -175,6 +177,154 @@ class DataService:
         panel = pd.concat(
             {sym: frame[field] for sym, frame in bars.items()}, axis=1
         ).sort_index()
+        panel.columns.name = None
+        return panel
+
+    def save_factor_values(
+        self,
+        factor_id: str,
+        factor_version: int,
+        params_hash: str,
+        frame: pd.DataFrame,
+    ) -> int:
+        """把因子宽表写入 ClickHouse ``factor_value_1d``，返回写入行数。
+
+        Args:
+            factor_id: 因子主键，对应 ``fr_factor_meta.factor_id``。
+            factor_version: 因子版本号（随代码哈希变更递增），和 ``factor_id`` + ``params_hash``
+                联合定位一份缓存。
+            params_hash: 参数的 40 字符 SHA-1 摘要（``services.params_hash.params_hash``），
+                匹配 ClickHouse ``FixedString(40)``。
+            frame: 因子宽表；``index=DatetimeIndex``（trade_date），``columns=symbol``（str），
+                值为 float 因子值。NaN 行会被丢弃。
+
+        Returns:
+            实际写入的长表行数（已剔除 NaN 与无法解析的 symbol 列）。空表 / 全 NaN 会返回 0。
+
+        实现要点：
+        - 用 ``resolver.resolve_many`` 批量把 symbol 转 symbol_id，失败列直接跳过
+          （而不是写入后数据对不上 ``fr_factor_meta``）。
+        - ``version`` 用毫秒时间戳（``time.time() * 1000``）——满足
+          ``ReplacingMergeTree(version)`` 的单调要求；单机 ms 级时间戳不会重复。
+          同 run 内重复写 save 的一批行，因毫秒仍在递增，版本更高者覆盖旧行，
+          结果数据不会翻倍（``SELECT ... FINAL`` 只保留最新版本）。
+        - ``clickhouse-driver`` 在 ``use_numpy=True`` 下 INSERT 必须走 ``columnar=True``
+          且每列是 ndarray；dtype 与 schema 对齐：``UInt32`` 用 ``np.uint32``，
+          ``Date`` 用 ``object`` 承载 ``datetime.date``，``Float64`` 用 ``np.float64``。
+        """
+        if frame is None or frame.empty:
+            return 0
+
+        cols = [str(c) for c in frame.columns]
+        if not cols:
+            return 0
+        sid_map = self.resolver.resolve_many(cols)
+        if not sid_map:
+            # 没有任何 symbol 能解析，直接跳过——既不报错也不写入，由调用方日志兜底。
+            logger.warning(
+                "save_factor_values: 所有列 %s 都无法 resolve 为 symbol_id，跳过写入",
+                cols,
+            )
+            return 0
+
+        # 只保留能 resolve 的列，并按列顺序转长格式：每行 (trade_date, symbol, value)。
+        keep_cols = [c for c in cols if c in sid_map]
+        sub = frame[keep_cols]
+        # ``DataFrame.stack`` 默认会丢 NaN，正好与“只写有值的 (sid, date)”语义吻合。
+        long = sub.stack().rename("value").reset_index()
+        # stack 后两列默认名根据原 index/columns name 来；这里用位置更稳，
+        # 兼容 index.name 为 None 或 'trade_date' 等不同来源。
+        long.columns = ["trade_date", "symbol", "value"]
+        if long.empty:
+            return 0
+
+        long["symbol_id"] = long["symbol"].map(sid_map).astype("uint32")
+        # index 可能是 Timestamp；ClickHouse Date 列接受 datetime.date。
+        long["trade_date"] = pd.to_datetime(long["trade_date"]).dt.date
+
+        n = len(long)
+        # 毫秒时间戳作 ReplacingMergeTree 的 version：单机 ms 级单调足够；
+        # 若未来出现同进程毫秒级连写同一 (factor_id, version, phash, sid, date)，
+        # 新版本号仍 > 旧版本号（batch 全行共用同一版本号时，后写的 batch 覆盖前一个）。
+        version = int(time.time() * 1000)
+
+        # clickhouse-driver 在 use_numpy=True + columnar=True 下，
+        # **只接受 list-of-ndarray**（按列顺序）；传 dict 会让驱动静默挂起。
+        # conftest.seed_bar_1d 已有同款写法，这里对齐。
+        columns_np = [
+            np.array([factor_id] * n, dtype=object),
+            np.array([factor_version] * n, dtype=np.uint32),
+            np.array([params_hash] * n, dtype=object),
+            long["symbol_id"].to_numpy(dtype=np.uint32),
+            np.asarray(long["trade_date"].to_numpy(), dtype=object),
+            long["value"].to_numpy(dtype=np.float64),
+            np.array([version] * n, dtype=np.uint64),
+        ]
+        with ch_client() as ch:
+            ch.execute(
+                "INSERT INTO quant_data.factor_value_1d "
+                "(factor_id, factor_version, params_hash, symbol_id, "
+                "trade_date, value, version) VALUES",
+                columns_np,
+                columnar=True,
+            )
+        return n
+
+    def load_factor_values(
+        self,
+        factor_id: str,
+        factor_version: int,
+        params_hash: str,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """从 ``factor_value_1d`` 读取因子宽表；无数据时返回空 DataFrame。
+
+        pivot 为宽表：``index=DatetimeIndex``, ``columns=symbol``（用 resolver
+        反查 ``symbol_id``）。
+        """
+        if not symbols:
+            return pd.DataFrame()
+        sid_map = self.resolver.resolve_many(symbols)
+        if not sid_map:
+            return pd.DataFrame()
+        sid_list = sorted(set(sid_map.values()))
+
+        with ch_client() as ch:
+            rows = ch.execute(
+                """
+                SELECT symbol_id, trade_date, value
+                FROM quant_data.factor_value_1d FINAL
+                WHERE factor_id=%(fid)s
+                  AND factor_version=%(fv)s
+                  AND params_hash=%(ph)s
+                  AND symbol_id IN %(sids)s
+                  AND trade_date BETWEEN %(s)s AND %(e)s
+                """,
+                {
+                    "fid": factor_id,
+                    "fv": int(factor_version),
+                    "ph": params_hash,
+                    "sids": sid_list,
+                    "s": start,
+                    "e": end,
+                },
+            )
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=["symbol_id", "trade_date", "value"])
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+        # 反查 symbol 字符串；保留写入时的原始字符串形态（resolver.resolve_many 的 key 是原 symbol）。
+        inv = {sid: sym for sym, sid in sid_map.items()}
+        df["symbol"] = df["symbol_id"].map(inv)
+        # 极少数 id 不在 inv（symbol 列表传入后被去重）时丢弃；但正常不会发生。
+        df = df.dropna(subset=["symbol"])
+
+        panel = df.pivot(index="trade_date", columns="symbol", values="value")
+        panel = panel.sort_index()
         panel.columns.name = None
         return panel
 

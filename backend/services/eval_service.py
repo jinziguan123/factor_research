@@ -162,11 +162,9 @@ def run_eval(run_id: str, body: dict) -> None:
         # 固化到 DB 最新版本（而非 current_version 的进程快照），避免评估过程中
         # 热加载更新 version 导致任务记录与实际执行不一致。
         version = reg.latest_version_from_db(body["factor_id"])
-        _ = version  # 当前 Task 6 不写 factor_value_1d，仅保留固化逻辑备用
 
         params = body.get("params") or factor.default_params
         phash = _hash(params)
-        _ = phash  # 当前 Task 6 不写 factor_value_1d，保留 hash 备日志 / Task 7 使用
 
         data = DataService()
         symbols = data.resolve_pool(int(body["pool_id"]))
@@ -182,8 +180,30 @@ def run_eval(run_id: str, body: dict) -> None:
         )
 
         _set_status(run_id, progress=15)
-        F = factor.compute(ctx, params)
-        # Task 6 不做 save_factor_values —— 那是 Task 7 的事。
+        # Task 7 接入 factor_value_1d 缓存：相同 (factor_id, version, params_hash)
+        # 下，若缓存窗口覆盖 [start, end] 且非空，直接复用；否则全量重算并回写。
+        # 部分覆盖不做"增量补算"——保守策略，防止与上游 qfq 因子回填、数据回灌导致
+        # 缓存状态不一致；一旦窗口变大或起点更早，就整段重算。
+        cached = data.load_factor_values(
+            body["factor_id"],
+            version,
+            phash,
+            symbols,
+            start.date(),
+            end.date(),
+        )
+        if (
+            not cached.empty
+            and cached.index.min() <= start
+            and cached.index.max() >= end
+        ):
+            F = cached
+        else:
+            F = factor.compute(ctx, params)
+            # 空结果不写缓存（避免把"计算失败或池全部过滤"的空宽表固化进来，下次还会被
+            # 第二个条件 cached.empty 拒掉，逻辑上无害；但写入 0 行也没意义）。
+            if not F.empty:
+                data.save_factor_values(body["factor_id"], version, phash, F)
         _set_status(run_id, progress=40)
 
         close = data.load_panel(
