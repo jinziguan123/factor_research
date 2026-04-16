@@ -33,3 +33,6 @@ include = ["backend*"]
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 pythonpath = ["."]
+markers = [
+    "integration: 需要真实数据库（ClickHouse / MySQL）的集成测试",
+]
