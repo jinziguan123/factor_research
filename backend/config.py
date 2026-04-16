@@ -6,8 +6,15 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ``config.py`` 所在目录即 backend 根；再向上一级是 factor_research 项目根。
+# 用绝对路径作为默认值，避免 ProcessPool 子进程因 cwd 不一致导致相对路径解析错误。
+_BACKEND_ROOT = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BACKEND_ROOT.parent
 
 
 class Settings(BaseSettings):
@@ -33,7 +40,7 @@ class Settings(BaseSettings):
 
     # ---------- 复权因子 Parquet 路径 ----------
     qfq_factor_path: str = Field(
-        default="./data/merged_adjust_factors.parquet",
+        default=str(_PROJECT_ROOT / "data" / "merged_adjust_factors.parquet"),
         alias="QFQ_FACTOR_PATH",
     )
 
@@ -45,7 +52,10 @@ class Settings(BaseSettings):
     hot_reload: bool = Field(default=True, alias="FR_HOT_RELOAD")
     # factor_meta.owner 的默认归属，区分本平台与外部系统写入的因子。
     owner_key: str = Field(default="factor_research", alias="FR_OWNER_KEY")
-    factors_dir: str = Field(default="./backend/factors", alias="FR_FACTORS_DIR")
+    factors_dir: str = Field(
+        default=str(_BACKEND_ROOT / "factors"),
+        alias="FR_FACTORS_DIR",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

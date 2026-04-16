@@ -1,3 +1,9 @@
+# 依赖声明以 pyproject.toml 为唯一事实源，uv.lock 固定版本；
+# 如临时需要 requirements.txt（如某些 CI/镜像），用
+#   uv pip compile pyproject.toml -o requirements.txt
+# 生成，不要手工维护该文件，并避免提交到仓库。
+requirements.txt
+
 .venv/
 __pycache__/
 *.pyc
