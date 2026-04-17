@@ -339,7 +339,17 @@ def ic_annual_stability(ic_series: pd.Series) -> dict:
             "cv": 0.0,
         }
     # groupby 年份；index 已是 DatetimeIndex（cross_sectional_ic 保证）。
-    by_year = ic_series.groupby(ic_series.index.year).mean()
+    # dropna：某年的 IC 若全是 NaN（例如样本太稀），groupby.mean() 会返回 NaN；
+    # 这种年份不该参与稳定性判断，否则 cv 会被 NaN 污染、allow_nan=False 的
+    # payload 序列化会抛。
+    by_year = ic_series.groupby(ic_series.index.year).mean().dropna()
+    if by_year.empty:
+        return {
+            "years": [],
+            "ic_mean_by_year": [],
+            "sign_consistent": True,
+            "cv": 0.0,
+        }
     years = [int(y) for y in by_year.index]
     means = [float(v) for v in by_year.values]
     # 一致性：所有|v|>1e-10 的年份符号相同（完全 0 的年份不参与判定）。

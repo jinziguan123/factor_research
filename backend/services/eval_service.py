@@ -263,6 +263,12 @@ def _build_health(
         }
     )
 
+    # 防御式净化：所有数值字段都必须 JSON 可序列化（allow_nan=False）。
+    # 即便某个指标函数未来 return 了 NaN / inf，也不应让整个 payload 写入失败。
+    for it in items:
+        if not isinstance(it["value"], (int, float)) or not math.isfinite(it["value"]):
+            it["value"] = 0.0
+
     levels = {it["level"] for it in items}
     if "red" in levels:
         overall = "red"
