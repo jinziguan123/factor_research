@@ -260,6 +260,9 @@ def run_eval(run_id: str, body: dict) -> None:
             ),
             "turnover_series": _series_to_obj(to),
             "value_hist": hist,
+            # 多空有效样本数：ls 已在 long_short_series 里 dropna，长度即有效天数。
+            # 前端据此展示"样本不足"告警（rank 类因子 + qcut 退化时常见）。
+            "long_short_n_effective": ls_stats["long_short_n_effective"],
         }
 
         with mysql_conn() as c:

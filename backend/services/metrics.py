@@ -154,7 +154,15 @@ def group_returns(
 def turnover_series(
     factor: pd.DataFrame, n_groups: int = 5, which: str = "top"
 ) -> pd.Series:
-    """每日目标组（top / bottom）与前一期相比的 symmetric diff 比例。
+    """每日目标组（top / bottom）相对前一期的**单边换手率**。
+
+    公式：``|current \\ prev| / |current|`` —— 今日组内"新进"股票占比。
+    值域 [0, 1]：0 = 组成员完全不变，1 = 组成员全换。
+
+    历史注：旧版本用 ``|对称差| / |current|``（双边，最大 2.0），
+    与行业惯例不一致且在 UI 上被显示成 ">100%" 误导用户，已改为单边。
+    若组大小恒定，单边 = 对称差 / (2 × 组大小)；组大小不一致时用"新进占比"
+    更稳，且语义直观（"今天有多少只是昨天没有的"）。
 
     Args:
         factor: 因子宽表。
@@ -180,41 +188,65 @@ def turnover_series(
         target_label = n_groups - 1 if which == "top" else 0
         current = set(valid.index[q == target_label])
         if prev is not None and current and prev:
-            # 对称差集 / 当前组大小：衡量组内股票的"新进 + 退出"比例。
-            out[dt] = len(current ^ prev) / max(len(current), 1)
+            # 单边换手：新进股票占当前组的比例，∈ [0, 1]。
+            out[dt] = len(current - prev) / max(len(current), 1)
         prev = current
     return pd.Series(out).sort_index()
 
 
 def long_short_series(group_rets: pd.DataFrame) -> pd.Series:
-    """多空组合日收益：顶组（最后列）- 底组（第一列）。"""
+    """多空组合日收益：顶组（最后列）- 底组（第一列）。
+
+    过滤 top 或 bot 为 NaN 的日期——这种情况通常是因子值大量 tied 导致
+    ``group_returns`` 里 ``qcut(duplicates='drop')`` 合并了 bin，首尾分位其中
+    一组根本不存在。保留 NaN 会让下游的 cumprod 整条净值从此变 NaN，也会在
+    统计时被 ``.mean()`` 静默跳过，掩盖"有效样本数其实很少"的事实。
+
+    返回的 Series 长度即可视作"多空可用交易日数"，调用方据此判断
+    Sharpe / 年化是否可信（样本 <30 天基本都是噪声主导）。
+    """
     if group_rets.empty:
         return pd.Series(dtype=float)
     top = group_rets.iloc[:, -1]
     bot = group_rets.iloc[:, 0]
-    return (top - bot).rename("long_short")
+    return (top - bot).dropna().rename("long_short")
 
 
 def long_short_metrics(
     ls: pd.Series, trading_days: int = 252
 ) -> dict:
-    """多空组合的年化收益 / 夏普比率。
+    """多空组合的年化收益 / 夏普比率 / 有效样本数。
 
     Args:
-        ls: 多空日收益 Series。
+        ls: 多空日收益 Series（应为 ``long_short_series`` 的输出，已 dropna）。
         trading_days: 年化天数（A 股约 252）。
 
     Returns:
-        ``{"long_short_annret": 年化简单收益, "long_short_sharpe": 年化夏普}``。
-        空输入返回 ``{0, 0}``。std=0 用 1e-12 兜底避免 inf。
+        ``{"long_short_annret": 年化简单收益,
+           "long_short_sharpe": 年化夏普,
+           "long_short_n_effective": 可用交易日数}``
+
+        空输入返回 ``{0, 0, 0}``。std=0 用 1e-12 兜底避免 inf。
+
+        ``n_effective`` 用于提醒调用方：当 rank 类因子值大量 tied 时，
+        qcut 分组退化会让 top 或 bot 组频繁缺失，ls 有效样本可能只有几十天，
+        此时 Sharpe / 年化收益被少数极端日主导，统计意义有限（<30 天基本不可用）。
     """
     if ls.empty:
-        return {"long_short_annret": 0, "long_short_sharpe": 0}
+        return {
+            "long_short_annret": 0,
+            "long_short_sharpe": 0,
+            "long_short_n_effective": 0,
+        }
     ann = float(ls.mean() * trading_days)
     std_raw = float(ls.std(ddof=1)) if len(ls) > 1 else 0.0
     std = std_raw if (std_raw and np.isfinite(std_raw)) else 1e-12
     sharpe = float(ls.mean() / std * np.sqrt(trading_days))
-    return {"long_short_annret": ann, "long_short_sharpe": sharpe}
+    return {
+        "long_short_annret": ann,
+        "long_short_sharpe": sharpe,
+        "long_short_n_effective": int(len(ls)),
+    }
 
 
 def value_histogram(values: pd.DataFrame, bins: int = 50) -> dict:

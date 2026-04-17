@@ -164,6 +164,72 @@ def test_long_short_series_basic():
     )
 
 
+def test_long_short_series_drops_nan_rows():
+    """top 或 bot 是 NaN 的日期应被过滤。
+
+    现实触发场景：rank 类因子值只有少量 bucket，qcut(duplicates='drop') 合并
+    bin 后 group_returns.reindex(n_groups) 填 NaN，top/bot 其中一组不存在时
+    top - bot = NaN。若不过滤：
+    - 下游 (1+ls).cumprod() 从首个 NaN 起整条净值变 NaN；
+    - long_short_metrics 的 .mean()/.std() 静默跳 NaN，掩盖有效样本数不足。
+    所以 long_short_series 必须内部 dropna。
+    """
+    idx = pd.date_range("2024-01-01", periods=5, freq="B")
+    # 第 1、3 天 top 或 bot 缺失 → NaN 应被过滤
+    g = pd.DataFrame(
+        {
+            0: [0.01, 0.02, np.nan, 0.04, 0.05],
+            1: [0.02, 0.03, 0.04, 0.05, 0.06],
+            2: [np.nan, 0.04, 0.05, 0.06, 0.07],
+        },
+        index=idx,
+    )
+    ls = metrics.long_short_series(g)
+    # 仅第 2/4/5 天有效（idx[1], idx[3], idx[4]）
+    assert len(ls) == 3
+    assert idx[0] not in ls.index  # top NaN
+    assert idx[2] not in ls.index  # bot NaN
+    # 其余 top-bot 正确
+    assert ls.loc[idx[1]] == pytest.approx(0.04 - 0.02)
+    assert ls.loc[idx[3]] == pytest.approx(0.06 - 0.04)
+
+
+def test_long_short_metrics_returns_n_effective():
+    """long_short_metrics 应额外返回 long_short_n_effective（= 输入长度）。
+
+    前端据此展示"样本不足"告警，避免用户被极端日主导的 Sharpe 误导。
+    """
+    ls = pd.Series(
+        [0.01, -0.02, 0.03], index=pd.date_range("2024-01-01", periods=3, freq="B")
+    )
+    m = metrics.long_short_metrics(ls)
+    assert m["long_short_n_effective"] == 3
+    # 空序列：n_effective = 0
+    m_empty = metrics.long_short_metrics(pd.Series([], dtype=float))
+    assert m_empty["long_short_n_effective"] == 0
+
+
+def test_turnover_single_sided_upper_bound():
+    """单边换手率 ∈ [0, 1]，组完全换仓时 = 1（不是旧双边公式的 2）。
+
+    回归测试：历史上用对称差/组大小（双边），完全换仓时会显示 200%，
+    UI 上被误读成"每天反手"。改成"新进占比"后上限是 100%。
+    """
+    # 10 只股票，前 5 天因子 A→J 升序、后 5 天 J→A 降序。
+    # n_groups=2 时 top 组：前 5 天 = {F..J}，后 5 天 = {A..E} → 完全不重合。
+    idx = pd.date_range("2024-01-01", periods=10, freq="B")
+    cols = list("ABCDEFGHIJ")
+    first_half = np.tile(np.arange(10), (5, 1))
+    second_half = np.tile(np.arange(10)[::-1], (5, 1))
+    f = pd.DataFrame(np.vstack([first_half, second_half]), index=idx, columns=cols)
+
+    to = metrics.turnover_series(f, n_groups=2, which="top")
+    # 所有值应在 [0, 1]
+    assert (to >= 0).all() and (to <= 1).all(), f"turnover 越界：{to.tolist()}"
+    # 切换日（第 6 天）应是 1.0（完全换仓）
+    assert to.loc[idx[5]] == pytest.approx(1.0)
+
+
 def test_params_hash_deterministic():
     """同一 dict 两次调用得相同 hash，key 顺序不影响。"""
     from backend.services.params_hash import params_hash
