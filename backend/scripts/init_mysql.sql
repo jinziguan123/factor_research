@@ -152,3 +152,46 @@ CREATE TABLE IF NOT EXISTS `fr_cost_sensitivity_runs` (
   KEY `idx_factor_status` (`factor_id`, `status`),
   KEY `idx_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 【新增】多因子合成与因子相关性任务（run 级元数据 + 合成结果 + 相关性矩阵）。
+-- 一条 run = (pool, [因子集合], method, 窗口) 唯一一次合成 + 评估；
+-- payload_json 完全复用 eval_service.evaluate_factor_panel 的结构，前端详情页和
+-- 评估详情页可以共用同一套图表组件。
+-- per_factor_ic_json / weights_json 是合成场景独有：前者给用户看"原始因子谁贡献"，
+-- 后者只在 ic_weighted 下有值，展示实际权重。
+CREATE TABLE IF NOT EXISTS `fr_composition_runs` (
+  `run_id`             varchar(64) NOT NULL,
+  `pool_id`            bigint unsigned NOT NULL,
+  `freq`               varchar(8) NOT NULL DEFAULT '1d',
+  `start_date`         date NOT NULL,
+  `end_date`           date NOT NULL,
+  `method`             varchar(32) NOT NULL,
+  `factor_items_json`  longtext NOT NULL,
+  `n_groups`           tinyint unsigned NOT NULL DEFAULT 5,
+  `forward_periods`    varchar(64) NOT NULL DEFAULT '[1,5,10]',
+  `ic_weight_period`   tinyint unsigned NOT NULL DEFAULT 1,
+  `status`             varchar(16) NOT NULL,
+  `progress`           tinyint unsigned NOT NULL DEFAULT 0,
+  `error_message`      text,
+  `ic_mean`            double DEFAULT NULL,
+  `ic_std`             double DEFAULT NULL,
+  `ic_ir`              double DEFAULT NULL,
+  `ic_win_rate`        double DEFAULT NULL,
+  `ic_t_stat`          double DEFAULT NULL,
+  `rank_ic_mean`       double DEFAULT NULL,
+  `rank_ic_std`        double DEFAULT NULL,
+  `rank_ic_ir`         double DEFAULT NULL,
+  `turnover_mean`      double DEFAULT NULL,
+  `long_short_sharpe`  double DEFAULT NULL,
+  `long_short_annret`  double DEFAULT NULL,
+  `corr_matrix_json`   longtext,
+  `per_factor_ic_json` longtext,
+  `weights_json`       longtext,
+  `payload_json`       longtext,
+  `created_at`         datetime(6) NOT NULL,
+  `started_at`         datetime(6) DEFAULT NULL,
+  `finished_at`        datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`run_id`),
+  KEY `idx_pool_status` (`pool_id`, `status`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

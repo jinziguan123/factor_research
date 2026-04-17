@@ -6,7 +6,11 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from backend.api.schemas import CreateCostSensitivityIn, CreateEvalIn
+from backend.api.schemas import (
+    CreateCompositionIn,
+    CreateCostSensitivityIn,
+    CreateEvalIn,
+)
 
 
 def _base_body(**overrides):
@@ -109,3 +113,93 @@ def test_cost_sensitivity_rejects_more_than_20_points():
     many = [float(i) for i in range(21)]
     with pytest.raises(ValidationError):
         CreateCostSensitivityIn(**_cs_base_body(cost_bps_list=many))
+
+
+# ---------------------------- CreateCompositionIn ----------------------------
+
+
+def _comp_base_body(**overrides):
+    """构造最小合法 CreateCompositionIn 入参 dict。"""
+    body = {
+        "pool_id": 1,
+        "start_date": date(2024, 1, 10),
+        "end_date": date(2024, 1, 31),
+        "factor_items": [
+            {"factor_id": "reversal_n", "params": None},
+            {"factor_id": "realized_vol", "params": None},
+        ],
+        "method": "equal",
+    }
+    body.update(overrides)
+    return body
+
+
+def test_composition_valid_minimum():
+    """最小合法入参（2 个因子，equal）应通过，默认字段符合预期。"""
+    m = CreateCompositionIn(**_comp_base_body())
+    assert m.method == "equal"
+    assert m.n_groups == 5
+    assert m.ic_weight_period == 1
+    assert [it.factor_id for it in m.factor_items] == ["reversal_n", "realized_vol"]
+
+
+def test_composition_rejects_single_factor():
+    """< 2 因子应走 /evals，schema 拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(
+            **_comp_base_body(
+                factor_items=[{"factor_id": "reversal_n", "params": None}]
+            )
+        )
+
+
+def test_composition_rejects_more_than_8_factors():
+    """> 8 相关矩阵已经看不清，且正交化数值稳定性下降，max_length=8 拒绝。"""
+    many = [{"factor_id": f"f{i}", "params": None} for i in range(9)]
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(**_comp_base_body(factor_items=many))
+
+
+def test_composition_rejects_duplicate_factor_id():
+    """因子 id 重复会让相关矩阵出现伪 1.0 对角附近值，语义混乱，拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(
+            **_comp_base_body(
+                factor_items=[
+                    {"factor_id": "reversal_n", "params": None},
+                    {"factor_id": "reversal_n", "params": {"window": 5}},
+                ]
+            )
+        )
+
+
+def test_composition_rejects_invalid_method():
+    """method 仅接受 equal/ic_weighted/orthogonal_equal，其它值拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(**_comp_base_body(method="pca"))
+
+
+def test_composition_rejects_start_ge_end():
+    """start_date >= end_date 没有样本可用，拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(
+            **_comp_base_body(
+                start_date=date(2024, 1, 31),
+                end_date=date(2024, 1, 10),
+            )
+        )
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(
+            **_comp_base_body(
+                start_date=date(2024, 1, 20),
+                end_date=date(2024, 1, 20),
+            )
+        )
+
+
+def test_composition_ic_weight_period_bounds():
+    """ic_weight_period ∈ [1, 20]。"""
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(**_comp_base_body(ic_weight_period=0))
+    with pytest.raises(ValidationError):
+        CreateCompositionIn(**_comp_base_body(ic_weight_period=21))

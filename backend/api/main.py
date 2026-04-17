@@ -25,6 +25,7 @@ from backend.api.routers import (
     admin,
     backtests,
     bars,
+    compositions,
     cost_sensitivity,
     evals,
     factors,
@@ -170,5 +171,6 @@ app.include_router(symbols.router)
 app.include_router(evals.router)
 app.include_router(backtests.router)
 app.include_router(cost_sensitivity.router)
+app.include_router(compositions.router)
 app.include_router(bars.router)
 app.include_router(admin.router)

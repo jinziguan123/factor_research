@@ -291,6 +291,115 @@ def _build_health(
     return {"overall": overall, "items": items}
 
 
+# ---------------------------- 公共评估内核（供 composition_service 复用）----------------------------
+
+
+def evaluate_factor_panel(
+    F: pd.DataFrame,
+    close: pd.DataFrame,
+    *,
+    forward_periods: list[int],
+    n_groups: int,
+    split_date: Any | None = None,
+) -> tuple[dict, dict]:
+    """对一张"因子宽表 + close 宽表"计算全套评估指标。
+
+    从 run_eval 抽出来独立一函数，目的是让 composition_service 能把"按方法合成出
+    来的因子 wide table"送进同一套评估管线（IC / 分组 / 多空 / 换手 / 体检 / 可选
+    train-test split），避免到处复制粘贴 metrics 调用。
+
+    Args:
+        F: 因子宽表，index=trade_date、columns=symbol_code。NaN 表示缺失。
+        close: qfq close 宽表，index / columns 应与 F 同构（上游会做 inner-align）。
+        forward_periods: 前瞻期数组，例如 [1,5,10]。
+        n_groups: qcut 分组数。
+        split_date: 可选 ISO 字符串/pd.Timestamp。非 None 时追加 train/test IC 汇总。
+
+    Returns:
+        (payload, structured)：
+        - payload：嵌套 dict，直接可 ``json.dumps`` 落 payload_json。
+        - structured：扁平 dict，含 ic_mean/std/ir/win_rate/t_stat 等结构化列。
+    """
+    fwd_periods = [int(x) for x in forward_periods]
+    # 未来 k 日收益。close 已在上游 align 过，这里只负责 shift。
+    fwd_rets = {k: close.shift(-k) / close - 1 for k in fwd_periods}
+
+    ic = {k: metrics.cross_sectional_ic(F, fwd_rets[k]) for k in fwd_periods}
+    rank_ic = {
+        k: metrics.cross_sectional_rank_ic(F, fwd_rets[k]) for k in fwd_periods
+    }
+
+    base_period = fwd_periods[0] if fwd_periods else 1
+    g_rets = metrics.group_returns(F, fwd_rets[base_period], n_groups=n_groups)
+    ls = metrics.long_short_series(g_rets)
+    to = metrics.turnover_series(F, n_groups=n_groups, which="top")
+    hist = metrics.value_histogram(F)
+
+    ic_sum = metrics.ic_summary(ic[base_period])
+    rank_ic_sum = metrics.ic_summary(rank_ic[base_period])
+    ls_stats = metrics.long_short_metrics(ls)
+
+    # Train / Test split：只切 base_period 的 IC / Rank IC，避免 payload 膨胀。
+    ic_sum_train = ic_sum_test = None
+    rank_ic_sum_train = rank_ic_sum_test = None
+    if split_date:
+        split_ts = pd.to_datetime(split_date)
+        ic_train = ic[base_period].loc[: split_ts - pd.Timedelta(days=1)]
+        ic_test = ic[base_period].loc[split_ts:]
+        rank_ic_train = rank_ic[base_period].loc[
+            : split_ts - pd.Timedelta(days=1)
+        ]
+        rank_ic_test = rank_ic[base_period].loc[split_ts:]
+        ic_sum_train = metrics.ic_summary(ic_train)
+        ic_sum_test = metrics.ic_summary(ic_test)
+        rank_ic_sum_train = metrics.ic_summary(rank_ic_train)
+        rank_ic_sum_test = metrics.ic_summary(rank_ic_test)
+
+    health = _build_health(
+        factor_panel=F,
+        ic_series=ic[base_period],
+        turnover_series=to,
+        long_short_n_effective=int(ls_stats["long_short_n_effective"]),
+        n_groups=n_groups,
+    )
+
+    payload = {
+        "ic": {str(k): _series_to_obj(ic[k]) for k in fwd_periods},
+        "rank_ic": {str(k): _series_to_obj(rank_ic[k]) for k in fwd_periods},
+        "group_returns": _df_to_obj(g_rets),
+        "long_short_equity": _series_to_obj(
+            (1 + ls).cumprod() if not ls.empty else ls
+        ),
+        "turnover_series": _series_to_obj(to),
+        "value_hist": hist,
+        "long_short_n_effective": ls_stats["long_short_n_effective"],
+        "health": health,
+    }
+    if split_date:
+        payload["split_date"] = str(split_date)
+        payload["ic_summary_train"] = _nan_dict(ic_sum_train)
+        payload["ic_summary_test"] = _nan_dict(ic_sum_test)
+        payload["rank_ic_summary_train"] = _nan_dict(rank_ic_sum_train)
+        payload["rank_ic_summary_test"] = _nan_dict(rank_ic_sum_test)
+
+    structured = {
+        "ic_mean": _nan_to_none(ic_sum["ic_mean"]),
+        "ic_std": _nan_to_none(ic_sum["ic_std"]),
+        "ic_ir": _nan_to_none(ic_sum["ic_ir"]),
+        "ic_win_rate": _nan_to_none(ic_sum["ic_win_rate"]),
+        "ic_t_stat": _nan_to_none(ic_sum["ic_t_stat"]),
+        "rank_ic_mean": _nan_to_none(rank_ic_sum["ic_mean"]),
+        "rank_ic_std": _nan_to_none(rank_ic_sum["ic_std"]),
+        "rank_ic_ir": _nan_to_none(rank_ic_sum["ic_ir"]),
+        "turnover_mean": _nan_to_none(
+            float(to.mean()) if not to.empty else 0.0
+        ),
+        "long_short_sharpe": _nan_to_none(ls_stats["long_short_sharpe"]),
+        "long_short_annret": _nan_to_none(ls_stats["long_short_annret"]),
+    }
+    return payload, structured
+
+
 # ---------------------------- 公共入口 ----------------------------
 
 
@@ -383,86 +492,19 @@ def run_eval(run_id: str, body: dict) -> None:
             symbols, start.date(), end.date(), field="close", adjust="qfq"
         )
         fwd_periods = [int(x) for x in body.get("forward_periods", [1, 5, 10])]
-        # 未来 k 日收益（简单收益）：T+k 收盘 / T 收盘 - 1。
-        # close.shift(-k) 把 T+k 的值挪回 T 行，末尾 k 行自然是 NaN（后面 IC 会 mask 掉）。
-        fwd_rets = {k: close.shift(-k) / close - 1 for k in fwd_periods}
 
-        _set_status(run_id, progress=55)
-        ic = {k: metrics.cross_sectional_ic(F, fwd_rets[k]) for k in fwd_periods}
-        rank_ic = {
-            k: metrics.cross_sectional_rank_ic(F, fwd_rets[k])
-            for k in fwd_periods
-        }
-
-        _set_status(run_id, progress=75)
-        n_groups = n_groups_req
-        # 分组 / 换手 / 多空只用 1 日前瞻，避免"窗口重叠但是要每日调仓"的语义歧义。
-        base_period = fwd_periods[0] if fwd_periods else 1
-        g_rets = metrics.group_returns(
-            F, fwd_rets[base_period], n_groups=n_groups
-        )
-        ls = metrics.long_short_series(g_rets)
-
-        _set_status(run_id, progress=85)
-        to = metrics.turnover_series(F, n_groups=n_groups, which="top")
-        hist = metrics.value_histogram(F)
-
-        # 结构化指标只取 base_period（通常 1 日）的 IC 汇总；多 period IC 曲线仍在 payload。
-        ic_sum = metrics.ic_summary(ic[base_period])
-        rank_ic_sum = metrics.ic_summary(rank_ic[base_period])
-        ls_stats = metrics.long_short_metrics(ls)
-
-        # Train / Test split：用户给了 split_date 就把 base_period 的 IC 切两段各算一次汇总。
-        # 只切 base_period 的 IC / Rank IC：多 period 切分会让 payload 爆炸，而真正被读的
-        # 场景（验证因子跨段稳定性）base_period 已足够。
-        split_date = body.get("split_date")
-        ic_sum_train = ic_sum_test = None
-        rank_ic_sum_train = rank_ic_sum_test = None
-        if split_date:
-            split_ts = pd.to_datetime(split_date)
-            # 约定：[start, split) 为 train、[split, end] 为 test。Pydantic validator
-            # 已保证 split_ts 严格位于 (start, end) 内，所以两段都非空；但真实 IC 序列
-            # 可能因前瞻 / NaN 少数个元素，ic_summary 自身能处理空输入。
-            ic_train = ic[base_period].loc[: split_ts - pd.Timedelta(days=1)]
-            ic_test = ic[base_period].loc[split_ts:]
-            rank_ic_train = rank_ic[base_period].loc[: split_ts - pd.Timedelta(days=1)]
-            rank_ic_test = rank_ic[base_period].loc[split_ts:]
-            ic_sum_train = metrics.ic_summary(ic_train)
-            ic_sum_test = metrics.ic_summary(ic_test)
-            rank_ic_sum_train = metrics.ic_summary(rank_ic_train)
-            rank_ic_sum_test = metrics.ic_summary(rank_ic_test)
-
-        health = _build_health(
-            factor_panel=F,
-            ic_series=ic[base_period],
-            turnover_series=to,
-            long_short_n_effective=int(ls_stats["long_short_n_effective"]),
-            n_groups=n_groups,
+        _set_status(run_id, progress=70)
+        # 所有横截面/分组/多空/换手/体检 逻辑都在 evaluate_factor_panel 内完成，
+        # 保证 run_eval 与 composition_service 走同一套评估管线（单一真相源）。
+        payload, structured = evaluate_factor_panel(
+            F,
+            close,
+            forward_periods=fwd_periods,
+            n_groups=n_groups_req,
+            split_date=body.get("split_date"),
         )
 
-        payload = {
-            "ic": {str(k): _series_to_obj(ic[k]) for k in fwd_periods},
-            "rank_ic": {str(k): _series_to_obj(rank_ic[k]) for k in fwd_periods},
-            "group_returns": _df_to_obj(g_rets),
-            # 累计净值 = (1+日收益).cumprod()，常数序列/空序列均可算。
-            "long_short_equity": _series_to_obj(
-                (1 + ls).cumprod() if not ls.empty else ls
-            ),
-            "turnover_series": _series_to_obj(to),
-            "value_hist": hist,
-            # 多空有效样本数：ls 已在 long_short_series 里 dropna，长度即有效天数。
-            # 前端据此展示"样本不足"告警（rank 类因子 + qcut 退化时常见）。
-            "long_short_n_effective": ls_stats["long_short_n_effective"],
-            "health": health,
-        }
-        # split_date 没传就不塞这两个 key，前端以 key 存在与否判断是否渲染对比卡。
-        if split_date:
-            payload["split_date"] = str(split_date)
-            payload["ic_summary_train"] = _nan_dict(ic_sum_train)
-            payload["ic_summary_test"] = _nan_dict(ic_sum_test)
-            payload["rank_ic_summary_train"] = _nan_dict(rank_ic_sum_train)
-            payload["rank_ic_summary_test"] = _nan_dict(rank_ic_sum_test)
-
+        _set_status(run_id, progress=90)
         with mysql_conn() as c:
             with c.cursor() as cur:
                 cur.execute(
@@ -475,17 +517,17 @@ def run_eval(run_id: str, body: dict) -> None:
                     """,
                     (
                         run_id,
-                        _nan_to_none(ic_sum["ic_mean"]),
-                        _nan_to_none(ic_sum["ic_std"]),
-                        _nan_to_none(ic_sum["ic_ir"]),
-                        _nan_to_none(ic_sum["ic_win_rate"]),
-                        _nan_to_none(ic_sum["ic_t_stat"]),
-                        _nan_to_none(rank_ic_sum["ic_mean"]),
-                        _nan_to_none(rank_ic_sum["ic_std"]),
-                        _nan_to_none(rank_ic_sum["ic_ir"]),
-                        _nan_to_none(float(to.mean()) if not to.empty else 0.0),
-                        _nan_to_none(ls_stats["long_short_sharpe"]),
-                        _nan_to_none(ls_stats["long_short_annret"]),
+                        structured["ic_mean"],
+                        structured["ic_std"],
+                        structured["ic_ir"],
+                        structured["ic_win_rate"],
+                        structured["ic_t_stat"],
+                        structured["rank_ic_mean"],
+                        structured["rank_ic_std"],
+                        structured["rank_ic_ir"],
+                        structured["turnover_mean"],
+                        structured["long_short_sharpe"],
+                        structured["long_short_annret"],
                         # ensure_ascii=False 保留中文；payload 内已经把 NaN 全部
                         # 转成 None（_series_to_obj / _df_to_obj / value_hist 处理），
                         # 但为了 belt-and-suspenders 也用 allow_nan=False 让异常尽早暴露。

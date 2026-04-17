@@ -42,3 +42,10 @@ def cost_sensitivity_entry(run_id: str, body: dict) -> None:
     from backend.services.cost_sensitivity_service import run_cost_sensitivity
 
     run_cost_sensitivity(run_id, body)
+
+
+def composition_entry(run_id: str, body: dict) -> None:
+    """多因子合成任务入口：在 worker 进程内调用 ``run_composition``。"""
+    from backend.services.composition_service import run_composition
+
+    run_composition(run_id, body)

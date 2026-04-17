@@ -116,6 +116,55 @@ class CreateCostSensitivityIn(BaseModel):
         return self
 
 
+class CompositionFactorItem(BaseModel):
+    """合成请求里单个因子项：因子 id + 可选 params。
+
+    ``params`` None → 使用该因子的 ``default_params``（由 composition_service
+    在 _load_or_compute_factor 里补齐），与单因子评估完全对齐。
+    """
+
+    factor_id: str
+    params: dict | None = None
+
+
+class CreateCompositionIn(BaseModel):
+    """``POST /api/compositions`` 请求体。
+
+    - ``factor_items`` 至少 2 个，最多 8 个：
+      < 2 退化为单因子评估，应走 /evals；> 8 相关性矩阵已经很难看清，
+      且 orthogonal_equal 在高维下数值稳定性变差。
+    - ``method`` 限制 3 种，避免拼写错误静默跑出奇怪结果。
+    - ``ic_weight_period`` 只对 ic_weighted 有用，放这里是为了 schema 统一。
+    """
+
+    pool_id: int
+    start_date: date
+    end_date: date
+    freq: str = "1d"
+    factor_items: list[CompositionFactorItem] = Field(..., min_length=2, max_length=8)
+    method: str = "equal"
+    n_groups: int = Field(default=5, ge=2, le=20)
+    forward_periods: list[int] = [1, 5, 10]
+    ic_weight_period: int = Field(default=1, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "CreateCompositionIn":
+        if self.method not in ("equal", "ic_weighted", "orthogonal_equal"):
+            raise ValueError(
+                f"method={self.method!r} 不支持，仅接受 equal/ic_weighted/orthogonal_equal"
+            )
+        if self.start_date >= self.end_date:
+            raise ValueError(
+                f"start_date={self.start_date} 必须早于 end_date={self.end_date}"
+            )
+        # 因子 id 去重：同一因子即使 params 不同也不建议放同一次合成（语义混乱、
+        # 相关性矩阵对角附近出现极高值）。
+        ids = [it.factor_id for it in self.factor_items]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"factor_items 里存在重复的 factor_id: {ids}")
+        return self
+
+
 class PoolIn(BaseModel):
     """``POST /api/pools`` / ``PUT /api/pools/{pid}`` 请求体。
 

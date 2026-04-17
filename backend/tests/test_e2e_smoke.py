@@ -443,3 +443,208 @@ def test_cost_sensitivity_smoke_end_to_end(
         assert ret0 + 1e-6 >= ret2, (
             f"0bp 年化 ({ret0}) 反而小于 20bp 年化 ({ret2})，逻辑异常"
         )
+
+
+# ---------------------------- #5 多因子合成 ----------------------------
+
+
+@pytest.fixture
+def smoke_composition_run_id():
+    """给 composition smoke 测试预占一条 pending 记录。
+
+    和 eval/backtest 同构：run_composition 只做 UPDATE，不会 INSERT；
+    测试必须先 INSERT 占位、最后 DELETE 清理。
+    """
+    import json as _json
+
+    from backend.storage.mysql_client import mysql_conn
+
+    run_id = uuid.uuid4().hex
+    items = [
+        {"factor_id": "reversal_n", "params": {"window": 3}},
+        {"factor_id": "realized_vol", "params": {"window": 5}},
+    ]
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_composition_runs
+                (run_id, pool_id, freq, start_date, end_date, method,
+                 factor_items_json, n_groups, forward_periods, ic_weight_period,
+                 status, progress, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s)
+                """,
+                (
+                    run_id, 0, "1d", "2024-01-10", "2024-01-31", "equal",
+                    _json.dumps(items), 3, _json.dumps([1]), 1,
+                    "pending", 0, datetime.now(),
+                ),
+            )
+        c.commit()
+    try:
+        yield run_id
+    finally:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM fr_composition_runs WHERE run_id=%s", (run_id,)
+                )
+            c.commit()
+
+
+@pytest.mark.integration
+def test_composition_smoke_end_to_end(
+    seed_bar_1d, smoke_pool_id, smoke_composition_run_id
+):
+    """跑完整 ``run_composition`` (equal)：断言 status=success + 关键 JSON 字段齐。"""
+    import json
+
+    from backend.services.composition_service import run_composition
+    from backend.storage.mysql_client import mysql_conn
+
+    body = {
+        "pool_id": smoke_pool_id,
+        "start_date": "2024-01-10",
+        "end_date": "2024-01-31",
+        "method": "equal",
+        "factor_items": [
+            {"factor_id": "reversal_n", "params": {"window": 3}},
+            {"factor_id": "realized_vol", "params": {"window": 5}},
+        ],
+        "n_groups": 3,
+        "forward_periods": [1],
+        "ic_weight_period": 1,
+    }
+    run_composition(smoke_composition_run_id, body)
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT status, progress, error_message, "
+                "ic_mean, corr_matrix_json, per_factor_ic_json, "
+                "weights_json, payload_json "
+                "FROM fr_composition_runs WHERE run_id=%s",
+                (smoke_composition_run_id,),
+            )
+            row = cur.fetchone()
+
+    assert row is not None, "run row 消失了"
+    assert row["status"] == "success", (
+        f"composition 失败：{row['error_message']}"
+    )
+    assert row["progress"] == 100
+
+    # 相关矩阵：2×2，对角线 = 1.0。
+    corr = json.loads(row["corr_matrix_json"])
+    assert corr["factor_ids"] == ["reversal_n", "realized_vol"]
+    assert len(corr["values"]) == 2 and len(corr["values"][0]) == 2
+    assert abs(corr["values"][0][0] - 1.0) < 1e-9
+    assert abs(corr["values"][1][1] - 1.0) < 1e-9
+
+    # per-factor IC：两个因子都在。
+    per_factor = json.loads(row["per_factor_ic_json"])
+    assert set(per_factor.keys()) == {"reversal_n", "realized_vol"}
+    for fid, v in per_factor.items():
+        assert {"ic_mean", "ic_ir", "ic_win_rate"}.issubset(v.keys()), (
+            f"per_factor_ic[{fid}] 缺字段"
+        )
+
+    # equal 方法下不应有 weights。
+    assert row["weights_json"] is None, "equal 方法不应写 weights_json"
+
+    # payload 里有评估核心字段。
+    payload = json.loads(row["payload_json"])
+    for key in ("ic", "rank_ic", "group_returns", "long_short_equity"):
+        assert key in payload, f"payload 缺 {key!r}"
+    # 多空净值曲线非空（合成后至少能算出 1 天）。
+    eq = payload["long_short_equity"]
+    assert isinstance(eq.get("dates"), list) and isinstance(eq.get("values"), list)
+
+
+@pytest.fixture
+def smoke_composition_icw_run_id():
+    """ic_weighted smoke 专用：与 smoke_composition_run_id 同构，method=ic_weighted。"""
+    import json as _json
+
+    from backend.storage.mysql_client import mysql_conn
+
+    run_id = uuid.uuid4().hex
+    items = [
+        {"factor_id": "reversal_n", "params": {"window": 3}},
+        {"factor_id": "realized_vol", "params": {"window": 5}},
+    ]
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_composition_runs
+                (run_id, pool_id, freq, start_date, end_date, method,
+                 factor_items_json, n_groups, forward_periods, ic_weight_period,
+                 status, progress, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s)
+                """,
+                (
+                    run_id, 0, "1d", "2024-01-10", "2024-01-31", "ic_weighted",
+                    _json.dumps(items), 3, _json.dumps([1]), 1,
+                    "pending", 0, datetime.now(),
+                ),
+            )
+        c.commit()
+    try:
+        yield run_id
+    finally:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM fr_composition_runs WHERE run_id=%s", (run_id,)
+                )
+            c.commit()
+
+
+@pytest.mark.integration
+def test_composition_ic_weighted_smoke(
+    seed_bar_1d, smoke_pool_id, smoke_composition_icw_run_id
+):
+    """ic_weighted：除 equal 断言外，额外断言 weights 归一化 Σ|w|≈1。"""
+    import json
+
+    from backend.services.composition_service import run_composition
+    from backend.storage.mysql_client import mysql_conn
+
+    body = {
+        "pool_id": smoke_pool_id,
+        "start_date": "2024-01-10",
+        "end_date": "2024-01-31",
+        "method": "ic_weighted",
+        "factor_items": [
+            {"factor_id": "reversal_n", "params": {"window": 3}},
+            {"factor_id": "realized_vol", "params": {"window": 5}},
+        ],
+        "n_groups": 3,
+        "forward_periods": [1],
+        "ic_weight_period": 1,
+    }
+    run_composition(smoke_composition_icw_run_id, body)
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT status, error_message, weights_json "
+                "FROM fr_composition_runs WHERE run_id=%s",
+                (smoke_composition_icw_run_id,),
+            )
+            row = cur.fetchone()
+
+    assert row["status"] == "success", row["error_message"]
+    assert row["weights_json"] is not None
+    weights = json.loads(row["weights_json"])
+    assert set(weights.keys()) == {"reversal_n", "realized_vol"}
+    # Σ|w| ≈ 1（全 0 退化走等权则为 2 * 0.5 = 1，两条路径都满足）。
+    total_abs = sum(abs(v) for v in weights.values())
+    assert abs(total_abs - 1.0) < 1e-6, (
+        f"ic_weighted 归一化异常：Σ|w|={total_abs}, weights={weights}"
+    )

@@ -16,5 +16,8 @@ export const routes: RouteRecordRaw[] = [
   { path: '/cost-sensitivity', component: () => import('@/pages/cost-sensitivity/CostSensitivityList.vue') },
   { path: '/cost-sensitivity/new', component: () => import('@/pages/cost-sensitivity/CostSensitivityCreate.vue') },
   { path: '/cost-sensitivity/:runId', component: () => import('@/pages/cost-sensitivity/CostSensitivityDetail.vue') },
+  { path: '/compositions', component: () => import('@/pages/compositions/CompositionList.vue') },
+  { path: '/compositions/new', component: () => import('@/pages/compositions/CompositionCreate.vue') },
+  { path: '/compositions/:runId', component: () => import('@/pages/compositions/CompositionDetail.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
 ]

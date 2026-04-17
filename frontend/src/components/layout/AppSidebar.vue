@@ -13,6 +13,7 @@ const menuOptions = [
   { label: '评估记录', key: '/evals' },
   { label: '回测记录', key: '/backtests' },
   { label: '成本敏感性', key: '/cost-sensitivity' },
+  { label: '多因子合成', key: '/compositions' },
   { label: '数据维护', key: '/admin' },
 ]
 
