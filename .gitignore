@@ -1,0 +1,26 @@
+docker-compose-test/
+data/
+read_for_ai/
+
+# Node / 前端
+node_modules/
+frontend/dist/
+
+# Python / 后端
+__pycache__/
+*.pyc
+backend/.venv/
+.pytest_cache/
+
+# 构建产物
+*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
+
+# IDE
+.vscode/
+.idea/
+
+# 环境变量
+.env
+backend/.env

@@ -38,3 +38,11 @@ export function useBacktest(runId: Ref<string>) {
     },
   })
 }
+
+/** 获取回测列表 */
+export function useBacktests(params?: Record<string, any>) {
+  return useQuery<BacktestRun[]>({
+    queryKey: ['backtests', params],
+    queryFn: () => client.get('/backtests', { params }).then(r => r.data),
+  })
+}
