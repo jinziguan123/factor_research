@@ -188,9 +188,14 @@ def _build_weights(
         except ValueError:
             # 所有值相同等极端情况 → 直接空仓本期。
             continue
-        # duplicates="drop" 时实际组数可能 < n_groups，取 labels.max() 作 top label。
+        # pandas 1.x 在输入全部相同时，qcut(duplicates='drop', labels=False)
+        # 并不抛 ValueError，而是静默返回全 NaN 的 labels。仅靠 except 漏网，
+        # 后面 int(labels.max()) 会在 NaN 上炸。dropna 同时兜住"全相同 → 全 NaN"
+        # 与"部分 NaN"两种情况。
+        labels = labels.dropna()
         if labels.empty:
             continue
+        # duplicates="drop" 时实际组数可能 < n_groups，取 labels.max() 作 top label。
         top_label = int(labels.max())
         bottom_label = int(labels.min())
         top_syms = labels[labels == top_label].index
