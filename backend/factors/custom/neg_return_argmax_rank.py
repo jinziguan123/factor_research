@@ -68,7 +68,10 @@ class NegReturnArgmaxRank(BaseFactor):
         if close.empty:
             return pd.DataFrame()
 
-        returns = close.pct_change()
+        # fill_method=None：停牌日 close 为 NaN 时 return 也 NaN（不做 ffill
+        # 兜底），避免"pad 后停牌日 return=0 参与 nanargmax 排名"引入偏差。
+        # pandas 2.x 的默认就是 None，这里显式写以消除 1.x FutureWarning。
+        returns = close.pct_change(fill_method=None)
         # (returns<0 ? |r| : -|r|) * |...| 的 SignedPower(·, 2) 化简结果：
         # = (-returns) * |returns|
         # 即：负收益日 => +r^2（放大的正值），正收益日 => -r^2（放大的负值）。

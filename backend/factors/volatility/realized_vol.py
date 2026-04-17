@@ -51,5 +51,7 @@ class RealizedVol(BaseFactor):
         if close.empty:
             return pd.DataFrame()
         # sqrt(252) 是年化系数（A 股约 252 个交易日 / 年）。
-        factor = close.pct_change().rolling(window).std() * np.sqrt(252)
+        # fill_method=None：停牌日 NaN 不做 ffill，避免 pad=0 把 rolling std
+        # 拉低成伪"低波动"。pandas 2.x 默认即 None，这里显式以消除 1.x warning。
+        factor = close.pct_change(fill_method=None).rolling(window).std() * np.sqrt(252)
         return factor.loc[ctx.start_date :]

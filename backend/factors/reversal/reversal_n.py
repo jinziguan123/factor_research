@@ -53,7 +53,9 @@ class ReversalN(BaseFactor):
         )
         if close.empty:
             return pd.DataFrame()
-        factor = -close.pct_change(window)
+        # fill_method=None：窗口端点任一停牌（NaN）时直接返回 NaN，比 pad 后
+        # 得到一个虚构的 return 更干净。pandas 2.x 默认即 None，显式写消除 1.x warning。
+        factor = -close.pct_change(window, fill_method=None)
         # 切回 [start_date, end_date]；若用户 start_date 早于实际数据首日，
         # .loc 会只返回数据覆盖的日期，行为仍然确定。
         return factor.loc[ctx.start_date :]
