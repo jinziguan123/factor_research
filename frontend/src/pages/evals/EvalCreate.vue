@@ -7,7 +7,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NSelect, NInputNumber,
-  NDatePicker, NDynamicTags, NButton, NSpace, useMessage, NSpin,
+  NDatePicker, NDynamicTags, NButton, useMessage,
 } from 'naive-ui'
 import { useFactors, useFactor } from '@/api/factors'
 import { useCreateEval } from '@/api/evals'

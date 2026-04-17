@@ -1,5 +1,9 @@
 <script setup lang="ts">
-import { NConfigProvider, NLayout, NLayoutSider, NLayoutContent, NLayoutHeader } from 'naive-ui'
+import {
+  NConfigProvider,
+  NLayout, NLayoutSider, NLayoutContent, NLayoutHeader,
+  NMessageProvider, NDialogProvider, NNotificationProvider, NLoadingBarProvider,
+} from 'naive-ui'
 import { binanceThemeOverrides } from '@/styles/theme'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import AppHeader from '@/components/layout/AppHeader.vue'
@@ -7,19 +11,27 @@ import AppHeader from '@/components/layout/AppHeader.vue'
 
 <template>
   <n-config-provider :theme-overrides="binanceThemeOverrides">
-    <n-layout has-sider class="app-root">
-      <n-layout-sider :width="220" bordered content-style="padding: 0">
-        <app-sidebar />
-      </n-layout-sider>
-      <n-layout>
-        <n-layout-header bordered style="padding: 0 20px; height: 56px; line-height: 56px">
-          <app-header />
-        </n-layout-header>
-        <n-layout-content content-style="padding: 20px" class="app-main">
-          <router-view />
-        </n-layout-content>
-      </n-layout>
-    </n-layout>
+    <n-loading-bar-provider>
+      <n-dialog-provider>
+        <n-notification-provider>
+          <n-message-provider>
+            <n-layout has-sider class="app-root">
+              <n-layout-sider :width="220" bordered content-style="padding: 0">
+                <app-sidebar />
+              </n-layout-sider>
+              <n-layout>
+                <n-layout-header bordered style="padding: 0 20px; height: 56px; line-height: 56px">
+                  <app-header />
+                </n-layout-header>
+                <n-layout-content content-style="padding: 20px" class="app-main">
+                  <router-view />
+                </n-layout-content>
+              </n-layout>
+            </n-layout>
+          </n-message-provider>
+        </n-notification-provider>
+      </n-dialog-provider>
+    </n-loading-bar-provider>
   </n-config-provider>
 </template>
 

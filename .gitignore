@@ -24,3 +24,6 @@ frontend/vite.config.js
 # 环境变量
 .env
 backend/.env
+
+# 一键启动脚本的运行时文件（pid / 日志）
+.run/
