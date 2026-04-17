@@ -97,6 +97,18 @@ def _nan_to_none(x: Any) -> Any:
     return x
 
 
+def _nan_dict(d: dict | None) -> dict:
+    """把 ``ic_summary`` 这类 ``{key: float}`` 字典里的 NaN / inf 全部替换成 None。
+
+    payload json.dumps 开了 ``allow_nan=False``，这里提前清洗一次是"早失败优于晚失败"：
+    一旦出现非有限浮点（比如 train/test 段样本极少导致 std=0 / t_stat=inf），
+    在写入前就转成 None，MySQL 存 NULL，前端读到显示 "-"。
+    """
+    if not d:
+        return {}
+    return {k: _nan_to_none(v) for k, v in d.items()}
+
+
 def _series_to_obj(s: pd.Series) -> dict:
     """把 ``pd.Series`` 转为前端友好的 ``{dates, values}`` dict。
 
@@ -400,6 +412,26 @@ def run_eval(run_id: str, body: dict) -> None:
         rank_ic_sum = metrics.ic_summary(rank_ic[base_period])
         ls_stats = metrics.long_short_metrics(ls)
 
+        # Train / Test split：用户给了 split_date 就把 base_period 的 IC 切两段各算一次汇总。
+        # 只切 base_period 的 IC / Rank IC：多 period 切分会让 payload 爆炸，而真正被读的
+        # 场景（验证因子跨段稳定性）base_period 已足够。
+        split_date = body.get("split_date")
+        ic_sum_train = ic_sum_test = None
+        rank_ic_sum_train = rank_ic_sum_test = None
+        if split_date:
+            split_ts = pd.to_datetime(split_date)
+            # 约定：[start, split) 为 train、[split, end] 为 test。Pydantic validator
+            # 已保证 split_ts 严格位于 (start, end) 内，所以两段都非空；但真实 IC 序列
+            # 可能因前瞻 / NaN 少数个元素，ic_summary 自身能处理空输入。
+            ic_train = ic[base_period].loc[: split_ts - pd.Timedelta(days=1)]
+            ic_test = ic[base_period].loc[split_ts:]
+            rank_ic_train = rank_ic[base_period].loc[: split_ts - pd.Timedelta(days=1)]
+            rank_ic_test = rank_ic[base_period].loc[split_ts:]
+            ic_sum_train = metrics.ic_summary(ic_train)
+            ic_sum_test = metrics.ic_summary(ic_test)
+            rank_ic_sum_train = metrics.ic_summary(rank_ic_train)
+            rank_ic_sum_test = metrics.ic_summary(rank_ic_test)
+
         health = _build_health(
             factor_panel=F,
             ic_series=ic[base_period],
@@ -423,6 +455,13 @@ def run_eval(run_id: str, body: dict) -> None:
             "long_short_n_effective": ls_stats["long_short_n_effective"],
             "health": health,
         }
+        # split_date 没传就不塞这两个 key，前端以 key 存在与否判断是否渲染对比卡。
+        if split_date:
+            payload["split_date"] = str(split_date)
+            payload["ic_summary_train"] = _nan_dict(ic_sum_train)
+            payload["ic_summary_test"] = _nan_dict(ic_sum_test)
+            payload["rank_ic_summary_train"] = _nan_dict(rank_ic_sum_train)
+            payload["rank_ic_summary_test"] = _nan_dict(rank_ic_sum_test)
 
         with mysql_conn() as c:
             with c.cursor() as cur:

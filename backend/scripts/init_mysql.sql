@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS `fr_factor_eval_runs` (
   `end_date`        date NOT NULL,
   `forward_periods` varchar(64) NOT NULL,
   `n_groups`        tinyint unsigned NOT NULL DEFAULT 5,
+  -- split_date：可选。提供时 eval 会把窗口切成 train / test 两段，各自汇总 IC。
+  -- NULL = 不切分，行为与老评估完全一致。
+  `split_date`      date DEFAULT NULL,
   `status`          varchar(16) NOT NULL,
   `progress`        tinyint unsigned NOT NULL DEFAULT 0,
   `error_message`   text,

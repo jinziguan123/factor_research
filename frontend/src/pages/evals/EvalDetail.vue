@@ -121,6 +121,37 @@ function fmtPct(v: any, digits = 2): string {
   if (v == null) return '-'
   return typeof v === 'number' ? (v * 100).toFixed(digits) + '%' : String(v)
 }
+
+// ---------------------- 样本内 / 样本外（train/test）对比 ----------------------
+// payload 里 split_date 字段存在才渲染，老评估记录继续无此对比卡。
+interface IcSummary {
+  ic_mean?: number | null
+  ic_std?: number | null
+  ic_ir?: number | null
+  ic_win_rate?: number | null
+  ic_t_stat?: number | null
+}
+const hasSplit = computed(() => !!payload.value?.split_date)
+const icSummaryTrain = computed<IcSummary>(() => payload.value?.ic_summary_train ?? {})
+const icSummaryTest = computed<IcSummary>(() => payload.value?.ic_summary_test ?? {})
+const rankIcSummaryTrain = computed<IcSummary>(() => payload.value?.rank_ic_summary_train ?? {})
+const rankIcSummaryTest = computed<IcSummary>(() => payload.value?.rank_ic_summary_test ?? {})
+
+// 判断 train/test 两段 IC 是否"显著分歧"：符号翻转 或 幅度差 > 50%。
+// 触发时在对比卡右上角出红色标签提醒用户"样本外失效"。
+function icDiverged(train?: number | null, test?: number | null): boolean {
+  if (train == null || test == null) return false
+  if (Math.abs(train) < 1e-6 || Math.abs(test) < 1e-6) return false
+  if (Math.sign(train) !== Math.sign(test)) return true
+  const ratio = Math.abs(test) / Math.abs(train)
+  return ratio < 0.5 || ratio > 2.0
+}
+const icMeanDiverged = computed(() =>
+  icDiverged(icSummaryTrain.value.ic_mean, icSummaryTest.value.ic_mean)
+)
+const rankIcMeanDiverged = computed(() =>
+  icDiverged(rankIcSummaryTrain.value.ic_mean, rankIcSummaryTest.value.ic_mean)
+)
 </script>
 
 <template>
@@ -330,6 +361,65 @@ function fmtPct(v: any, digits = 2): string {
             {{ longShortNEffective }} 天
           </n-descriptions-item>
         </n-descriptions>
+
+        <!-- 样本内 / 样本外对比：仅当 eval 时传了 split_date 才渲染 -->
+        <template v-if="hasSplit">
+          <h3 style="margin-top: 24px; margin-bottom: 12px">
+            样本内 / 样本外对比
+            <span style="color: #848E9C; font-size: 12px; font-weight: normal">
+              （切分日：{{ payload?.split_date }}）
+            </span>
+          </h3>
+          <n-alert
+            v-if="icMeanDiverged || rankIcMeanDiverged"
+            type="warning"
+            style="margin-bottom: 12px"
+          >
+            训练段 / 测试段 IC 出现显著分歧（符号翻转或幅度相差 2 倍以上），
+            因子在样本外可能失效，谨慎使用。
+          </n-alert>
+          <n-descriptions bordered :column="3" label-placement="left">
+            <n-descriptions-item label="">
+              <b>指标</b>
+            </n-descriptions-item>
+            <n-descriptions-item label="">
+              <b>训练段</b>
+              <span style="color: #848E9C; font-size: 12px; margin-left: 4px">
+                [start, {{ payload?.split_date }})
+              </span>
+            </n-descriptions-item>
+            <n-descriptions-item label="">
+              <b>测试段</b>
+              <span style="color: #848E9C; font-size: 12px; margin-left: 4px">
+                [{{ payload?.split_date }}, end]
+              </span>
+            </n-descriptions-item>
+
+            <n-descriptions-item label="IC 均值">
+              <n-tag v-if="icMeanDiverged" type="warning" size="small" round>分歧</n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(icSummaryTrain.ic_mean) }}</n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(icSummaryTest.ic_mean) }}</n-descriptions-item>
+
+            <n-descriptions-item label="IC IR"></n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(icSummaryTrain.ic_ir) }}</n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(icSummaryTest.ic_ir) }}</n-descriptions-item>
+
+            <n-descriptions-item label="IC 胜率"></n-descriptions-item>
+            <n-descriptions-item>{{ fmtPct(icSummaryTrain.ic_win_rate) }}</n-descriptions-item>
+            <n-descriptions-item>{{ fmtPct(icSummaryTest.ic_win_rate) }}</n-descriptions-item>
+
+            <n-descriptions-item label="Rank IC 均值">
+              <n-tag v-if="rankIcMeanDiverged" type="warning" size="small" round>分歧</n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(rankIcSummaryTrain.ic_mean) }}</n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(rankIcSummaryTest.ic_mean) }}</n-descriptions-item>
+
+            <n-descriptions-item label="Rank IC IR"></n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(rankIcSummaryTrain.ic_ir) }}</n-descriptions-item>
+            <n-descriptions-item>{{ fmtNum(rankIcSummaryTest.ic_ir) }}</n-descriptions-item>
+          </n-descriptions>
+        </template>
       </template>
     </n-spin>
   </div>

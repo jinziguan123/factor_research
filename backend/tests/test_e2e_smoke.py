@@ -212,6 +212,51 @@ def test_eval_smoke_end_to_end(
 
 
 @pytest.mark.integration
+def test_eval_smoke_with_split_date(
+    seed_bar_1d, smoke_pool_id, smoke_eval_run_id
+):
+    """带 split_date 的 eval：payload 多出 train / test 两段 IC summary。"""
+    import json
+
+    from backend.services.eval_service import run_eval
+    from backend.storage.mysql_client import mysql_conn
+
+    body = {
+        "factor_id": "reversal_n",
+        "pool_id": smoke_pool_id,
+        "start_date": "2024-01-10",
+        "end_date": "2024-01-31",
+        "split_date": "2024-01-20",
+        "params": {"window": 3},
+        "forward_periods": [1],
+        "n_groups": 3,
+    }
+    run_eval(smoke_eval_run_id, body)
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT status, error_message FROM fr_factor_eval_runs WHERE run_id=%s",
+                (smoke_eval_run_id,),
+            )
+            run_row = cur.fetchone()
+            cur.execute(
+                "SELECT payload_json FROM fr_factor_eval_metrics WHERE run_id=%s",
+                (smoke_eval_run_id,),
+            )
+            metric_row = cur.fetchone()
+
+    assert run_row["status"] == "success", run_row["error_message"]
+    payload = json.loads(metric_row["payload_json"])
+    # 这 5 个 key 是 split_date 模式独有的（老评估 payload 里不该出现）。
+    assert payload.get("split_date") == "2024-01-20"
+    for key in ("ic_summary_train", "ic_summary_test",
+                "rank_ic_summary_train", "rank_ic_summary_test"):
+        assert key in payload, f"split 模式下 payload 缺 {key!r}"
+        assert isinstance(payload[key], dict)
+
+
+@pytest.mark.integration
 def test_backtest_smoke_end_to_end(
     seed_bar_1d, smoke_pool_id, smoke_backtest_run_id
 ):

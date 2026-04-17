@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------- 请求体 DTO ----------------------------
@@ -27,6 +27,10 @@ class CreateEvalIn(BaseModel):
     - ``params`` 缺省 → 用因子 ``default_params``（由 router 在调用 worker 前补齐）。
     - ``forward_periods`` 代表 IC 曲线关心的前瞻天数集合；``n_groups`` 约束在 [2, 20]，
       避免前端误传 0 / 1 / 超大值（eval_service._build_weights / qcut 也会挡住但前置更快）。
+    - ``split_date`` 可选：若提供，会把评估窗口切成 [start, split) 和 [split, end] 两段，
+      各自计算 IC / Rank IC 汇总并放到 payload 的 ic_summary_train / ic_summary_test 里，
+      用于样本内 / 样本外一致性检查。必须严格位于 (start_date, end_date) 之间，
+      否则校验会在 router 层拦下（空的训练段或测试段没有统计意义）。
     """
 
     factor_id: str
@@ -37,6 +41,20 @@ class CreateEvalIn(BaseModel):
     freq: str = "1d"
     forward_periods: list[int] = [1, 5, 10]
     n_groups: int = Field(default=5, ge=2, le=20)
+    split_date: date | None = None
+
+    @model_validator(mode="after")
+    def _check_split_date(self) -> "CreateEvalIn":
+        # 严格不等号：split_date 等于 start_date → 训练段为空；等于 end_date → 测试段空。
+        # 放行"等号"会让样本段没有任何天可算，汇总统计全 NaN，指标展示很迷惑；直接拒绝。
+        if self.split_date is None:
+            return self
+        if not (self.start_date < self.split_date < self.end_date):
+            raise ValueError(
+                f"split_date={self.split_date} 必须严格位于 "
+                f"({self.start_date}, {self.end_date}) 之间。"
+            )
+        return self
 
 
 class CreateBacktestIn(BaseModel):

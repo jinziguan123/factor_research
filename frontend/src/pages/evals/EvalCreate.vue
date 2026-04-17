@@ -45,6 +45,17 @@ const poolId = ref<number | null>(null)
 const dateRange = ref<[number, number] | null>(null)
 const forwardPeriods = ref<string[]>(['1', '5', '10'])
 const nGroups = ref(5)
+// 样本内 / 样本外切分日（可选）。null → 不切分，与旧评估一致。
+// 必须严格位于 dateRange 之间，后端 Pydantic 也会再校验一次。
+const splitDate = ref<number | null>(null)
+
+// split_date 只允许落在所选区间内，超出区间的日期直接禁用。
+// 注意 disableDate 返回 true 表示"禁用"。
+function isSplitDateDisabled(ts: number): boolean {
+  if (!dateRange.value) return false
+  const [start, end] = dateRange.value
+  return ts <= start || ts >= end
+}
 
 // 当选择因子变化时，用默认参数初始化
 watch(() => selectedFactor.data.value, (f) => {
@@ -73,7 +84,17 @@ async function handleSubmit() {
   const startDate = new Date(dateRange.value[0]).toISOString().slice(0, 10)
   const endDate = new Date(dateRange.value[1]).toISOString().slice(0, 10)
 
-  const body = {
+  // 前端自校验 split_date 严格位于 (start, end) 内：后端也会拒，但在这里尽早
+  // 给用户 message.warning 比跳到 200 返回非零 code 后再提示体验好很多。
+  const splitDateStr = splitDate.value
+    ? new Date(splitDate.value).toISOString().slice(0, 10)
+    : null
+  if (splitDateStr && (splitDateStr <= startDate || splitDateStr >= endDate)) {
+    message.warning('样本切分日必须严格位于所选日期区间之内')
+    return
+  }
+
+  const body: Record<string, any> = {
     factor_id: selectedFactorId.value,
     params: factorParams.value,
     pool_id: poolId.value,
@@ -82,6 +103,9 @@ async function handleSubmit() {
     forward_periods: forwardPeriods.value.map(Number).filter(n => n > 0),
     n_groups: nGroups.value,
   }
+  // 仅在用户填了切分日时发送：Pydantic 的 Optional 遇到 null 不会报错但列表页展示会多一列，
+  // 不发送能让老评估记录字段为 NULL、前端明确区分"未切分 vs 切分了"。
+  if (splitDateStr) body.split_date = splitDateStr
 
   const result = await createEval.mutateAsync(body)
   message.success('评估任务已提交')
@@ -125,6 +149,19 @@ async function handleSubmit() {
           v-model:value="dateRange"
           type="daterange"
           clearable
+          style="width: 100%"
+        />
+      </n-form-item>
+
+      <!-- 样本切分日（可选）：用于样本内 / 样本外 IC 对比 -->
+      <n-form-item label="样本切分日">
+        <n-date-picker
+          v-model:value="splitDate"
+          type="date"
+          clearable
+          :is-date-disabled="isSplitDateDisabled"
+          :disabled="!dateRange"
+          placeholder="可选。留空不切分"
           style="width: 100%"
         />
       </n-form-item>

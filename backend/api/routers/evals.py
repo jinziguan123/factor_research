@@ -53,8 +53,8 @@ def create_eval(body: CreateEvalIn, bt: BackgroundTasks) -> dict:
                 INSERT INTO fr_factor_eval_runs
                 (run_id, factor_id, factor_version, params_hash, params_json,
                  pool_id, freq, start_date, end_date, forward_periods, n_groups,
-                 status, progress, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
+                 split_date, status, progress, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
                 """,
                 (
                     run_id,
@@ -68,6 +68,7 @@ def create_eval(body: CreateEvalIn, bt: BackgroundTasks) -> dict:
                     body.end_date,
                     ",".join(str(x) for x in body.forward_periods),
                     body.n_groups,
+                    body.split_date,
                     # 本地时区 now()，与 eval_service 内更新 started_at / finished_at 的
                     # 语义一致；避免 UTC 导致前端展示 -8h。
                     datetime.now(),
