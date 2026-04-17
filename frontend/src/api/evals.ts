@@ -3,19 +3,35 @@ import { useQuery, useMutation } from '@tanstack/vue-query'
 import { client } from './client'
 import type { Ref } from 'vue'
 
+// 后端 GET /api/evals/{run_id} 的返回结构：
+// - run 层字段来自 fr_factor_eval_runs（params 以 JSON 字符串存在 params_json 列）
+// - metrics 层字段来自 fr_factor_eval_metrics（ic_mean / turnover_mean 等结构化指标）
+// - metrics.payload 由 payload_json 反序列化而来（IC 曲线 / 分组净值 / 直方图 等图表数据）
+export interface EvalMetrics {
+  ic_mean?: number | null
+  ic_std?: number | null
+  ic_ir?: number | null
+  ic_win_rate?: number | null
+  ic_t_stat?: number | null
+  rank_ic_mean?: number | null
+  turnover_mean?: number | null
+  long_short_sharpe?: number | null
+  long_short_annret?: number | null
+  payload?: Record<string, any> | null
+}
+
 export interface EvalRun {
   run_id: string
   factor_id: string
   status: 'pending' | 'running' | 'success' | 'failed'
-  params: Record<string, any>
+  params_json?: string
   pool_id: number
   start_date: string
   end_date: string
   created_at: string
   finished_at?: string
-  error?: string
-  payload?: Record<string, any>
-  metrics?: Record<string, any>
+  error_message?: string
+  metrics?: EvalMetrics | null
 }
 
 /** 创建评估任务 */

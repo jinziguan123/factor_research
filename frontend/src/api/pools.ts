@@ -29,11 +29,18 @@ export function usePool(poolId: Ref<number | string>) {
   })
 }
 
+// 请求体契约：后端 PoolIn = { name, description?, symbols? }
+export interface PoolBody {
+  name: string
+  description?: string | null
+  symbols?: string[]
+}
+
 /** 创建股票池 */
 export function useCreatePool() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: { pool_name: string; description?: string; symbols?: string[] }) =>
+    mutationFn: (body: PoolBody) =>
       client.post('/pools', body).then(r => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pools'] }),
   })
@@ -43,7 +50,7 @@ export function useCreatePool() {
 export function useUpdatePool() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ poolId, body }: { poolId: number; body: Record<string, any> }) =>
+    mutationFn: ({ poolId, body }: { poolId: number; body: PoolBody }) =>
       client.put(`/pools/${poolId}`, body).then(r => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pools'] }),
   })
@@ -58,12 +65,12 @@ export function useDeletePool() {
   })
 }
 
-/** 导入股票代码到股票池 */
+/** 导入股票代码到股票池。后端期望 { text }，空白/逗号/分号均可分隔，router 端解析。 */
 export function useImportSymbols() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ poolId, symbols }: { poolId: number; symbols: string[] }) =>
-      client.post(`/pools/${poolId}:import`, { symbols }).then(r => r.data),
+    mutationFn: ({ poolId, text }: { poolId: number; text: string }) =>
+      client.post(`/pools/${poolId}:import`, { text }).then(r => r.data as { inserted: number; total_input: number }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pools'] }),
   })
 }

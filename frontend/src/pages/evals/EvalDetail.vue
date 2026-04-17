@@ -23,8 +23,16 @@ const router = useRouter()
 const runId = computed(() => route.params.runId as string)
 const { data: evalRun, isLoading } = useEval(runId)
 
-const payload = computed(() => evalRun.value?.payload ?? null)
+// metrics 表整行嵌在 run["metrics"]，payload 又从 payload_json 解嵌到 metrics.payload
 const metrics = computed(() => evalRun.value?.metrics ?? null)
+const payload = computed(() => metrics.value?.payload ?? null)
+
+// 后端 SELECT * 直出 params_json 列（JSON 字符串），这里解析一次供展示
+const paramsDisplay = computed(() => {
+  const raw = evalRun.value?.params_json
+  if (!raw) return {}
+  try { return JSON.parse(raw) } catch { return raw }
+})
 
 const isRunning = computed(() =>
   evalRun.value?.status === 'pending' || evalRun.value?.status === 'running'
@@ -77,7 +85,7 @@ function fmtPct(v: any, digits = 2): string {
 
       <!-- 失败提示 -->
       <n-alert v-if="evalRun?.status === 'failed'" type="error" title="运行失败" style="margin-bottom: 16px">
-        {{ evalRun.error || '未知错误' }}
+        {{ evalRun.error_message || '未知错误' }}
       </n-alert>
 
       <!-- 任务基本信息 -->
@@ -88,7 +96,7 @@ function fmtPct(v: any, digits = 2): string {
         <n-descriptions-item label="创建时间">{{ evalRun.created_at }}</n-descriptions-item>
         <n-descriptions-item label="完成时间">{{ evalRun.finished_at ?? '-' }}</n-descriptions-item>
         <n-descriptions-item label="参数">
-          <code style="font-size: 12px">{{ JSON.stringify(evalRun.params) }}</code>
+          <code style="font-size: 12px">{{ JSON.stringify(paramsDisplay) }}</code>
         </n-descriptions-item>
       </n-descriptions>
 
@@ -164,10 +172,12 @@ function fmtPct(v: any, digits = 2): string {
             </n-card>
           </n-grid-item>
         </n-grid>
+      </template>
 
-        <!-- 结构化指标 -->
+      <!-- 结构化指标：独立 v-if（metrics 在 payload 缺失时仍可展示） -->
+      <template v-if="evalRun?.status === 'success' && metrics">
         <h3 style="margin-bottom: 12px">评估指标</h3>
-        <n-descriptions v-if="metrics" bordered :column="3" label-placement="left">
+        <n-descriptions bordered :column="3" label-placement="left">
           <n-descriptions-item label="IC 均值">{{ fmtNum(metrics.ic_mean) }}</n-descriptions-item>
           <n-descriptions-item label="IC IR">{{ fmtNum(metrics.ic_ir) }}</n-descriptions-item>
           <n-descriptions-item label="IC 胜率">{{ fmtPct(metrics.ic_win_rate) }}</n-descriptions-item>

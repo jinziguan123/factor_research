@@ -45,15 +45,18 @@ const updateMut = useUpdatePool()
 const importMut = useImportSymbols()
 
 async function handleSave() {
-  if (!formData.value.pool_name.trim()) {
+  const name = formData.value.pool_name.trim()
+  if (!name) {
     message.warning('请输入股票池名称')
     return
   }
+  // 对齐后端 PoolIn 契约：{ name, description?, symbols? }
+  const body = { name, description: formData.value.description || null }
   if (isEdit.value) {
-    await updateMut.mutateAsync({ poolId: poolId.value, body: formData.value })
+    await updateMut.mutateAsync({ poolId: poolId.value, body })
     message.success('保存成功')
   } else {
-    const result = await createMut.mutateAsync(formData.value)
+    const result = await createMut.mutateAsync(body)
     message.success('创建成功')
     router.replace(`/pools/${result.pool_id}`)
   }
@@ -64,17 +67,15 @@ async function handleImport() {
     message.warning('请先保存股票池再导入')
     return
   }
-  const symbols = importText.value
-    .split(/[\n,;\s]+/)
-    .map(s => s.trim())
-    .filter(Boolean)
-  if (!symbols.length) {
+  const text = importText.value.trim()
+  if (!text) {
     message.warning('请粘贴需要导入的股票代码')
     return
   }
-  await importMut.mutateAsync({ poolId: poolId.value, symbols })
+  // 后端按 \s|,|; 切分并解析，前端原样传
+  const result = await importMut.mutateAsync({ poolId: poolId.value, text })
   importText.value = ''
-  message.success(`导入 ${symbols.length} 个股票成功`)
+  message.success(`导入 ${result.inserted}/${result.total_input} 个股票成功`)
 }
 </script>
 
