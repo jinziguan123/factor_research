@@ -32,12 +32,12 @@ const { data: backtests, isLoading } = useBacktests(listParams)
 const deleteMut = useDeleteBacktest()
 
 const { data: factors } = useFactors()
-const factorOptions = computed(() => [
-  { label: '全部因子', value: null },
-  ...(factors.value ?? []).map(f => ({ label: f.display_name, value: f.factor_id })),
-])
+// NSelect 的 SelectMixedOption 不允许 value: null；原来 "全部因子/全部状态" 这样的哨兵项
+// 编译通不过。这里删掉哨兵，改由 `clearable` 的 × 按钮表达"清空=全部"，语义等价。
+const factorOptions = computed(() =>
+  (factors.value ?? []).map(f => ({ label: f.display_name, value: f.factor_id }))
+)
 const statusOptions = [
-  { label: '全部状态', value: null },
   { label: '等待中', value: 'pending' },
   { label: '运行中', value: 'running' },
   { label: '成功', value: 'success' },
