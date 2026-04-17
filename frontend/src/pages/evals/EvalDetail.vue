@@ -10,6 +10,7 @@ import {
   NProgress, NSpin, NButton, NSpace, NEmpty, NAlert,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
+import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 import ChartCard from '@/components/charts/ChartCard.vue'
 import IcSeriesChart from '@/components/charts/IcSeriesChart.vue'
@@ -23,6 +24,9 @@ const router = useRouter()
 
 const runId = computed(() => route.params.runId as string)
 const { data: evalRun, isLoading } = useEval(runId)
+
+// 池名映射：详情页把 pool_id 渲染成池名，查不到退化成 #<id>（软删池）。
+const { lookup: lookupPoolName } = usePoolNameMap()
 
 // metrics 表整行嵌在 run["metrics"]，payload 又从 payload_json 解嵌到 metrics.payload
 const metrics = computed(() => evalRun.value?.metrics ?? null)
@@ -128,7 +132,10 @@ function fmtPct(v: any, digits = 2): string {
       <!-- 任务基本信息 -->
       <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" style="margin-bottom: 24px">
         <n-descriptions-item label="因子">{{ evalRun.factor_id }}</n-descriptions-item>
-        <n-descriptions-item label="股票池">{{ evalRun.pool_id }}</n-descriptions-item>
+        <n-descriptions-item label="股票池">
+          {{ lookupPoolName(evalRun.pool_id) }}
+          <span style="color: #848E9C; font-size: 12px; margin-left: 4px">#{{ evalRun.pool_id }}</span>
+        </n-descriptions-item>
         <n-descriptions-item label="日期区间">{{ evalRun.start_date }} ~ {{ evalRun.end_date }}</n-descriptions-item>
         <n-descriptions-item label="创建时间">{{ evalRun.created_at }}</n-descriptions-item>
         <n-descriptions-item label="完成时间">{{ evalRun.finished_at ?? '-' }}</n-descriptions-item>

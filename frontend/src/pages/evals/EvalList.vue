@@ -13,6 +13,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { useEvals, useDeleteEval } from '@/api/evals'
 import type { EvalRun } from '@/api/evals'
 import { useFactors } from '@/api/factors'
+import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 const router = useRouter()
@@ -47,6 +48,9 @@ const statusOptions = [
   { label: '失败', value: 'failed' },
 ]
 
+// 池名映射：pool_id → pool_name；查不到（软删 / 列表未载入）回退到 "#<id>"。
+const { lookup: lookupPoolName } = usePoolNameMap()
+
 // ---- 表格 ----
 const columns: DataTableColumns<EvalRun> = [
   {
@@ -65,8 +69,13 @@ const columns: DataTableColumns<EvalRun> = [
   {
     title: '股票池',
     key: 'pool_id',
-    width: 80,
-    render: (row) => h(NTag, { size: 'small', bordered: false }, { default: () => `#${row.pool_id}` }),
+    width: 160,
+    ellipsis: { tooltip: true },
+    render: (row) => h(
+      NTag,
+      { size: 'small', bordered: false },
+      { default: () => lookupPoolName(row.pool_id) },
+    ),
   },
   {
     title: '日期区间',

@@ -1,6 +1,6 @@
 // 股票池 API 层
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
-import { toValue, type MaybeRefOrGetter, type Ref } from 'vue'
+import { computed, toValue, type ComputedRef, type MaybeRefOrGetter, type Ref } from 'vue'
 import { client } from './client'
 
 export interface StockSymbol {
@@ -24,6 +24,27 @@ export function usePools() {
     queryKey: ['pools'],
     queryFn: () => client.get('/pools').then(r => r.data),
   })
+}
+
+/** 池 id → 池名 的映射 hook。
+ *
+ * 供评估 / 回测的列表 / 详情页把 ``pool_id`` 渲染成可读池名。底层复用 ``usePools``
+ * 的缓存，同一页多次调用不会产生重复请求；``lookup(id)`` 查不到时返回
+ * ``#<id>`` 兜底（软删池 / 列表尚未加载完）。
+ */
+export function usePoolNameMap(): {
+  map: ComputedRef<Map<number, string>>
+  lookup: (id: number | null | undefined) => string
+} {
+  const { data } = usePools()
+  const map = computed(
+    () => new Map((data.value ?? []).map(p => [p.pool_id, p.pool_name])),
+  )
+  const lookup = (id: number | null | undefined): string => {
+    if (id == null) return '-'
+    return map.value.get(id) ?? `#${id}`
+  }
+  return { map, lookup }
 }
 
 /** 获取单个股票池 */
