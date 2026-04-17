@@ -129,6 +129,150 @@ def _df_to_obj(df: pd.DataFrame) -> dict:
     return obj
 
 
+def _build_health(
+    *,
+    factor_panel: pd.DataFrame,
+    ic_series: pd.Series,
+    turnover_series: pd.Series,
+    long_short_n_effective: int,
+    n_groups: int,
+) -> dict:
+    """把 5 个因子健康指标打包成 ``{items: [...], overall: green|yellow|red}``。
+
+    阈值经验来自 A 股日频横截面因子的常见分布，偏保守：
+    - 横截面独特值率：≥50% 连续型 / 10~50% 半离散 / <10% 离散（rank/argmax 风险区）；
+    - qcut 满组率：≥90% 正常 / 50~90% 偶有退化 / <50% 严重退化；
+    - 多空有效样本比：≥80% 正常 / 30~80% 勉强可看 / <30% 基本无信号；
+    - IC 按年稳定性：年度 IC 符号一致且 CV≤1.5 绿；符号一致但 CV>1.5 黄；符号翻转红；
+    - 换手率水平：5%~30% 合理 / 30%~60% 偏高 / <5% 近乎不动 或 >60% 过度交易。
+
+    ``overall`` 取 items 里最严重那档（red > yellow > green）。任一项 red → overall red。
+    """
+    items: list[dict] = []
+
+    # 1. 横截面独特值率
+    uniq = metrics.cross_section_uniqueness(factor_panel)
+    if uniq >= 0.5:
+        level, msg = "green", "横截面取值充分分散，适合分位分组。"
+    elif uniq >= 0.1:
+        level, msg = "yellow", "横截面独特值偏少，分组可能退化成几档。"
+    else:
+        level, msg = "red", "横截面几乎只有离散几档取值（如 rank/argmax），qcut 分组会严重退化。"
+    items.append(
+        {
+            "key": "cross_section_uniqueness",
+            "label": "横截面独特值率",
+            "value": float(uniq),
+            "display": f"{uniq * 100:.1f}%",
+            "level": level,
+            "message": msg,
+        }
+    )
+
+    # 2. qcut 满组率
+    full = metrics.qcut_full_rate(factor_panel, n_groups)
+    if full >= 0.9:
+        level, msg = "green", f"绝大多数日期都能切出 {n_groups} 组。"
+    elif full >= 0.5:
+        level, msg = "yellow", "部分日期 qcut 并组，分组曲线有轻度失真。"
+    else:
+        level, msg = "red", f"qcut 严重退化（平均只切出 ~{full * n_groups:.1f} 组），建议减小 n_groups 或换因子。"
+    items.append(
+        {
+            "key": "qcut_full_rate",
+            "label": "qcut 满组率",
+            "value": float(full),
+            "display": f"{full * 100:.1f}%",
+            "level": level,
+            "message": msg,
+        }
+    )
+
+    # 3. 多空有效样本比
+    total_days = int(len(factor_panel.index))
+    ls_ratio = (long_short_n_effective / total_days) if total_days > 0 else 0.0
+    if ls_ratio >= 0.8:
+        level, msg = "green", "多空组合样本充分。"
+    elif ls_ratio >= 0.3:
+        level, msg = "yellow", "多空有效样本偏少，净值曲线参考价值有限。"
+    else:
+        level, msg = "red", "多空有效样本极少，多半是因子横截面过度离散导致分组失败。"
+    items.append(
+        {
+            "key": "long_short_effective_ratio",
+            "label": "多空有效样本比",
+            "value": float(ls_ratio),
+            "display": f"{long_short_n_effective}/{total_days}",
+            "level": level,
+            "message": msg,
+        }
+    )
+
+    # 4. IC 按年稳定性
+    ann = metrics.ic_annual_stability(ic_series)
+    cv = float(ann.get("cv", 0.0))
+    if not ann["years"]:
+        level, msg = "yellow", "IC 样本年份不足，无法评估跨年稳定性。"
+    elif not ann["sign_consistent"]:
+        level, msg = "red", f"IC 年度均值出现符号翻转：{ann['ic_mean_by_year']}。因子方向不稳定。"
+    elif cv <= 1.5:
+        level, msg = "green", "IC 方向一致且量级稳定。"
+    else:
+        level, msg = "yellow", f"IC 方向一致但年度波动较大（CV={cv:.2f}）。"
+    items.append(
+        {
+            "key": "ic_annual_stability",
+            "label": "IC 按年稳定性",
+            "value": cv,
+            "display": ", ".join(
+                f"{y}:{v:+.3f}"
+                for y, v in zip(ann["years"], ann["ic_mean_by_year"])
+            ),
+            "level": level,
+            "message": msg,
+        }
+    )
+
+    # 5. 换手率水平（top 组，单边）
+    if turnover_series.empty:
+        to_mean = 0.0
+    else:
+        to_mean = float(turnover_series.mean())
+    if 0.05 <= to_mean <= 0.3:
+        level, msg = "green", "换手率处于合理区间。"
+    elif (0.3 < to_mean <= 0.6) or (0.02 <= to_mean < 0.05):
+        level, msg = "yellow", (
+            "换手率偏高，交易成本会明显侵蚀收益。"
+            if to_mean > 0.3
+            else "换手率偏低，因子更新很慢（可能是短期无变化或长窗口因子）。"
+        )
+    else:
+        level, msg = "red", (
+            "换手率过高，几乎每天换仓，实盘成本不可忽视。"
+            if to_mean > 0.6
+            else "换手率接近 0，因子在区间内几乎不变，没有可交易信号。"
+        )
+    items.append(
+        {
+            "key": "turnover_level",
+            "label": "换手率水平",
+            "value": to_mean,
+            "display": f"{to_mean * 100:.1f}%",
+            "level": level,
+            "message": msg,
+        }
+    )
+
+    levels = {it["level"] for it in items}
+    if "red" in levels:
+        overall = "red"
+    elif "yellow" in levels:
+        overall = "yellow"
+    else:
+        overall = "green"
+    return {"overall": overall, "items": items}
+
+
 # ---------------------------- 公共入口 ----------------------------
 
 
@@ -250,6 +394,14 @@ def run_eval(run_id: str, body: dict) -> None:
         rank_ic_sum = metrics.ic_summary(rank_ic[base_period])
         ls_stats = metrics.long_short_metrics(ls)
 
+        health = _build_health(
+            factor_panel=F,
+            ic_series=ic[base_period],
+            turnover_series=to,
+            long_short_n_effective=int(ls_stats["long_short_n_effective"]),
+            n_groups=n_groups,
+        )
+
         payload = {
             "ic": {str(k): _series_to_obj(ic[k]) for k in fwd_periods},
             "rank_ic": {str(k): _series_to_obj(rank_ic[k]) for k in fwd_periods},
@@ -263,6 +415,7 @@ def run_eval(run_id: str, body: dict) -> None:
             # 多空有效样本数：ls 已在 long_short_series 里 dropna，长度即有效天数。
             # 前端据此展示"样本不足"告警（rank 类因子 + qcut 退化时常见）。
             "long_short_n_effective": ls_stats["long_short_n_effective"],
+            "health": health,
         }
 
         with mysql_conn() as c:

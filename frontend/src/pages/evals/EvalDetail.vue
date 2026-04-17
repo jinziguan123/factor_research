@@ -7,7 +7,7 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NGrid, NGridItem, NDescriptions, NDescriptionsItem,
-  NProgress, NSpin, NButton, NSpace, NEmpty, NAlert,
+  NProgress, NSpin, NButton, NSpace, NEmpty, NAlert, NCard, NTag,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
 import { usePoolNameMap } from '@/api/pools'
@@ -67,6 +67,39 @@ const longShortSampleInsufficient = computed(() => {
   const n = longShortNEffective.value
   return n !== null && n > 0 && n < LS_SAMPLE_WARN_THRESHOLD
 })
+
+// 因子体检卡片数据：后端 _build_health 产出的 {overall, items[]}。
+// 老的 run 没这段，payload.health 会是 undefined → 直接不渲染卡片。
+interface HealthItem {
+  key: string
+  label: string
+  value: number
+  display: string
+  level: 'green' | 'yellow' | 'red'
+  message: string
+}
+interface HealthPayload {
+  overall: 'green' | 'yellow' | 'red'
+  items: HealthItem[]
+}
+const health = computed<HealthPayload | null>(() => {
+  const h = payload.value?.health
+  if (!h || !Array.isArray(h.items)) return null
+  return h as HealthPayload
+})
+
+// Naive UI NTag 的 type 映射：green/yellow/red → success/warning/error
+function levelTagType(level: string): 'success' | 'warning' | 'error' | 'default' {
+  if (level === 'green') return 'success'
+  if (level === 'yellow') return 'warning'
+  if (level === 'red') return 'error'
+  return 'default'
+}
+function overallBadge(level: string): { type: 'success' | 'warning' | 'error'; text: string } {
+  if (level === 'red') return { type: 'error', text: '存在严重风险' }
+  if (level === 'yellow') return { type: 'warning', text: '有可疑信号' }
+  return { type: 'success', text: '整体健康' }
+}
 
 // 后端 SELECT * 直出 params_json 列（JSON 字符串），这里解析一次供展示
 const paramsDisplay = computed(() => {
@@ -231,6 +264,42 @@ function fmtPct(v: any, digits = 2): string {
         </n-grid>
       </template>
 
+      <!-- 因子体检卡片：跨年 IC 稳定性 / 横截面独特值率 / qcut 满组率 / 多空样本比 /
+           换手率水平 的红黄绿诊断。在看"评估指标"数字前先看这里能否相信数字。-->
+      <template v-if="evalRun?.status === 'success' && health">
+        <n-card
+          size="small"
+          style="margin-bottom: 24px"
+        >
+          <template #header>
+            <n-space align="center">
+              <span>因子体检</span>
+              <n-tag :type="overallBadge(health.overall).type" size="small" round>
+                {{ overallBadge(health.overall).text }}
+              </n-tag>
+            </n-space>
+          </template>
+          <n-grid :cols="5" :x-gap="12" :y-gap="12" responsive="screen" item-responsive>
+            <n-grid-item
+              v-for="item in health.items"
+              :key="item.key"
+              span="5 s:5 m:5 l:1 xl:1 2xl:1"
+            >
+              <div class="health-cell">
+                <div class="health-cell-head">
+                  <span class="health-cell-label">{{ item.label }}</span>
+                  <n-tag :type="levelTagType(item.level)" size="small" round>
+                    {{ item.level === 'green' ? '正常' : item.level === 'yellow' ? '注意' : '异常' }}
+                  </n-tag>
+                </div>
+                <div class="health-cell-display">{{ item.display }}</div>
+                <div class="health-cell-msg">{{ item.message }}</div>
+              </div>
+            </n-grid-item>
+          </n-grid>
+        </n-card>
+      </template>
+
       <!-- 结构化指标：独立 v-if（metrics 在 payload 缺失时仍可展示） -->
       <template v-if="evalRun?.status === 'success' && metrics">
         <h3 style="margin-bottom: 12px">评估指标</h3>
@@ -265,3 +334,36 @@ function fmtPct(v: any, digits = 2): string {
     </n-spin>
   </div>
 </template>
+
+<style scoped>
+.health-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--n-border-color, #eee);
+  border-radius: 6px;
+  height: 100%;
+  min-height: 112px;
+}
+.health-cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.health-cell-label {
+  font-size: 13px;
+  color: var(--n-text-color-2, #606266);
+}
+.health-cell-display {
+  font-size: 18px;
+  font-weight: 600;
+  word-break: break-all;
+}
+.health-cell-msg {
+  font-size: 12px;
+  color: var(--n-text-color-3, #848E9C);
+  line-height: 1.45;
+}
+</style>

@@ -249,6 +249,116 @@ def long_short_metrics(
     }
 
 
+def cross_section_uniqueness(factor: pd.DataFrame) -> float:
+    """每日横截面独特值率的均值：`nunique() / n_valid` 的时间均值。
+
+    直接反映"这个因子在单日是不是高度离散 tied"——rank / argmax / 分档类因子
+    值域有限，横截面内大量股票值完全相同，uniqueness 会显著低于 1。连续因子
+    （动量、反转、波动率）这个比例通常非常接近 1。
+
+    Returns:
+        float ∈ [0, 1]；空表或每行都只有 <1 个非 NaN 值 → 返回 0.0（无法定义）。
+    """
+    if factor.empty:
+        return 0.0
+    ratios: list[float] = []
+    for _, row in factor.iterrows():
+        valid = row.dropna()
+        if len(valid) < 1:
+            continue
+        ratios.append(valid.nunique() / len(valid))
+    if not ratios:
+        return 0.0
+    return float(np.mean(ratios))
+
+
+def qcut_full_rate(factor: pd.DataFrame, n_groups: int) -> float:
+    """每日 `pd.qcut(..., duplicates='drop')` 实际出组数 / 请求组数 的时间均值。
+
+    直接预测"分组 / 多空能不能做出来"——rank 类因子大量 tied 导致 qcut 边界
+    合并，实际组数 < n_groups 时，最顶 / 最底分位会经常为空，`long_short_series`
+    dropna 后有效样本急剧萎缩（用户曾踩坑的根源）。
+
+    Args:
+        factor: 因子宽表。
+        n_groups: 请求的分组数（与评估 / 回测里一致即可）。
+
+    Returns:
+        float ∈ [0, 1]；每个有效日贡献 `实际组数 / n_groups`，再跨日取均值。
+        空表 / n_groups <= 0 / 所有日都 qcut 失败 → 0.0。
+    """
+    if factor.empty or n_groups <= 0:
+        return 0.0
+    ratios: list[float] = []
+    for _, row in factor.iterrows():
+        valid = row.dropna()
+        if len(valid) < n_groups:
+            continue
+        try:
+            labels = pd.qcut(valid, q=n_groups, labels=False, duplicates="drop")
+        except ValueError:
+            # 所有值完全相同等退化 case：记为 0 组（而非跳过），否则会人为高估满组率。
+            ratios.append(0.0)
+            continue
+        # pandas 1.x 对全相同输入可能静默返回全 NaN，dropna 统一处理。
+        labels = labels.dropna()
+        if labels.empty:
+            ratios.append(0.0)
+            continue
+        actual_groups = int(labels.nunique())
+        ratios.append(min(actual_groups / n_groups, 1.0))
+    if not ratios:
+        return 0.0
+    return float(np.mean(ratios))
+
+
+def ic_annual_stability(ic_series: pd.Series) -> dict:
+    """把 IC 序列按年分段，报告年度 IC 均值与跨年稳定性。
+
+    研究里经常一个因子在样本内（比如 2019-2021）IC 很好，样本外（2022+）反号
+    或无效。整段平均 IC 会掩盖这种失效。按年拆开一眼就能看出"稳定 / 单年显著
+    / 后期塌陷"。
+
+    Args:
+        ic_series: 每日 IC（``cross_sectional_ic`` 的输出）；index 必须是
+            可访问 ``.year`` 的 DatetimeIndex。
+
+    Returns:
+        ``{"years": [2020, 2021, ...],
+           "ic_mean_by_year": [0.012, -0.004, ...],
+           "sign_consistent": True/False,       # 所有非零年份同号
+           "cv": 0.87}``                        # std / |mean| 跨年 IC 均值的变异系数
+
+        空输入返回 ``{"years": [], "ic_mean_by_year": [], "sign_consistent": True, "cv": 0.0}``。
+    """
+    if ic_series.empty:
+        return {
+            "years": [],
+            "ic_mean_by_year": [],
+            "sign_consistent": True,
+            "cv": 0.0,
+        }
+    # groupby 年份；index 已是 DatetimeIndex（cross_sectional_ic 保证）。
+    by_year = ic_series.groupby(ic_series.index.year).mean()
+    years = [int(y) for y in by_year.index]
+    means = [float(v) for v in by_year.values]
+    # 一致性：所有|v|>1e-10 的年份符号相同（完全 0 的年份不参与判定）。
+    signs = [1 if v > 1e-10 else -1 if v < -1e-10 else 0 for v in means]
+    nonzero_signs = [s for s in signs if s != 0]
+    sign_consistent = len(set(nonzero_signs)) <= 1
+    # 变异系数：跨年 IC mean 的 std / |mean|。1e-12 兜底避免除零。
+    arr = np.array(means, dtype=float)
+    mean_of_means = float(arr.mean()) if arr.size else 0.0
+    std_of_means = float(arr.std(ddof=1)) if arr.size > 1 else 0.0
+    cv = std_of_means / (abs(mean_of_means) + 1e-12)
+    return {
+        "years": years,
+        "ic_mean_by_year": means,
+        "sign_consistent": sign_consistent,
+        "cv": float(cv),
+    }
+
+
 def value_histogram(values: pd.DataFrame, bins: int = 50) -> dict:
     """把因子值拉平后算直方图。
 
