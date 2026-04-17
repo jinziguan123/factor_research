@@ -90,9 +90,18 @@ def list_backtests(
     status: str | None = None,
     limit: int = 50,
 ) -> dict:
-    """列出回测任务（倒序 + 可选筛）。"""
+    """列出回测任务（倒序 + 可选筛）。
+
+    同 ``list_evals``：只返回列表页需要的字段，不带 ``params_json``（可能几 KB 一行）。
+    需要完整参数时走 ``GET /api/backtests/{run_id}``。
+    """
     limit = max(1, min(int(limit), 500))
-    sql = "SELECT * FROM fr_backtest_runs WHERE 1=1"
+    sql = (
+        "SELECT run_id, factor_id, factor_version, params_hash, pool_id, freq, "
+        "start_date, end_date, status, progress, error_message, "
+        "created_at, started_at, finished_at "
+        "FROM fr_backtest_runs WHERE 1=1"
+    )
     params: list = []
     if factor_id:
         sql += " AND factor_id=%s"

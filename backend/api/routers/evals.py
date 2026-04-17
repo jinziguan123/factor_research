@@ -89,10 +89,21 @@ def list_evals(
     """列出评估任务（倒序 + 可选筛）。
 
     limit 上限由前端约束；后端再用 ``min(limit, 500)`` 硬性兜底，避免扫表过大。
+
+    返回字段只包含列表页需要的列（不返回 ``params_json`` / ``payload_json``）：
+    - ``params_json`` 每行几百 B ~ 几 KB，500 条就是几 MB 白跑；
+    - 需要完整参数 / 指标时走 ``GET /api/evals/{run_id}`` 详情端点。
     """
     # 硬兜底：前端 bug 或 curl 误传都不会拖垮库。
     limit = max(1, min(int(limit), 500))
-    sql = "SELECT * FROM fr_factor_eval_runs WHERE 1=1"
+    # 列表页只展示 run_id / 因子 / 状态 / 池 / 区间 / 时间；error_message 保留
+    # 供"失败任务"的 tooltip 展示（通常几十字节，可接受）。
+    sql = (
+        "SELECT run_id, factor_id, factor_version, params_hash, pool_id, freq, "
+        "start_date, end_date, status, progress, error_message, "
+        "created_at, started_at, finished_at "
+        "FROM fr_factor_eval_runs WHERE 1=1"
+    )
     params: list = []
     if factor_id:
         sql += " AND factor_id=%s"
