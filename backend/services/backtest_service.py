@@ -381,6 +381,15 @@ def run_backtest(run_id: str, body: dict) -> None:
         size = W * init_cash / close
         size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
+        # vbt.Portfolio.from_orders 里 execute_order_nb 要求每个 tick 的 price
+        # 都 finite 且 > 0，即使该 tick size=0 也照查。A 股 qfq close 里：
+        # - 停牌日 → NaN
+        # - 起始未上市段 → 整段 NaN
+        # - 偶发数据异常 → 0 或 inf
+        # 先 ffill 把停牌日填成停牌前价，起始 NaN / 非正数用 1.0 占位。这些位置
+        # 上方 size 已经是 0，占位价不会产生虚构交易，只是满足 vbt 的硬校验。
+        close = close.where(close > 0).ffill().fillna(1.0)
+
         _update_status(run_id, progress=70)
 
         # 5) VectorBT 组合回测
