@@ -168,6 +168,17 @@ def run_eval(run_id: str, body: dict) -> None:
 
         data = DataService()
         symbols = data.resolve_pool(int(body["pool_id"]))
+        n_groups_req = int(body.get("n_groups", 5))
+        # 横截面指标至少要求池内股票数 ≥ n_groups：
+        # - IC / Rank IC 每天需要 ≥3 个样本才能算相关系数；
+        # - group_returns / turnover 需要 ≥n_groups 才能做 qcut 分组。
+        # 否则所有指标只会返回空 Series，任务表面 success 但指标全 0，严重误导用户。
+        if len(symbols) < n_groups_req:
+            raise ValueError(
+                f"股票池 pool_id={body['pool_id']} 仅含 {len(symbols)} 只股票，"
+                f"小于 n_groups={n_groups_req}，无法计算横截面 IC / 分组 / 换手等指标。"
+                f"请换一个至少包含 {n_groups_req} 只股票的股票池，或减小 n_groups。"
+            )
         start = pd.to_datetime(body["start_date"])
         end = pd.to_datetime(body["end_date"])
         warmup = factor.required_warmup(params)
@@ -222,7 +233,7 @@ def run_eval(run_id: str, body: dict) -> None:
         }
 
         _set_status(run_id, progress=75)
-        n_groups = int(body.get("n_groups", 5))
+        n_groups = n_groups_req
         # 分组 / 换手 / 多空只用 1 日前瞻，避免"窗口重叠但是要每日调仓"的语义歧义。
         base_period = fwd_periods[0] if fwd_periods else 1
         g_rets = metrics.group_returns(

@@ -27,3 +27,9 @@ backend/.env
 
 # 一键启动脚本的运行时文件（pid / 日志）
 .run/
+
+# Claude Code 工作目录（worktree / 会话状态等，不入版本库）
+.claude/
+
+# 本地调试脚本
+test.py

@@ -1,13 +1,19 @@
 // 股票池 API 层
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
+import { toValue, type MaybeRefOrGetter, type Ref } from 'vue'
 import { client } from './client'
-import type { Ref } from 'vue'
+
+export interface StockSymbol {
+  symbol: string
+  name: string
+}
 
 export interface Pool {
   pool_id: number
   pool_name: string
-  description: string
-  symbols: string[]
+  description: string | null
+  // 后端返回 [{symbol, name}, ...]；旧代码里错写成 string[]，渲染会显示 [object Object]。
+  symbols: StockSymbol[]
   created_at: string
   updated_at: string
 }
@@ -52,7 +58,11 @@ export function useUpdatePool() {
   return useMutation({
     mutationFn: ({ poolId, body }: { poolId: number; body: PoolBody }) =>
       client.put(`/pools/${poolId}`, body).then(r => r.data),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['pools'] }),
+    onSuccess: (_res, vars) => {
+      // 列表和详情查询 key 不同，两个都要 invalidate，否则详情页的 symbol 列表不刷新。
+      qc.invalidateQueries({ queryKey: ['pools'] })
+      qc.invalidateQueries({ queryKey: ['pool', vars.poolId] })
+    },
   })
 }
 
@@ -71,6 +81,23 @@ export function useImportSymbols() {
   return useMutation({
     mutationFn: ({ poolId, text }: { poolId: number; text: string }) =>
       client.post(`/pools/${poolId}:import`, { text }).then(r => r.data as { inserted: number; total_input: number }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['pools'] }),
+    onSuccess: (_res, vars) => {
+      qc.invalidateQueries({ queryKey: ['pools'] })
+      qc.invalidateQueries({ queryKey: ['pool', vars.poolId] })
+    },
+  })
+}
+
+/** 按代码 / 中文名模糊搜索股票（用于池编辑器的下拉补全）。
+ * 传响应式的 q（Ref / ComputedRef / getter），值变化自动 refetch。
+ */
+export function useSearchSymbols(q: MaybeRefOrGetter<string>) {
+  return useQuery<StockSymbol[]>({
+    queryKey: ['symbols', q],
+    queryFn: () => client.get('/symbols', {
+      params: { q: toValue(q) ?? '', limit: 50 },
+    }).then(r => r.data),
+    // 空 q 时后端也返回前 50 条，点开下拉就能看到初始候选；所以不加 enabled 条件。
+    staleTime: 30_000,
   })
 }

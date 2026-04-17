@@ -10,8 +10,8 @@ const menuOptions = [
   { label: 'Dashboard', key: '/' },
   { label: '因子库', key: '/factors' },
   { label: '股票池', key: '/pools' },
-  { label: '新评估', key: '/evals/new' },
-  { label: '新回测', key: '/backtests/new' },
+  { label: '评估记录', key: '/evals' },
+  { label: '回测记录', key: '/backtests' },
   { label: '数据维护', key: '/admin' },
 ]
 

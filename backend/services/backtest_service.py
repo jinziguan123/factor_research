@@ -303,6 +303,16 @@ def run_backtest(run_id: str, body: dict) -> None:
 
         data = DataService()
         symbols = data.resolve_pool(int(body["pool_id"]))
+        n_groups_req = int(body.get("n_groups", 5))
+        # qcut 分组回测至少需要 n_groups 只股票：_build_weights 对 <n_groups 的日期
+        # 整天退回空仓，结果就是净值永远 =1、指标全 0、看起来"成功"实则无意义。
+        # 前置校验直接 failed，信息比空结果有价值得多。
+        if len(symbols) < n_groups_req:
+            raise ValueError(
+                f"股票池 pool_id={body['pool_id']} 仅含 {len(symbols)} 只股票，"
+                f"小于 n_groups={n_groups_req}，无法进行分组回测。"
+                f"请换一个至少包含 {n_groups_req} 只股票的股票池，或减小 n_groups。"
+            )
         start = pd.to_datetime(body["start_date"])
         end = pd.to_datetime(body["end_date"])
         warmup = factor.required_warmup(params)
@@ -354,7 +364,7 @@ def run_backtest(run_id: str, body: dict) -> None:
         _update_status(run_id, progress=55)
 
         # 4) 权重 → size
-        n_groups = int(body.get("n_groups", 5))
+        n_groups = n_groups_req
         rebalance = int(body.get("rebalance_period", 1))
         position = str(body.get("position", "top"))
         init_cash = float(body.get("init_cash", 1e7))

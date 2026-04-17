@@ -1,7 +1,7 @@
 // 评估 API 层
-import { useQuery, useMutation } from '@tanstack/vue-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
+import { toValue, type MaybeRefOrGetter, type Ref } from 'vue'
 import { client } from './client'
-import type { Ref } from 'vue'
 
 // 后端 GET /api/evals/{run_id} 的返回结构：
 // - run 层字段来自 fr_factor_eval_runs（params 以 JSON 字符串存在 params_json 列）
@@ -55,10 +55,20 @@ export function useEval(runId: Ref<string>) {
   })
 }
 
-/** 获取评估列表 */
-export function useEvals(params?: Record<string, any>) {
+/** 获取评估列表。params 支持响应式（Ref/Computed/Getter），变化会自动 refetch。 */
+export function useEvals(params?: MaybeRefOrGetter<Record<string, any> | undefined>) {
   return useQuery<EvalRun[]>({
+    // queryKey 里直接放 ref/getter，Vue Query 会 track 响应式变化
     queryKey: ['evals', params],
-    queryFn: () => client.get('/evals', { params }).then(r => r.data),
+    queryFn: () => client.get('/evals', { params: toValue(params) ?? {} }).then(r => r.data),
+  })
+}
+
+/** 删除评估记录 */
+export function useDeleteEval() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) => client.delete(`/evals/${runId}`).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['evals'] }),
   })
 }
