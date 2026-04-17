@@ -1,0 +1,9 @@
+# Force CRLF for Windows batch files regardless of user's core.autocrlf.
+# Rationale: Windows cmd parses .bat as CP936 (GBK) on Chinese locales and is
+# sensitive to line endings near multibyte sequences. Pinning CRLF removes one
+# axis of variability.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Shell scripts stay LF so they run on macOS / Linux.
+*.sh   text eol=lf
