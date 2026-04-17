@@ -107,6 +107,94 @@ def test_list_pools_contains_created_one():
     assert any(p["pool_id"] == pid for p in pools)
 
 
+def test_pool_import_dedups_and_preserves_order():
+    """批量 import 同批重复 symbol 只记一次；``sort_order`` 按首次出现位置。
+
+    回归点：改批量 INSERT 后，去重必须做在 Python 侧（不是靠 INSERT IGNORE 撞
+    唯一索引），否则多次出现的 symbol 在 VALUES 里会多次出现、rowcount=1 只来自
+    第一次，后续同 pool_id+symbol_id 撞主键被 IGNORE 吞掉，结果与老路径一致但
+    sort_order 会分配给第一次出现的位置而不是最后一次（行为可观测）。
+    """
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        r = c.post("/api/pools", json={"name": "__test_poolDedup", "symbols": []})
+        pid = r.json()["data"]["pool_id"]
+
+        # 重复 600000.SH，未知 999999.XX 过滤掉
+        r2 = c.post(
+            f"/api/pools/{pid}:import",
+            json={"text": "000001.SZ 600000.SH 600000.SH 600519.SH 999999.XX"},
+        )
+        assert r2.status_code == 200
+        body = r2.json()["data"]
+        assert body["total_input"] == 5
+        # 去重后的合法 symbol = 3（000001 / 600000 / 600519）
+        assert body["inserted"] == 3
+
+        r3 = c.get(f"/api/pools/{pid}")
+    data = r3.json()["data"]
+    symbols = [s["symbol"] for s in data["symbols"]]
+    # 保序：按首次出现位置排
+    assert symbols == ["000001.SZ", "600000.SH", "600519.SH"]
+
+
+def test_update_pool_without_symbols_preserves_members():
+    """PUT 不传 symbols 时必须保留成员，只改 name / description。
+
+    回归点：schemas.PoolIn.symbols 的默认值从 ``[]`` 改成 ``None`` 后，原先
+    "用户只改池名 → 成员全被清空" 的既存 bug 才被修掉。若默认回到 ``[]``，这条
+    用例会立刻炸。
+    """
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/pools",
+            json={
+                "name": "__test_poolKeep",
+                "symbols": ["000001.SZ", "600519.SH"],
+            },
+        )
+        pid = r.json()["data"]["pool_id"]
+
+        # 只改池名，不传 symbols
+        r2 = c.put(
+            f"/api/pools/{pid}",
+            json={"name": "__test_poolKeep_renamed", "description": "x"},
+        )
+        assert r2.status_code == 200, r2.text
+
+        r3 = c.get(f"/api/pools/{pid}")
+    data = r3.json()["data"]
+    assert data["pool_name"] == "__test_poolKeep_renamed"
+    assert [s["symbol"] for s in data["symbols"]] == ["000001.SZ", "600519.SH"]
+
+
+def test_update_pool_with_empty_symbols_clears_members():
+    """PUT 显式传 ``symbols: []`` 时**清空**成员。
+
+    与上一条配对：验证 None / [] 两种入参的行为分叉。
+    """
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/pools",
+            json={"name": "__test_poolClear", "symbols": ["000001.SZ"]},
+        )
+        pid = r.json()["data"]["pool_id"]
+
+        r2 = c.put(
+            f"/api/pools/{pid}",
+            json={"name": "__test_poolClear", "symbols": []},
+        )
+        assert r2.status_code == 200
+
+        r3 = c.get(f"/api/pools/{pid}")
+    assert r3.json()["data"]["symbols"] == []
+
+
 def test_delete_pool_soft_deletes():
     from backend.api.main import app
 

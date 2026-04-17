@@ -7,7 +7,11 @@
 - ``soft delete``：``DELETE /api/pools/{pid}`` 只置 ``is_active=0``，保留历史记录；
   ``list_pools`` 过滤 ``is_active=1``。
 - ``POST /api/pools/{pid}:import``：支持换行 / 空格 / 逗号 / 分号分隔；
-  未知 symbol 静默跳过（用 ``resolve_symbol_id`` 逐个查，None 即跳过）。
+  未知 symbol 静默跳过。
+- 写入路径性能：``create / update / import`` 统一走"批量 resolve + 分块多值 INSERT"。
+  原先每个 symbol 走一次 ``resolve_symbol_id`` 再单行 INSERT，"全量添加"~5000
+  只股票时会产生 ~10000 次网络往返，在机房外部网络下可直接撑爆 FastAPI 默认
+  超时（观察到 60s+ 超时）。改成批量化后是 1 次 SELECT IN + 若干次多值 INSERT。
 """
 from __future__ import annotations
 
@@ -24,6 +28,69 @@ router = APIRouter(prefix="/api/pools", tags=["pools"])
 
 # 统一的 token 分隔正则：空白 + 逗号 + 分号；多个连续分隔符合并为一次切分。
 _IMPORT_TOKEN_RE = re.compile(r"[\s,;]+")
+
+# 批量 INSERT 每块的 symbol 数上限。单条 SQL 过长会撞 ``max_allowed_packet``
+# （默认 16MB）和 server 端 parser 内存。1000 行 * 每行 ~40 字节 ≈ 40KB，
+# 对 5000 只 A 股全量添加也只需 5 次 INSERT，整体 100ms 级。
+_INSERT_BATCH_SIZE = 1000
+
+
+def _bulk_insert_pool_symbols(
+    cur, pool_id: int, symbols: list[str], base_sort_order: int = 0
+) -> int:
+    """把 symbols 批量写进 ``stock_pool_symbol``，返回实际 INSERT 的行数。
+
+    Args:
+        cur: 已打开的游标（由调用方负责 commit）。
+        pool_id: 目标池 id。
+        symbols: 原始 symbol 列表，顺序决定 ``sort_order``（起点由 base 指定）。
+        base_sort_order: ``sort_order`` 起点，``import_symbols`` 场景要接在已有
+            记录后面，传 ``MAX(sort_order)+1``；``create/update`` 从 0 起即可。
+
+    Returns:
+        累计 INSERT 的行数（已汇总各批 ``cur.rowcount``）；重复 symbol 由
+        ``INSERT IGNORE`` 吞掉，不计入。
+
+    实现说明：
+    - ``SymbolResolver().resolve_many`` 做一次 ``SELECT ... WHERE symbol IN (...)``，
+      5000 个 symbol 用一次查询搞定；未知 symbol 会被过滤，无需调用方再判 None。
+    - ``sort_order`` 按**原始 symbols 列表里的位置**生成，过滤未知之后保留相对顺序；
+      同一 symbol 重复出现只取首次位置（避免 ``INSERT IGNORE`` 吞第二次但 sort
+      已跳号导致列表出现空洞）。
+    - 分块拼 ``INSERT IGNORE ... VALUES (%s,%s,%s), (%s,%s,%s), ...``，一次
+      execute 多行，避开 N 次网络往返。
+    """
+    if not symbols:
+        return 0
+    resolver = SymbolResolver()
+    sym_to_id = resolver.resolve_many(symbols)
+    if not sym_to_id:
+        return 0
+
+    # 按原始顺序生成三元组；同一 symbol 只保留首次出现，防 sort_order 跳号。
+    seen: set[str] = set()
+    rows: list[tuple[int, int, int]] = []
+    for i, s in enumerate(symbols):
+        if s in seen:
+            continue
+        seen.add(s)
+        sid = sym_to_id.get(s)
+        if sid is None:
+            continue
+        rows.append((pool_id, sid, base_sort_order + i))
+
+    inserted = 0
+    for start in range(0, len(rows), _INSERT_BATCH_SIZE):
+        chunk = rows[start : start + _INSERT_BATCH_SIZE]
+        placeholders = ",".join(["(%s,%s,%s)"] * len(chunk))
+        flat: list[int] = [v for row in chunk for v in row]
+        cur.execute(
+            f"INSERT IGNORE INTO stock_pool_symbol "
+            f"(pool_id, symbol_id, sort_order) VALUES {placeholders}",
+            flat,
+        )
+        inserted += cur.rowcount
+    return inserted
 
 
 @router.get("")
@@ -48,7 +115,6 @@ def create_pool(body: PoolIn) -> dict:
     - 未知 symbol 静默跳过；
     - ``INSERT IGNORE`` 保证同 symbol 重复传入不抛 ``Duplicate entry``。
     """
-    resolver = SymbolResolver()
     with mysql_conn() as c:
         with c.cursor() as cur:
             cur.execute(
@@ -57,15 +123,7 @@ def create_pool(body: PoolIn) -> dict:
                 (settings.owner_key, body.name, body.description),
             )
             pid = cur.lastrowid
-            for i, s in enumerate(body.symbols):
-                sid = resolver.resolve_symbol_id(s)
-                if sid is None:
-                    continue
-                cur.execute(
-                    "INSERT IGNORE INTO stock_pool_symbol "
-                    "(pool_id, symbol_id, sort_order) VALUES (%s, %s, %s)",
-                    (pid, sid, i),
-                )
+            _bulk_insert_pool_symbols(cur, pid, body.symbols)
         c.commit()
     return ok({"pool_id": pid})
 
@@ -98,8 +156,11 @@ def get_pool(pool_id: int) -> dict:
 
 @router.put("/{pool_id}")
 def update_pool(pool_id: int, body: PoolIn) -> dict:
-    """全量覆盖池 meta + 成员；成员按入参顺序重排 sort_order。"""
-    resolver = SymbolResolver()
+    """全量覆盖池 meta + 成员；成员按入参顺序重排 sort_order。
+
+    注意：body.symbols 是 ``Optional``；只改 meta 时前端不传 symbols，这里不能
+    把 "未传" 和 "传了空列表 []" 混淆 —— 前者保留成员，后者清空。
+    """
     with mysql_conn() as c:
         with c.cursor() as cur:
             cur.execute(
@@ -119,18 +180,11 @@ def update_pool(pool_id: int, body: PoolIn) -> dict:
                 )
                 if not cur.fetchone():
                     raise HTTPException(status_code=404, detail="pool not found")
-            cur.execute(
-                "DELETE FROM stock_pool_symbol WHERE pool_id=%s", (pool_id,)
-            )
-            for i, s in enumerate(body.symbols):
-                sid = resolver.resolve_symbol_id(s)
-                if sid is None:
-                    continue
+            if body.symbols is not None:
                 cur.execute(
-                    "INSERT INTO stock_pool_symbol "
-                    "(pool_id, symbol_id, sort_order) VALUES (%s, %s, %s)",
-                    (pool_id, sid, i),
+                    "DELETE FROM stock_pool_symbol WHERE pool_id=%s", (pool_id,)
                 )
+                _bulk_insert_pool_symbols(cur, pool_id, body.symbols)
         c.commit()
     return ok({"pool_id": pool_id})
 
@@ -168,8 +222,6 @@ def import_symbols(pool_id: int, body: PoolImportIn) -> dict:
         （``cur.rowcount`` 汇总），重复 symbol 不算；``total_input`` 是解析后的 token 总数。
     """
     tokens = [t for t in _IMPORT_TOKEN_RE.split(body.text) if t]
-    resolver = SymbolResolver()
-    inserted = 0
     with mysql_conn() as c:
         with c.cursor() as cur:
             # 新增的 sort_order 从当前最大值 + 1 起排，避免和已有顺序冲突。
@@ -179,15 +231,6 @@ def import_symbols(pool_id: int, body: PoolImportIn) -> dict:
                 (pool_id,),
             )
             base = (cur.fetchone() or {"m": -1})["m"] + 1
-            for i, s in enumerate(tokens):
-                sid = resolver.resolve_symbol_id(s)
-                if sid is None:
-                    continue
-                cur.execute(
-                    "INSERT IGNORE INTO stock_pool_symbol "
-                    "(pool_id, symbol_id, sort_order) VALUES (%s, %s, %s)",
-                    (pool_id, sid, base + i),
-                )
-                inserted += cur.rowcount
+            inserted = _bulk_insert_pool_symbols(cur, pool_id, tokens, base)
         c.commit()
     return ok({"inserted": inserted, "total_input": len(tokens)})

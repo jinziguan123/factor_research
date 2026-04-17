@@ -62,11 +62,18 @@ class CreateBacktestIn(BaseModel):
 
 
 class PoolIn(BaseModel):
-    """``POST /api/pools`` / ``PUT /api/pools/{pid}`` 请求体。"""
+    """``POST /api/pools`` / ``PUT /api/pools/{pid}`` 请求体。
+
+    ``symbols`` 语义（``None`` vs ``[]`` 必须区分）：
+    - ``None`` / 未传：``PUT`` 保留现有成员不动（只改 name / description）；
+      ``POST`` 建空池。
+    - ``[]``：显式清空成员。
+    历史坑：默认值设成 ``[]`` 时，前端只想改池名也会把成员一并清掉，修名=失池。
+    """
 
     name: str
     description: str | None = None
-    symbols: list[str] = []
+    symbols: list[str] | None = None
 
 
 class PoolImportIn(BaseModel):
