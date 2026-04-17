@@ -101,3 +101,22 @@ export function useSearchSymbols(q: MaybeRefOrGetter<string>) {
     staleTime: 30_000,
   })
 }
+
+/** 按 glob 模式批量匹配股票（一次性调用，不做 query 缓存）。
+ *
+ * 用于"按规则批量添加"和"全量添加"场景。与 ``useSearchSymbols`` 的区别：
+ * - 返回**所有**匹配项（后端上限 10000），不是搜索补全的前 50 条；
+ * - 只匹配 symbol 字段，不匹配 name；
+ * - glob 通配符：``*`` 任意长度、``?`` 单字符。
+ *
+ * 例：
+ *   await matchSymbolsByPattern('*.SZ')   // 全部深交所
+ *   await matchSymbolsByPattern('60*')    // 60 开头（沪市主板）
+ *   await matchSymbolsByPattern('*')      // 全部
+ */
+export async function matchSymbolsByPattern(
+  pattern: string,
+): Promise<StockSymbol[]> {
+  const r = await client.get('/symbols', { params: { pattern } })
+  return r.data as StockSymbol[]
+}

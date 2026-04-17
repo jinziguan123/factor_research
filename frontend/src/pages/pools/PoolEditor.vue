@@ -4,7 +4,8 @@
  * 新建：POST /api/pools
  * 编辑：GET + PUT /api/pools/:id
  * 添加股票：
- *   - 搜索下拉（代码 / 名称模糊匹配，多选）→ 一键加入
+ *   - 搜索下拉（代码 / 名称模糊匹配，多选）→ 一键加入 / 加入当前搜索结果
+ *   - 按规则批量添加（glob 模式，如 *.SZ / 60* / *）→ 先预览再一键加入
  *   - 批量粘贴（兼容老用法）
  * 移除股票：每个 tag 的 × 按钮
  */
@@ -12,12 +13,13 @@ import { ref, watch, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NInput, NButton, NSpace,
-  NTag, NSelect, NEmpty, useMessage,
+  NTag, NSelect, NEmpty, NAlert, useMessage,
 } from 'naive-ui'
 import type { SelectOption } from 'naive-ui'
 import {
   usePool, useCreatePool, useUpdatePool, useImportSymbols,
-  useSearchSymbols,
+  useSearchSymbols, matchSymbolsByPattern,
+  type StockSymbol,
 } from '@/api/pools'
 
 const route = useRoute()
@@ -90,23 +92,87 @@ const searchOptions = computed<SelectOption[]>(() =>
 // 已选中但尚未"点添加"的 symbol。添加后清空。
 const pendingSelected = ref<string[]>([])
 
-async function handleAddSelected() {
+// 共享的"批量加入池"辅助：先滤重（客户端先过一遍减少无效请求），
+// 再调 import 接口（后端 INSERT IGNORE 再次兜底）。返回 inserted 数量供上层 toast。
+async function addSymbolsToPool(symbols: string[]): Promise<number> {
   if (!isEdit.value || !poolId.value) {
     message.warning('请先保存股票池再添加股票')
-    return
+    return 0
   }
-  const picks = pendingSelected.value.filter(s => !existingSymbolSet.value.has(s))
+  const picks = symbols.filter(s => !existingSymbolSet.value.has(s))
   if (picks.length === 0) {
-    message.warning('请先在下拉里选择股票')
-    return
+    message.info('选中的股票已全部在池中')
+    return 0
   }
   const result = await importMut.mutateAsync({
     poolId: poolId.value,
     text: picks.join(','),
   })
+  return result.inserted
+}
+
+async function handleAddSelected() {
+  if (pendingSelected.value.length === 0) {
+    message.warning('请先在下拉里选择股票')
+    return
+  }
+  const inserted = await addSymbolsToPool(pendingSelected.value)
   pendingSelected.value = []
   searchQuery.value = ''
-  message.success(`已添加 ${result.inserted}/${result.total_input} 只股票`)
+  if (inserted > 0) message.success(`已添加 ${inserted} 只股票`)
+}
+
+// 加入当前搜索结果：把下拉里能选的（未禁用的）全部加进池。
+// 用户在空搜索框情况下点击 = 加入前 50 条候选；输入关键字 = 加入当前过滤结果。
+async function handleAddAllSearchResults() {
+  const candidates = (searchResults.value ?? [])
+    .map(s => s.symbol)
+    .filter(s => !existingSymbolSet.value.has(s))
+  if (candidates.length === 0) {
+    message.info('当前搜索结果里没有可添加的股票')
+    return
+  }
+  const inserted = await addSymbolsToPool(candidates)
+  pendingSelected.value = []
+  searchQuery.value = ''
+  if (inserted > 0) message.success(`已添加 ${inserted} 只股票`)
+}
+
+// ---- 按规则批量添加（glob pattern） ----
+const patternInput = ref('')
+const patternMatched = ref<StockSymbol[] | null>(null)
+const patternLoading = ref(false)
+
+async function handlePreviewPattern() {
+  const p = patternInput.value.trim()
+  if (!p) {
+    message.warning('请输入匹配规则（例如 *.SZ / 60* / *）')
+    return
+  }
+  patternLoading.value = true
+  try {
+    patternMatched.value = await matchSymbolsByPattern(p)
+    if (!patternMatched.value.length) {
+      message.info('没有匹配到任何股票')
+    }
+  } catch (e: any) {
+    // 后端对非法字符返回 400，错误信息在 response.data.detail 里
+    const detail = e?.response?.data?.detail ?? e?.message ?? '未知错误'
+    message.error(`预览失败：${detail}`)
+    patternMatched.value = null
+  } finally {
+    patternLoading.value = false
+  }
+}
+
+async function handleAddAllMatched() {
+  if (!patternMatched.value?.length) return
+  const syms = patternMatched.value.map(s => s.symbol)
+  const inserted = await addSymbolsToPool(syms)
+  if (inserted > 0) message.success(`已添加 ${inserted} 只股票`)
+  // 添加完清空状态，避免用户二次点误操作
+  patternInput.value = ''
+  patternMatched.value = null
 }
 
 // ---- 批量粘贴 ----
@@ -181,7 +247,7 @@ async function handleRemove(symbol: string) {
     <template v-if="isEdit">
       <!-- 搜索添加 -->
       <h3 style="margin: 24px 0 12px">添加股票</h3>
-      <n-space align="center" style="max-width: 800px">
+      <n-space align="center" style="max-width: 900px">
         <n-select
           v-model:value="pendingSelected"
           multiple
@@ -200,8 +266,66 @@ async function handleRemove(symbol: string) {
           :loading="importMut.isPending.value"
           @click="handleAddSelected"
         >
-          加入池（{{ pendingSelected.length }}）
+          加入选中（{{ pendingSelected.length }}）
         </n-button>
+        <!-- "加入当前搜索结果" = 把下拉里能显示的前 50 条全量加入。
+             用户场景：输入"银行"搜到 20 条 → 一键全加；或清空搜索加入前 50 条。 -->
+        <n-button
+          secondary
+          :disabled="!(searchResults ?? []).length"
+          :loading="importMut.isPending.value"
+          @click="handleAddAllSearchResults"
+        >
+          加入当前搜索结果（{{ (searchResults ?? []).length }}）
+        </n-button>
+      </n-space>
+
+      <!-- 按规则批量添加（glob 模式）：覆盖"全量添加"和"前后缀匹配"需求。
+           先预览匹配数再确认添加，避免误操作（比如 `*` 会匹配全市场 5000+ 只）。 -->
+      <h3 style="margin: 24px 0 12px">按规则批量添加</h3>
+      <n-space vertical style="max-width: 800px">
+        <n-space align="center">
+          <n-input
+            v-model:value="patternInput"
+            placeholder="示例：*.SZ / *.SH / 60* / 300* / 688* / 000*.SZ / *"
+            style="width: 480px"
+            @keyup.enter="handlePreviewPattern"
+          />
+          <n-button
+            secondary
+            :loading="patternLoading"
+            @click="handlePreviewPattern"
+          >
+            预览匹配
+          </n-button>
+        </n-space>
+        <n-alert
+          v-if="patternMatched !== null"
+          :type="patternMatched.length ? 'info' : 'warning'"
+          :show-icon="false"
+        >
+          <template v-if="patternMatched.length">
+            匹配到 <b>{{ patternMatched.length }}</b> 只股票。示例：
+            <code style="font-size: 12px">
+              {{ patternMatched.slice(0, 5).map(s => `${s.symbol} ${s.name}`).join('，') }}
+              {{ patternMatched.length > 5 ? '…' : '' }}
+            </code>
+            <div style="margin-top: 8px">
+              <n-button
+                type="primary"
+                :loading="importMut.isPending.value"
+                @click="handleAddAllMatched"
+              >
+                全部加入池
+              </n-button>
+            </div>
+          </template>
+          <template v-else>没有匹配到任何股票，请调整规则。</template>
+        </n-alert>
+        <div style="color: #848E9C; font-size: 12px">
+          通配符：<code>*</code> = 任意长度、<code>?</code> = 单字符；
+          仅匹配代码，不匹配名称。需要按名称加入请用上方搜索框。
+        </div>
       </n-space>
 
       <!-- 批量粘贴（老用法保留） -->
