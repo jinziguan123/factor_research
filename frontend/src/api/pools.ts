@@ -96,6 +96,25 @@ export function useDeletePool() {
   })
 }
 
+/** 从股票池移除单只股票（增量接口）。
+ *
+ * 为什么不用 PUT 全量覆盖：参见后端 ``remove_symbol`` 的 docstring。
+ * 简述：日常 UI 上点 × 删一只不应触发 DELETE 5000 行 + INSERT 4999 行重建整个池。
+ */
+export function useRemovePoolSymbol() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ poolId, symbol }: { poolId: number; symbol: string }) =>
+      client
+        .delete(`/pools/${poolId}/symbols/${encodeURIComponent(symbol)}`)
+        .then(r => r.data as { removed: number }),
+    onSuccess: (_res, vars) => {
+      qc.invalidateQueries({ queryKey: ['pools'] })
+      qc.invalidateQueries({ queryKey: ['pool', vars.poolId] })
+    },
+  })
+}
+
 /** 导入股票代码到股票池。后端期望 { text }，空白/逗号/分号均可分隔，router 端解析。 */
 export function useImportSymbols() {
   const qc = useQueryClient()

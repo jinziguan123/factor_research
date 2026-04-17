@@ -213,6 +213,49 @@ def delete_pool(pool_id: int) -> dict:
     return ok({"pool_id": pool_id})
 
 
+@router.delete("/{pool_id}/symbols/{symbol}")
+def remove_symbol(pool_id: int, symbol: str) -> dict:
+    """从池里移除一只股票（增量接口）。
+
+    设计初衷：前端 PoolEditor 里点 × 删一只股票，旧路径会走 ``PUT /api/pools/{id}``
+    把**剩余所有 symbol** 全量传回来，后端 ``DELETE + bulk INSERT`` 重建整个池。
+    这条路径有两个痛点：
+    1. 浪费：4999 只股票的池删一只 = DELETE 5000 行 + INSERT 4999 行，
+       远程 MySQL 下轻松过秒级；
+    2. 并发覆盖：两个人同时删不同股票，后提交者会基于自己的旧 snapshot 覆盖对方
+       的修改（last-write-wins，无感丢数据）。
+
+    走单只 DELETE 后：一次 ``WHERE pool_id=%s AND symbol_id=%s`` 命中复合主键，
+    毫秒级返回；且两次并发删除互不干扰。
+
+    幂等：目标 symbol 本就不在池里时返回 ``removed=0``，不抛 404（避免"池里没有
+    但前端 cache 旧快照里有 → 用户看到 toast 报错"的 UX 问题）。
+    """
+    normalized = symbol.strip().upper()
+    resolver = SymbolResolver()
+    sid = resolver.resolve_symbol_id(normalized)
+    if sid is None:
+        raise HTTPException(status_code=404, detail=f"unknown symbol: {symbol}")
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            # 先做 owner 归属校验，避免跨 owner 误删。
+            cur.execute(
+                "SELECT 1 FROM stock_pool "
+                "WHERE pool_id=%s AND owner_key=%s",
+                (pool_id, settings.owner_key),
+            )
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="pool not found")
+            cur.execute(
+                "DELETE FROM stock_pool_symbol "
+                "WHERE pool_id=%s AND symbol_id=%s",
+                (pool_id, sid),
+            )
+            removed = cur.rowcount
+        c.commit()
+    return ok({"removed": removed})
+
+
 @router.post("/{pool_id}:import")
 def import_symbols(pool_id: int, body: PoolImportIn) -> dict:
     """批量把 ``text`` 中的 symbol 追加进池。

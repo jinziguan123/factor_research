@@ -195,6 +195,61 @@ def test_update_pool_with_empty_symbols_clears_members():
     assert r3.json()["data"]["symbols"] == []
 
 
+def test_remove_symbol_single():
+    """DELETE /{pool_id}/symbols/{symbol} 移除单只，不动其他成员。"""
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/pools",
+            json={
+                "name": "__test_poolRemove",
+                "symbols": ["000001.SZ", "000002.SZ", "600519.SH"],
+            },
+        )
+        pid = r.json()["data"]["pool_id"]
+
+        r2 = c.delete(f"/api/pools/{pid}/symbols/000002.SZ")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["data"]["removed"] == 1
+
+        r3 = c.get(f"/api/pools/{pid}")
+    symbols = [s["symbol"] for s in r3.json()["data"]["symbols"]]
+    assert symbols == ["000001.SZ", "600519.SH"]
+
+
+def test_remove_symbol_idempotent():
+    """重复删除同一 symbol 返回 removed=0，不抛 404（幂等）。"""
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/pools",
+            json={"name": "__test_poolIdem", "symbols": ["000001.SZ"]},
+        )
+        pid = r.json()["data"]["pool_id"]
+
+        # 第 1 次：真删除
+        r2 = c.delete(f"/api/pools/{pid}/symbols/000001.SZ")
+        assert r2.json()["data"]["removed"] == 1
+        # 第 2 次：已不在池里，返回 removed=0 而不是 404
+        r3 = c.delete(f"/api/pools/{pid}/symbols/000001.SZ")
+    assert r3.status_code == 200
+    assert r3.json()["data"]["removed"] == 0
+
+
+def test_remove_symbol_unknown_404():
+    """未知 symbol（不在 stock_symbol 主表）返回 404，帮前端尽早发现输错代码。"""
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        r = c.post("/api/pools", json={"name": "__test_poolUnk", "symbols": []})
+        pid = r.json()["data"]["pool_id"]
+
+        r2 = c.delete(f"/api/pools/{pid}/symbols/999999.XX")
+    assert r2.status_code == 404
+
+
 def test_delete_pool_soft_deletes():
     from backend.api.main import app
 

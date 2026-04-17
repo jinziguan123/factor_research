@@ -18,7 +18,7 @@ import {
 import type { SelectOption } from 'naive-ui'
 import {
   usePool, useCreatePool, useUpdatePool, useImportSymbols,
-  useSearchSymbols, matchSymbolsByPattern,
+  useRemovePoolSymbol, useSearchSymbols, matchSymbolsByPattern,
   type StockSymbol,
 } from '@/api/pools'
 
@@ -46,6 +46,7 @@ watch(poolData, (p) => {
 const createMut = useCreatePool()
 const updateMut = useUpdatePool()
 const importMut = useImportSymbols()
+const removeMut = useRemovePoolSymbol()
 
 async function handleSave() {
   const name = formData.value.pool_name.trim()
@@ -193,21 +194,13 @@ async function handleImport() {
 }
 
 // ---- 单只移除 ----
-// 没单独 DELETE 一只的后端接口，这里用 PUT 重写 symbols 列表（去掉目标一只）。
-// 池规模最多几千只，PUT 一次完整列表在可接受范围。
+// 走后端 DELETE /pools/:id/symbols/:symbol 增量接口；毫秒级返回，且两个人同时
+// 删不同股票不会互相覆盖。
+// 历史实现：PUT 整个 symbols 列表重建整个池，删一只 = DELETE 5000 行 + INSERT
+// 4999 行，远程 MySQL 下过秒级超时 + 有并发覆盖风险，已废弃。
 async function handleRemove(symbol: string) {
-  if (!poolData.value || !poolId.value) return
-  const remaining = poolData.value.symbols
-    .map(s => s.symbol)
-    .filter(s => s !== symbol)
-  await updateMut.mutateAsync({
-    poolId: poolId.value,
-    body: {
-      name: poolData.value.pool_name,
-      description: poolData.value.description,
-      symbols: remaining,
-    },
-  })
+  if (!poolId.value) return
+  await removeMut.mutateAsync({ poolId: poolId.value, symbol })
   message.success(`已移除 ${symbol}`)
 }
 </script>
