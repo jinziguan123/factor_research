@@ -1,4 +1,6 @@
 @echo off
+REM 本文件为 UTF-8 无 BOM，先切 cmd 到 UTF-8 避免中文 mojibake（和 start.bat 一致）。
+chcp 65001 > nul 2>&1
 REM 一键停止：前后端（Windows）
 REM 用法：stop.bat
 setlocal EnableDelayedExpansion

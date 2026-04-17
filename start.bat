@@ -1,4 +1,7 @@
 @echo off
+REM 本文件保存为 UTF-8 无 BOM；Windows cmd 默认 GBK(CP936)，下面这行切到 UTF-8
+REM 以免所有中文字符显示成 mojibake（如 "敤娉曪細" = "用法："的 UTF-8 被 GBK 解读）。
+chcp 65001 > nul 2>&1
 REM 一键启动：前后端（Windows）
 REM 用法：start.bat
 setlocal EnableDelayedExpansion
@@ -55,8 +58,20 @@ start "factor-research-frontend" cmd /c ^
   "cd /d %ROOT%\frontend ^&^& npm run dev > %FRONTEND_LOG% 2^>^&1"
 
 REM ---- 等待就绪 ----
+REM wait_port 超时会把 STARTUP_FAILED 置 1，避免最后错误地打印 "[OK] 启动完成"
+REM 让用户误以为服务已起（曾经的行为：超时只 WARN 但主流程继续吹 OK）。
+set "STARTUP_FAILED="
 call :wait_port %BACKEND_PORT% 后端
 call :wait_port %FRONTEND_PORT% 前端
+
+if defined STARTUP_FAILED (
+  echo.
+  echo [ERROR] 部分服务启动超时，请查看日志定位原因：
+  echo     后端日志: %BACKEND_LOG%
+  echo     前端日志: %FRONTEND_LOG%
+  echo     常见原因：端口被占、依赖未装、.env 配置错、vite/uvicorn 报错
+  exit /b 1
+)
 
 echo.
 echo [OK] 启动完成
@@ -89,6 +104,9 @@ if not errorlevel 1 (
 set /a cnt+=1
 if %cnt% GEQ 40 (
   echo    [WARN] %name% 启动超时，请查看日志
+  REM 不改 exit /b 1，否则 setlocal 作用域下调用方 errorlevel 不稳；
+  REM 改为设置共享变量，让主流程显式检查。
+  set "STARTUP_FAILED=1"
   exit /b 0
 )
 timeout /t 1 /nobreak >nul
