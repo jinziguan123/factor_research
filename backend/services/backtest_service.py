@@ -26,6 +26,7 @@ import json
 import logging
 import math
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -268,6 +269,127 @@ def _load_or_compute_factor(
     return F
 
 
+# ---------------------------- 可复用输入准备（供 cost_sensitivity 等复用）----------------------------
+
+
+@dataclass
+class BacktestInputs:
+    """从 ``body`` 准备好的一次回测所需全部输入，pickle 友好、无 DB 句柄。
+
+    把"因子值 → 权重 → size/close 对齐"这段独立抽出，好处：
+    - ``run_cost_sensitivity`` 可以算一次 inputs 后循环跑 N 个 ``cost_bps``，
+      不必每次重读 ClickHouse / 重算因子；
+    - ``run_backtest`` 本身也更薄，后续接 purged CV / 多因子合成等扩展时
+      少一处 copy-paste。
+    """
+
+    factor_id: str
+    factor_version: int
+    params_hash: str
+    params: dict
+    pool_id: int
+    symbols: list[str]
+    F: pd.DataFrame  # 因子宽表，已与 close 按 (date × symbol) 内连接对齐
+    close: pd.DataFrame  # qfq close 宽表，已 ffill + 非正数占位 1.0
+    size: pd.DataFrame  # target amount 宽表
+    init_cash: float
+    freq: str
+    n_bars: int
+
+
+def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
+    """把 ``body`` 翻译成一组可直接投喂 ``vbt.Portfolio.from_orders`` 的输入。
+
+    纯函数（无 status 更新），异常直接抛，由调用方决定落到哪张表的 ``error_message``。
+    与 ``run_backtest`` 内嵌版本行为完全等价，逐步骤注释详见原实现。
+    """
+    # 1) 参数解析 + 因子实例 + 版本 / hash 固化
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    factor = reg.get(body["factor_id"])
+    version = reg.latest_version_from_db(body["factor_id"])
+
+    params = body.get("params") or factor.default_params
+    phash = _hash(params)
+
+    data = DataService()
+    pool_id = int(body["pool_id"])
+    symbols = data.resolve_pool(pool_id)
+    n_groups_req = int(body.get("n_groups", 5))
+    if len(symbols) < n_groups_req:
+        raise ValueError(
+            f"股票池 pool_id={pool_id} 仅含 {len(symbols)} 只股票，"
+            f"小于 n_groups={n_groups_req}，无法进行分组回测。"
+            f"请换一个至少包含 {n_groups_req} 只股票的股票池，或减小 n_groups。"
+        )
+
+    start = pd.to_datetime(body["start_date"])
+    end = pd.to_datetime(body["end_date"])
+    warmup = factor.required_warmup(params)
+    ctx = FactorContext(
+        data=data,
+        symbols=symbols,
+        start_date=start,
+        end_date=end,
+        warmup_days=warmup,
+    )
+
+    # 2) 因子值：缓存或算
+    F = _load_or_compute_factor(
+        data, factor, ctx, params,
+        body["factor_id"], version, phash, start, end,
+    )
+    if F.empty:
+        raise RuntimeError(
+            f"因子 {body['factor_id']!r} 在 [{start.date()}, {end.date()}] 产出空表，"
+            "无法执行回测；检查股票池 / 窗口 / 因子实现"
+        )
+
+    # 3) qfq close 宽表 + 对齐
+    close = data.load_panel(
+        symbols, start.date(), end.date(), field="close", adjust="qfq"
+    )
+    if close.empty:
+        raise RuntimeError(
+            f"股票池 pool_id={pool_id} 在窗口内无 close 行情，"
+            "请先完成 aggregate_bar_1d 聚合"
+        )
+    common_index = close.index.intersection(F.index)
+    common_cols = close.columns.intersection(F.columns)
+    if len(common_index) == 0 or len(common_cols) == 0:
+        raise RuntimeError("因子表与 close 行情没有共同 (date × symbol) 交集，无法回测")
+    close = close.loc[common_index, common_cols].astype("float64")
+    F = F.loc[common_index, common_cols].astype("float64")
+
+    # 4) 权重 → size
+    n_groups = n_groups_req
+    rebalance = int(body.get("rebalance_period", 1))
+    position = str(body.get("position", "top"))
+    init_cash = float(body.get("init_cash", 1e7))
+
+    W = _build_weights(F, n_groups=n_groups, rebalance=rebalance, position=position)
+    size = W * init_cash / close
+    size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+    # close 零 / NaN 占位：详见 run_backtest 原注释
+    close = close.where(close > 0).ffill().fillna(1.0)
+
+    return BacktestInputs(
+        factor_id=body["factor_id"],
+        factor_version=version,
+        params_hash=phash,
+        params=params,
+        pool_id=pool_id,
+        symbols=list(symbols),
+        F=F,
+        close=close,
+        size=size,
+        init_cash=init_cash,
+        freq=str(body.get("freq", "1d")),
+        n_bars=len(close),
+    )
+
+
 # ---------------------------- 公共入口 ----------------------------
 
 
@@ -297,98 +419,10 @@ def run_backtest(run_id: str, body: dict) -> None:
     try:
         _update_status(run_id, status="running", started=True, progress=5)
 
-        # 1) 参数解析 + 因子实例 + 版本 / hash 固化
-        reg = FactorRegistry()
-        reg.scan_and_register()
-        factor = reg.get(body["factor_id"])
-        version = reg.latest_version_from_db(body["factor_id"])
-
-        params = body.get("params") or factor.default_params
-        phash = _hash(params)
-
-        data = DataService()
-        symbols = data.resolve_pool(int(body["pool_id"]))
-        n_groups_req = int(body.get("n_groups", 5))
-        # qcut 分组回测至少需要 n_groups 只股票：_build_weights 对 <n_groups 的日期
-        # 整天退回空仓，结果就是净值永远 =1、指标全 0、看起来"成功"实则无意义。
-        # 前置校验直接 failed，信息比空结果有价值得多。
-        if len(symbols) < n_groups_req:
-            raise ValueError(
-                f"股票池 pool_id={body['pool_id']} 仅含 {len(symbols)} 只股票，"
-                f"小于 n_groups={n_groups_req}，无法进行分组回测。"
-                f"请换一个至少包含 {n_groups_req} 只股票的股票池，或减小 n_groups。"
-            )
-        start = pd.to_datetime(body["start_date"])
-        end = pd.to_datetime(body["end_date"])
-        warmup = factor.required_warmup(params)
-        ctx = FactorContext(
-            data=data,
-            symbols=symbols,
-            start_date=start,
-            end_date=end,
-            warmup_days=warmup,
-        )
-
-        _update_status(run_id, progress=15)
-
-        # 2) 因子值：先查缓存，未命中就算 + 写回
-        F = _load_or_compute_factor(
-            data, factor, ctx, params,
-            body["factor_id"], version, phash, start, end,
-        )
-        if F.empty:
-            raise RuntimeError(
-                f"因子 {body['factor_id']!r} 在 [{start.date()}, {end.date()}] 产出空表，"
-                "无法执行回测；检查股票池 / 窗口 / 因子实现"
-            )
-
-        _update_status(run_id, progress=35)
-
-        # 3) qfq close 宽表 + 对齐
-        close = data.load_panel(
-            symbols, start.date(), end.date(), field="close", adjust="qfq"
-        )
-        if close.empty:
-            raise RuntimeError(
-                f"股票池 pool_id={body['pool_id']} 在窗口内无 close 行情，"
-                "请先完成 aggregate_bar_1d 聚合"
-            )
-
-        # 日期 + 列双重内连接：factor / 行情任何一边缺失都不能参与订单。
-        # close.align(F, join="inner") 只能处理 index；这里手工求两表交集，避免
-        # VectorBT 收到列顺序错位。
-        common_index = close.index.intersection(F.index)
-        common_cols = close.columns.intersection(F.columns)
-        if len(common_index) == 0 or len(common_cols) == 0:
-            raise RuntimeError(
-                "因子表与 close 行情没有共同 (date × symbol) 交集，无法回测"
-            )
-        close = close.loc[common_index, common_cols].astype("float64")
-        F = F.loc[common_index, common_cols].astype("float64")
-
-        _update_status(run_id, progress=55)
-
-        # 4) 权重 → size
-        n_groups = n_groups_req
-        rebalance = int(body.get("rebalance_period", 1))
-        position = str(body.get("position", "top"))
-        init_cash = float(body.get("init_cash", 1e7))
+        # 1~4) 复用公共 prepare：因子 / close / size 一条龙
+        inputs = _prepare_backtest_inputs(body)
+        init_cash = inputs.init_cash
         cost_bps = float(body.get("cost_bps", 3))
-
-        W = _build_weights(F, n_groups=n_groups, rebalance=rebalance, position=position)
-        # target amount（以标的数量表达的目标仓位）= 目标市值 / 现价。
-        # 0 / inf / NaN 全部 → 0，避免 from_orders 拿到脏数据。
-        size = W * init_cash / close
-        size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
-
-        # vbt.Portfolio.from_orders 里 execute_order_nb 要求每个 tick 的 price
-        # 都 finite 且 > 0，即使该 tick size=0 也照查。A 股 qfq close 里：
-        # - 停牌日 → NaN
-        # - 起始未上市段 → 整段 NaN
-        # - 偶发数据异常 → 0 或 inf
-        # 先 ffill 把停牌日填成停牌前价，起始 NaN / 非正数用 1.0 占位。这些位置
-        # 上方 size 已经是 0，占位价不会产生虚构交易，只是满足 vbt 的硬校验。
-        close = close.where(close > 0).ffill().fillna(1.0)
 
         _update_status(run_id, progress=70)
 
@@ -397,8 +431,8 @@ def run_backtest(run_id: str, body: dict) -> None:
         import vectorbt as vbt
 
         pf = vbt.Portfolio.from_orders(
-            close=close,
-            size=size,
+            close=inputs.close,
+            size=inputs.size,
             size_type="targetamount",
             fees=cost_bps / 1e4,
             freq="1D",

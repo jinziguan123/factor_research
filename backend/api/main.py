@@ -21,7 +21,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from backend.api.routers import admin, backtests, bars, evals, factors, pools, symbols
+from backend.api.routers import (
+    admin,
+    backtests,
+    bars,
+    cost_sensitivity,
+    evals,
+    factors,
+    pools,
+    symbols,
+)
 from backend.api.schemas import ok
 from backend.config import settings
 from backend.runtime.factor_registry import FactorRegistry
@@ -160,5 +169,6 @@ app.include_router(pools.router)
 app.include_router(symbols.router)
 app.include_router(evals.router)
 app.include_router(backtests.router)
+app.include_router(cost_sensitivity.router)
 app.include_router(bars.router)
 app.include_router(admin.router)

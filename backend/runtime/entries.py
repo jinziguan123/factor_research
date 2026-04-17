@@ -35,3 +35,10 @@ def backtest_entry(run_id: str, body: dict) -> None:
     from backend.services.backtest_service import run_backtest
 
     run_backtest(run_id, body)
+
+
+def cost_sensitivity_entry(run_id: str, body: dict) -> None:
+    """成本敏感性任务入口：在 worker 进程内调用 ``run_cost_sensitivity``。"""
+    from backend.services.cost_sensitivity_service import run_cost_sensitivity
+
+    run_cost_sensitivity(run_id, body)

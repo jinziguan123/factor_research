@@ -120,3 +120,35 @@ CREATE TABLE IF NOT EXISTS `fr_backtest_artifacts` (
   PRIMARY KEY (`run_id`, `artifact_type`),
   KEY `idx_run_id` (`run_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 【新增】成本敏感性分析任务：一条 run 跑多个 cost_bps 点、各点指标汇总入 points_json。
+-- 语义上独立于单次 fr_backtest_runs：敏感性不存 equity/orders/trades artifact（N 份冗余），
+-- 只存每个点的结构化指标 + 原始 stats 字典，前端画曲线用。
+CREATE TABLE IF NOT EXISTS `fr_cost_sensitivity_runs` (
+  `run_id`           varchar(64) NOT NULL,
+  `factor_id`        varchar(64) NOT NULL,
+  `factor_version`   int unsigned NOT NULL,
+  `params_hash`      char(40) NOT NULL,
+  `params_json`      longtext,
+  `pool_id`          bigint unsigned NOT NULL,
+  `freq`             varchar(8) NOT NULL DEFAULT '1d',
+  `start_date`       date NOT NULL,
+  `end_date`         date NOT NULL,
+  `n_groups`         tinyint unsigned NOT NULL DEFAULT 5,
+  `rebalance_period` int unsigned NOT NULL DEFAULT 1,
+  `position`         varchar(16) NOT NULL DEFAULT 'top',
+  `init_cash`        double NOT NULL DEFAULT 1e7,
+  -- cost_bps_list / points_json 都是 JSON array，前者是用户请求输入、后者是结果。
+  -- 分开存：即使任务失败、points 空，我们也能看到当初请求了哪些点。
+  `cost_bps_list`    varchar(500) NOT NULL,
+  `points_json`      longtext,
+  `status`           varchar(16) NOT NULL,
+  `progress`         tinyint unsigned NOT NULL DEFAULT 0,
+  `error_message`    text,
+  `created_at`       datetime(6) NOT NULL,
+  `started_at`       datetime(6) DEFAULT NULL,
+  `finished_at`      datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`run_id`),
+  KEY `idx_factor_status` (`factor_id`, `status`),
+  KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

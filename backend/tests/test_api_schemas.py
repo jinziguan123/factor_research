@@ -6,7 +6,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from backend.api.schemas import CreateEvalIn
+from backend.api.schemas import CreateCostSensitivityIn, CreateEvalIn
 
 
 def _base_body(**overrides):
@@ -55,3 +55,57 @@ def test_create_eval_rejects_split_date_after_end():
     """split_date 晚于 end_date → 测试段完全为空，应拒绝。"""
     with pytest.raises(ValidationError):
         CreateEvalIn(**_base_body(split_date=date(2024, 2, 15)))
+
+
+# ---------------------------- CreateCostSensitivityIn ----------------------------
+
+
+def _cs_base_body(**overrides):
+    """构造最小合法 CreateCostSensitivityIn 入参 dict。"""
+    body = {
+        "factor_id": "reversal_n",
+        "pool_id": 1,
+        "start_date": date(2024, 1, 10),
+        "end_date": date(2024, 1, 31),
+        "cost_bps_list": [0.0, 3.0, 10.0],
+    }
+    body.update(overrides)
+    return body
+
+
+def test_cost_sensitivity_valid_minimum():
+    """最小合法入参（3 个点，默认其它字段）应通过。"""
+    m = CreateCostSensitivityIn(**_cs_base_body())
+    assert m.cost_bps_list == [0.0, 3.0, 10.0]
+    assert m.n_groups == 5  # 默认
+
+
+def test_cost_sensitivity_rejects_single_point():
+    """单点列表没意义（应走单次 backtest），min_length=2 拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCostSensitivityIn(**_cs_base_body(cost_bps_list=[3.0]))
+
+
+def test_cost_sensitivity_rejects_empty_list():
+    """空列表同样拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCostSensitivityIn(**_cs_base_body(cost_bps_list=[]))
+
+
+def test_cost_sensitivity_rejects_negative():
+    """负费率没有物理意义，应拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCostSensitivityIn(**_cs_base_body(cost_bps_list=[-1.0, 3.0]))
+
+
+def test_cost_sensitivity_rejects_unreasonable_large():
+    """>200bp 通常是单位搞错（把 0.03 传成 300），拒绝。"""
+    with pytest.raises(ValidationError):
+        CreateCostSensitivityIn(**_cs_base_body(cost_bps_list=[3.0, 300.0]))
+
+
+def test_cost_sensitivity_rejects_more_than_20_points():
+    """曲线上点超过 20 个已失去分辨力，max_length=20 拒绝。"""
+    many = [float(i) for i in range(21)]
+    with pytest.raises(ValidationError):
+        CreateCostSensitivityIn(**_cs_base_body(cost_bps_list=many))

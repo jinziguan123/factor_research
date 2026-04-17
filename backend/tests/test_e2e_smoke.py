@@ -326,3 +326,120 @@ def test_backtest_smoke_end_to_end(
     run_dir = Path(settings.artifact_dir) / smoke_backtest_run_id
     for name in ("equity.parquet", "orders.parquet", "trades.parquet"):
         assert (run_dir / name).exists(), f"缺 {name}"
+
+
+# ---------------------------- #6 成本敏感性 ----------------------------
+
+
+@pytest.fixture
+def smoke_cost_sensitivity_run_id():
+    """给敏感性 smoke 测试准备一个 run_id，先 INSERT pending 记录。
+
+    与 smoke_eval/backtest 同构：run_cost_sensitivity 只 UPDATE，不 INSERT，
+    这里必须预先占位，teardown 时删除。
+    """
+    import json as _json
+
+    from backend.storage.mysql_client import mysql_conn
+
+    run_id = uuid.uuid4().hex
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_cost_sensitivity_runs
+                (run_id, factor_id, factor_version, params_hash, params_json,
+                 pool_id, freq, start_date, end_date,
+                 n_groups, rebalance_period, position, init_cash,
+                 cost_bps_list, status, progress, created_at)
+                VALUES (%s, %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s,
+                        %s, %s, %s, %s)
+                """,
+                (
+                    run_id, "reversal_n", 0, "0" * 40, "{}",
+                    0, "1d", "2024-01-10", "2024-01-31",
+                    3, 1, "top", 1e6,
+                    _json.dumps([0.0, 5.0, 20.0]),
+                    "pending", 0, datetime.now(),
+                ),
+            )
+        c.commit()
+    try:
+        yield run_id
+    finally:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM fr_cost_sensitivity_runs WHERE run_id=%s",
+                    (run_id,),
+                )
+            c.commit()
+
+
+@pytest.mark.integration
+def test_cost_sensitivity_smoke_end_to_end(
+    seed_bar_1d, smoke_pool_id, smoke_cost_sensitivity_run_id
+):
+    """跑完整 ``run_cost_sensitivity``：3 个 cost_bps 点、断言单调 + 字段齐。"""
+    import json
+
+    from backend.services.cost_sensitivity_service import run_cost_sensitivity
+    from backend.storage.mysql_client import mysql_conn
+
+    body = {
+        "factor_id": "reversal_n",
+        "pool_id": smoke_pool_id,
+        "start_date": "2024-01-10",
+        "end_date": "2024-01-31",
+        "params": {"window": 3},
+        "n_groups": 3,
+        "rebalance_period": 1,
+        "position": "top",
+        "init_cash": 1e6,
+        # 0 / 5 / 20bp 三档：0 与 20 差距足够大，turnover_total 应 > 0，
+        # annual_return(0) 通常 >= annual_return(20)（成本只减不加）。
+        "cost_bps_list": [0.0, 5.0, 20.0],
+    }
+    run_cost_sensitivity(smoke_cost_sensitivity_run_id, body)
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT status, progress, error_message, points_json "
+                "FROM fr_cost_sensitivity_runs WHERE run_id=%s",
+                (smoke_cost_sensitivity_run_id,),
+            )
+            row = cur.fetchone()
+
+    assert row is not None, "run row 消失了"
+    assert row["status"] == "success", (
+        f"cost_sensitivity 失败：{row['error_message']}"
+    )
+    assert row["progress"] == 100
+    assert row["points_json"], "points_json 为空"
+
+    parsed = json.loads(row["points_json"])
+    points = parsed["points"]
+    # 点数必须和输入 cost_bps_list 一一对应
+    assert [p["cost_bps"] for p in points] == [0.0, 5.0, 20.0]
+
+    # 每个点基础字段齐全（前端强依赖）
+    required_keys = {
+        "cost_bps", "total_return", "annual_return", "sharpe_ratio",
+        "max_drawdown", "win_rate", "trade_count", "turnover_total", "stats",
+    }
+    for p in points:
+        missing = required_keys - p.keys()
+        assert not missing, f"point 缺字段 {missing}"
+
+    # 核心不变式：0bp 下年化收益 ≥ 20bp 下年化收益（成本只降不升）。
+    # smoke 窗口样本少、qcut 组小，可能出现 None；None 的断言放宽到 skip。
+    ret0 = points[0]["annual_return"]
+    ret2 = points[2]["annual_return"]
+    if ret0 is not None and ret2 is not None:
+        # 容忍 1e-6 数值毛刺（vbt fees=0 与 fees=2e-3 下滑点理论 > 差 0）。
+        assert ret0 + 1e-6 >= ret2, (
+            f"0bp 年化 ({ret0}) 反而小于 20bp 年化 ({ret2})，逻辑异常"
+        )

@@ -13,5 +13,8 @@ export const routes: RouteRecordRaw[] = [
   { path: '/backtests', component: () => import('@/pages/backtests/BacktestList.vue') },
   { path: '/backtests/new', component: () => import('@/pages/backtests/BacktestCreate.vue') },
   { path: '/backtests/:runId', component: () => import('@/pages/backtests/BacktestDetail.vue') },
+  { path: '/cost-sensitivity', component: () => import('@/pages/cost-sensitivity/CostSensitivityList.vue') },
+  { path: '/cost-sensitivity/new', component: () => import('@/pages/cost-sensitivity/CostSensitivityCreate.vue') },
+  { path: '/cost-sensitivity/:runId', component: () => import('@/pages/cost-sensitivity/CostSensitivityDetail.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
 ]

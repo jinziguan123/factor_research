@@ -79,6 +79,43 @@ class CreateBacktestIn(BaseModel):
     init_cash: float = 1e7
 
 
+class CreateCostSensitivityIn(BaseModel):
+    """``POST /api/cost-sensitivity`` 请求体。
+
+    和 ``CreateBacktestIn`` 几乎完全一致，只是把 ``cost_bps: float`` 替换成
+    ``cost_bps_list: list[float]``，让后端循环跑。
+
+    校验策略：
+    - ``cost_bps_list`` 至少 2 个点（否则跟 single backtest 没区别，应走 /backtests）；
+      上限 20 个点，防止前端误传很长的 range 把后端拖满。
+    - 单点 ∈ [0, 200]（2% = 200bp 已是非常离谱的估算，留余量）。
+    - 去重 + 升序由后端 service 统一处理，这里只做必要边界校验。
+    """
+
+    factor_id: str
+    params: dict | None = None
+    pool_id: int
+    start_date: date
+    end_date: date
+    freq: str = "1d"
+    n_groups: int = Field(default=5, ge=2, le=20)
+    rebalance_period: int = Field(default=1, ge=1)
+    position: str = "top"
+    init_cash: float = 1e7
+    cost_bps_list: list[float] = Field(..., min_length=2, max_length=20)
+
+    @model_validator(mode="after")
+    def _check_cost_bps_list(self) -> "CreateCostSensitivityIn":
+        # 值域校验：负费率没有物理意义（返佣不在我们建模范围内）；过大（>200bp）
+        # 通常是前端单位输错（比如把 0.03 当成 3 传成 300）。
+        for v in self.cost_bps_list:
+            if v < 0 or v > 200:
+                raise ValueError(
+                    f"cost_bps={v} 必须在 [0, 200] 基点区间内（过大可能是单位错误）"
+                )
+        return self
+
+
 class PoolIn(BaseModel):
     """``POST /api/pools`` / ``PUT /api/pools/{pid}`` 请求体。
 
