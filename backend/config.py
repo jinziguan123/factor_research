@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_BACKEND_ROOT / ".env"),
         env_file_encoding="utf-8",
         # 允许环境变量使用字段别名（大写）命名。
         populate_by_name=True,

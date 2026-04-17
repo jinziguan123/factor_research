@@ -24,6 +24,12 @@ import argparse
 import logging
 import sys
 from datetime import date, datetime, timedelta
+from pathlib import Path
+
+# 让 `python backend/scripts/aggregate_bar_1d.py` 从项目根直接跑时也能找到 backend 包
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from backend.config import settings
 from backend.scripts.run_init import _safety_check

@@ -27,6 +27,11 @@ import sys
 from pathlib import Path
 from typing import Iterator
 
+# 让 `python backend/scripts/import_qfq.py` 从项目根直接跑时也能找到 backend 包
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 import pandas as pd
 import pyarrow.parquet as pq
 
