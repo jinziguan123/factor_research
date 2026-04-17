@@ -1,0 +1,28 @@
+{
+  "name": "factor-research-frontend",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.0",
+    "vue-router": "^4.4.5",
+    "pinia": "^2.2.4",
+    "naive-ui": "^2.40.1",
+    "@tanstack/vue-query": "^5.59.0",
+    "axios": "^1.7.7",
+    "echarts": "^5.5.1",
+    "vue-echarts": "^7.0.3",
+    "date-fns": "^4.1.0"
+  },
+  "devDependencies": {
+    "vite": "^6.0.0",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "^5.6.3",
+    "vue-tsc": "^2.1.6",
+    "sass": "^1.80.3"
+  }
+}

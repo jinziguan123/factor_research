@@ -1,0 +1,15 @@
+import type { RouteRecordRaw } from 'vue-router'
+
+export const routes: RouteRecordRaw[] = [
+  { path: '/', component: () => import('@/pages/dashboard/DashboardPage.vue') },
+  { path: '/factors', component: () => import('@/pages/factors/FactorList.vue') },
+  { path: '/factors/:factorId', component: () => import('@/pages/factors/FactorDetail.vue') },
+  { path: '/pools', component: () => import('@/pages/pools/PoolList.vue') },
+  { path: '/pools/new', component: () => import('@/pages/pools/PoolEditor.vue') },
+  { path: '/pools/:poolId', component: () => import('@/pages/pools/PoolEditor.vue') },
+  { path: '/evals/new', component: () => import('@/pages/evals/EvalCreate.vue') },
+  { path: '/evals/:runId', component: () => import('@/pages/evals/EvalDetail.vue') },
+  { path: '/backtests/new', component: () => import('@/pages/backtests/BacktestCreate.vue') },
+  { path: '/backtests/:runId', component: () => import('@/pages/backtests/BacktestDetail.vue') },
+  { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
+]

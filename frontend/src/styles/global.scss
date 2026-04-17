@@ -1,0 +1,18 @@
+// Binance.US 风格全局样式
+body {
+  font-family: Inter, "BinancePlex", Arial, sans-serif;
+  color: #1E2026;
+  background: #FFFFFF;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// 滚动条
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-thumb {
+  background: #E6E8EA;
+  border-radius: 3px;
+}
