@@ -219,6 +219,22 @@ def _call_openai_compatible(messages: list[dict]) -> str:
             f"LLM 返回错误状态 {resp.status_code}；详情请看后端日志"
         )
 
+    # 2xx 但 content-type 不是 JSON —— 最常见是 OPENAI_BASE_URL 漏了 /v1，
+    # 中转把请求路由到了网关的 SPA 首页或普通 HTML 错误页。给一个明确提示，
+    # 省得用户对着 body preview 猜半天。
+    ctype = resp.headers.get("content-type", "").lower()
+    if "json" not in ctype:
+        logger.warning(
+            "LLM returned non-JSON content-type=%s; body[:300]=%r",
+            ctype,
+            resp.text[:300],
+        )
+        raise FactorAssistantError(
+            f"上游不是 JSON 响应（content-type={ctype!r}）；"
+            f"十之八九是 OPENAI_BASE_URL 配错——确保以 /v1 结尾，形如 "
+            f"https://your-proxy.com/v1"
+        )
+
     try:
         data = resp.json()
         return data["choices"][0]["message"]["content"]
