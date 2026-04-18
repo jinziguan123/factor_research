@@ -92,9 +92,11 @@ def test_load_panel_empty_when_no_data():
 
 @pytest.mark.integration
 def test_qfq_adjustment_applied(seed_bar_1d, seed_qfq_factor):
-    """验证前复权生效：sid=1 在 2024-01-15 前因子=1.0，之后=0.5
+    """验证前复权：sid=1 在 2024-01-15 有一次 2:1 拆股事件（r=2.0）。
 
-    期望：除权前 raw == adj；除权后 adj == raw * 0.5。
+    cum_today=2.0，归一化后：
+    - 2024-01-15 之前：qfq=1/2=0.5 → adj = raw * 0.5
+    - 2024-01-15 及之后：qfq=1.0 → adj = raw（不变）
     """
     from backend.storage.data_service import DataService
 
@@ -113,28 +115,31 @@ def test_qfq_adjustment_applied(seed_bar_1d, seed_qfq_factor):
         field="close",
         adjust="qfq",
     )
-    # 除权前（2024-01-15 之前）：因子=1，原价应等于复权价
     cutoff = pd.Timestamp("2024-01-15")
+    # 事件之前：复权价应 = 原价 * 0.5
     before_raw = raw.loc[raw.index < cutoff, "000001.SZ"]
     before_adj = adj.loc[adj.index < cutoff, "000001.SZ"]
     assert len(before_raw) > 0
-    pd.testing.assert_series_equal(
-        before_raw, before_adj, check_exact=False, rtol=1e-6
-    )
+    for ts in before_raw.index:
+        assert before_adj.loc[ts] == pytest.approx(
+            before_raw.loc[ts] * 0.5, rel=1e-6
+        ), f"日期 {ts} 除权前复权价不等于 raw * 0.5"
 
-    # 除权后：因子=0.5，复权价应 = 原价 * 0.5
+    # 事件当日及之后：qfq=1，复权价 == 原价
     after_raw = raw.loc[raw.index >= cutoff, "000001.SZ"]
     after_adj = adj.loc[adj.index >= cutoff, "000001.SZ"]
     assert len(after_raw) > 0
-    # 取第一个除权后的日期比对
-    first_raw = after_raw.iloc[0]
-    first_adj = after_adj.iloc[0]
-    assert first_adj == pytest.approx(first_raw * 0.5, rel=1e-6)
+    pd.testing.assert_series_equal(
+        after_raw, after_adj, check_exact=False, rtol=1e-6
+    )
 
 
 @pytest.mark.integration
 def test_qfq_adjustment_applies_to_ohlc(seed_bar_1d, seed_qfq_factor):
-    """qfq 因子应作用于 open/high/low/close 四个价格字段，不影响 volume/amount_k。"""
+    """qfq 乘子应作用于 open/high/low/close 四个字段，不影响 volume/amount_k。
+
+    事件之前乘 0.5；事件之后不变。这里断言事件之前的 OHLC 都被压一半。
+    """
     from backend.storage.data_service import DataService
 
     svc = DataService()
@@ -145,66 +150,134 @@ def test_qfq_adjustment_applies_to_ohlc(seed_bar_1d, seed_qfq_factor):
         ["000001.SZ"], date(2024, 1, 2), date(2024, 1, 31), adjust="qfq"
     )["000001.SZ"]
     cutoff = pd.Timestamp("2024-01-15")
-    # 除权后所有 OHLC 字段都 × 0.5
+    # 除权之前所有 OHLC 字段都 × 0.5
     for col in ("open", "high", "low", "close"):
-        r = raw.loc[raw.index >= cutoff, col].iloc[0]
-        a = adj.loc[adj.index >= cutoff, col].iloc[0]
-        assert a == pytest.approx(r * 0.5, rel=1e-6), f"字段 {col} 复权失败"
+        r = raw.loc[raw.index < cutoff, col].iloc[0]
+        a = adj.loc[adj.index < cutoff, col].iloc[0]
+        assert a == pytest.approx(r * 0.5, rel=1e-6), f"字段 {col} 除权前复权失败"
     # volume / amount_k 不应被因子影响
-    r_vol = raw.loc[raw.index >= cutoff, "volume"].iloc[0]
-    a_vol = adj.loc[adj.index >= cutoff, "volume"].iloc[0]
+    r_vol = raw.loc[raw.index < cutoff, "volume"].iloc[0]
+    a_vol = adj.loc[adj.index < cutoff, "volume"].iloc[0]
     assert r_vol == a_vol
 
 
 @pytest.mark.integration
-def test_qfq_handles_factor_before_window(seed_bar_1d):
-    """验证：即使 fr_qfq_factor 里的因子记录远早于查询窗口，复权仍然正确。
+def test_qfq_handles_single_event_long_before_window(seed_bar_1d):
+    """验证：唯一的事件落在查询窗口**之前**时，窗口内 qfq=1（因为 cum 已归一）。
 
-    场景：sid=2 在 2023-06-01 有一条 factor=0.3（远早于查询窗口 2024-01-x），
-    查询窗口内无任何因子。旧实现把窗口向左扩展 30 天，取不到这条 seed 因子，
-    最终 ffill 失败被 1.0 兜底 → 产出错误的未复权价；新实现的 seed 查询
-    应能把 0.3 传播到整个查询窗口。
+    按新语义：cum_today=0.3，查询窗口每一天 cum=0.3，qfq=0.3/0.3=1 → 价格不变。
+    （这里不再像旧实现那样把 0.3 直接当成乘子乘到价格上——那是错误语义。）
+
+    注意：conftest._TEST_SYMBOL_IDS 里的 sid 与真实 ``stock_symbol`` 不一定一一对应，
+    要用 resolver 拿到真实 sid 再往 fr_qfq_factor 里插，否则因子和 bar 对不上导致
+    测试"误通过"。
     """
     from backend.storage.data_service import DataService
     from backend.storage.mysql_client import mysql_conn
+    from backend.storage.symbol_resolver import SymbolResolver
 
-    # 清空 sid=2 的既有因子（seed_bar_1d 不触发 clean_qfq_factor，所以手工处理），
-    # 再插一条远早于查询窗口的记录。
+    target_symbol = "000001.SZ"
+    sid = SymbolResolver().resolve_many([target_symbol])[target_symbol]
+
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=2")
+            cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=%s", (sid,))
             cur.execute(
                 "INSERT INTO fr_qfq_factor "
                 "(symbol_id, trade_date, factor, source_file_mtime) "
-                "VALUES (2, '2023-06-01', 0.3, 1700000000)"
+                "VALUES (%s, %s, %s, %s)",
+                (sid, date(2023, 6, 1), 0.3, 1_700_000_000),
             )
         c.commit()
     try:
         svc = DataService()
         raw = svc.load_panel(
-            ["000002.SZ"],
-            date(2024, 1, 2),
-            date(2024, 1, 10),
-            field="close",
-            adjust="none",
+            [target_symbol], date(2024, 1, 2), date(2024, 1, 10),
+            field="close", adjust="none",
         )
         adj = svc.load_panel(
-            ["000002.SZ"],
-            date(2024, 1, 2),
-            date(2024, 1, 10),
-            field="close",
-            adjust="qfq",
+            [target_symbol], date(2024, 1, 2), date(2024, 1, 10),
+            field="close", adjust="qfq",
         )
-        # 查询窗口远晚于 2023-06-01 的唯一因子；seed 查询应把 0.3 传上来。
-        assert not raw.empty, "seed_bar_1d 应为 sid=2 写入了 2024-01 的行情"
-        for ts in raw.index:
-            assert adj.loc[ts, "000002.SZ"] == pytest.approx(
-                raw.loc[ts, "000002.SZ"] * 0.3, rel=1e-6
-            ), f"日期 {ts} 的复权价不等于 raw * 0.3"
+        assert not raw.empty
+        pd.testing.assert_series_equal(
+            raw[target_symbol], adj[target_symbol], check_exact=False, rtol=1e-6
+        )
     finally:
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=2")
+                cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=%s", (sid,))
+            c.commit()
+
+
+@pytest.mark.integration
+def test_qfq_multiple_events_cumprod(seed_bar_1d):
+    """验证多事件累乘：2024-01-10 有 r=1.5，2024-01-20 有 r=2.0。
+
+    cum_today = 1.5 * 2.0 = 3.0
+    - 2024-01-09 及之前：cum=1 → qfq=1/3
+    - [2024-01-10, 2024-01-20): cum=1.5 → qfq=0.5
+    - 2024-01-20 及之后：cum=3 → qfq=1
+
+    sid 同样用 resolver 从真实 stock_symbol 查，避免与 conftest 的 _TEST_SYMBOL_IDS
+    假设错位。用 000001.SZ 但避开 seed_qfq_factor fixture（不依赖它）。
+    """
+    from backend.storage.data_service import DataService
+    from backend.storage.mysql_client import mysql_conn
+    from backend.storage.symbol_resolver import SymbolResolver
+
+    target_symbol = "000001.SZ"
+    sid = SymbolResolver().resolve_many([target_symbol])[target_symbol]
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=%s", (sid,))
+            cur.executemany(
+                "INSERT INTO fr_qfq_factor "
+                "(symbol_id, trade_date, factor, source_file_mtime) "
+                "VALUES (%s, %s, %s, %s)",
+                [
+                    (sid, date(2024, 1, 10), 1.5, 1_700_000_000),
+                    (sid, date(2024, 1, 20), 2.0, 1_700_000_000),
+                ],
+            )
+        c.commit()
+    try:
+        svc = DataService()
+        raw = svc.load_panel(
+            [target_symbol], date(2024, 1, 2), date(2024, 1, 31),
+            field="close", adjust="none",
+        )
+        adj = svc.load_panel(
+            [target_symbol], date(2024, 1, 2), date(2024, 1, 31),
+            field="close", adjust="qfq",
+        )
+        assert not raw.empty
+        cut1 = pd.Timestamp("2024-01-10")
+        cut2 = pd.Timestamp("2024-01-20")
+
+        pre = raw.index < cut1
+        assert pre.any()
+        for ts in raw.index[pre]:
+            assert adj.loc[ts, target_symbol] == pytest.approx(
+                raw.loc[ts, target_symbol] / 3.0, rel=1e-6
+            )
+        mid = (raw.index >= cut1) & (raw.index < cut2)
+        assert mid.any()
+        for ts in raw.index[mid]:
+            assert adj.loc[ts, target_symbol] == pytest.approx(
+                raw.loc[ts, target_symbol] * 0.5, rel=1e-6
+            )
+        post = raw.index >= cut2
+        assert post.any()
+        for ts in raw.index[post]:
+            assert adj.loc[ts, target_symbol] == pytest.approx(
+                raw.loc[ts, target_symbol], rel=1e-6
+            )
+    finally:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute("DELETE FROM fr_qfq_factor WHERE symbol_id=%s", (sid,))
             c.commit()
 
 

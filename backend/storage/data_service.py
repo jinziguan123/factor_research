@@ -361,73 +361,81 @@ class DataService:
     def _load_qfq_factors(
         self, sid_list: list[int], start: date, end: date
     ) -> dict[int, pd.Series]:
-        """批量读取 ``fr_qfq_factor``，返回 ``{symbol_id: Series(index=date, value=factor)}``。
+        """批量读取 ``fr_qfq_factor``，返回 ``{symbol_id: Series(index=date, value=QFQ 乘子)}``。
 
-        两阶段查询策略（避免"窗口内无因子就退回 1.0"导致的错误价格）：
+        **重要语义澄清**：``fr_qfq_factor.factor`` 列里存的不是累积因子，而是
+        每次除权除息事件当天的**单次比率**： ``r_i = P_除权前 / P_理论除权后``。
+        这种值来自 ``data/merged_adjust_factors.parquet``，每只股票只在事件日有行，
+        典型 A 股 20~40 年也就 20~50 条。
 
-        1. **window 查询**：拉 [start, end] 窗口内的所有 (sid, trade_date, factor)。
-        2. **seed 查询**：对每个 sid，取 ``trade_date < start`` 中最大的一条
-           （即窗口左侧最接近的一次因子落点）作为 seed 行；合并进最终 Series 后，
-           上层 ``_apply_qfq`` 的 ``reindex(method="ffill")`` 就能把这条因子传播
-           到 ``start`` 那一天及之后的所有行。
+        要把它变成可以直接 × 原价的 QFQ 乘子，需要：
 
-        为什么不再用"窗口向左扩展 N 天"的旧做法：
-        - 旧做法假设最后一次因子写入距查询窗口不超过 30 天；对活跃股这没问题，
-          但对长期停牌 / 因子文件长期未更新的股，会取不到因子，ffill 失败后被
-          ``_apply_qfq`` 的 ``fillna(1.0)`` 吞掉，产出**错误价格**。
-        - seed 查询按 sid 分组取最大 trade_date，O(sid 数)，代价极低。
+        1. 对每个 sid 按时间序列做 ``cumprod()``，得到累积乘积 ``C(t) = Π r_i (d_i ≤ t)``。
+           这相当于"从第一次事件开始到 t 的后复权放大系数"。
+        2. 再除以表里的最新一条 ``C_today = C.iloc[-1]``，使得"今天/最新事件之后"乘子归一成 1。
+           结果 ``qfq(t) = C(t) / C_today ≤ 1``，就是通达信意义下的前复权乘子。
+        3. 对首个事件之前的日期（raw bar 一般不会落到这段，但稳妥起见）
+           prepend 一个 ``Timestamp("1900-01-01") -> 1 / C_today`` 的哨兵行，
+           让上层 ``reindex(method="ffill")`` 能覆盖左边界。
 
-        若 seed + window 都为空，说明该 sid 在 ``fr_qfq_factor`` 表里根本没有任何
-        记录，上层会 warn 后退到 factor=1.0（原价）。
+        因子事件稀疏（每 sid 几十条），这里一次把全部历史拉进来，不再按日期分段查。
         """
         if not sid_list:
             return {}
 
+        # 注：start/end 不再参与因子筛选——要得到正确的 QFQ 乘子，必须看到该 sid
+        # **全部历史事件** + 今日最新一条以完成归一化。
+        _ = (start, end)
         sid_tuple = tuple(sid_list)
 
-        # 1) 窗口内的因子。pymysql 支持 ``IN %s`` + tuple 参数化，自动展开为
-        #    ``IN (a, b, c)``，避免手工拼接 placeholders。
-        sql_window = (
-            "SELECT symbol_id, trade_date, factor "
-            "FROM fr_qfq_factor "
-            "WHERE symbol_id IN %s AND trade_date BETWEEN %s AND %s"
-        )
-        # 2) seed 行：每个 sid 取 trade_date < start 的最大一条。
-        #    用 JOIN 子查询而不是窗口函数，兼容低版本 MySQL。
-        sql_seed = (
-            "SELECT f.symbol_id, f.trade_date, f.factor "
-            "FROM fr_qfq_factor f "
-            "JOIN ("
-            "    SELECT symbol_id, MAX(trade_date) AS md "
-            "    FROM fr_qfq_factor "
-            "    WHERE symbol_id IN %s AND trade_date < %s "
-            "    GROUP BY symbol_id"
-            ") m ON f.symbol_id = m.symbol_id AND f.trade_date = m.md"
-        )
         with mysql_conn() as c:
             with c.cursor() as cur:
-                cur.execute(sql_window, (sid_tuple, start, end))
-                window_rows = cur.fetchall()
-                cur.execute(sql_seed, (sid_tuple, start))
-                seed_rows = cur.fetchall()
-
-        # 合并：seed 行按其真实 trade_date 放进去，后面 reindex(ffill) 会自然把它
-        # 传播到 start 那一天。window 行放在后面（其实顺序不影响，dict 按日期去重）。
-        all_rows = list(seed_rows) + list(window_rows)
-        if not all_rows:
+                cur.execute(
+                    "SELECT symbol_id, trade_date, factor "
+                    "FROM fr_qfq_factor "
+                    "WHERE symbol_id IN %s "
+                    "ORDER BY symbol_id, trade_date",
+                    (sid_tuple,),
+                )
+                rows = cur.fetchall()
+        if not rows:
             return {}
-        # 分组聚合成 Series；同一 (sid, date) 上 seed 与 window 若重复，window 覆盖 seed
-        # （因为后 insert），但实际上 seed 的日期 < start < window 最小日期，不会冲突。
-        buckets: dict[int, dict[pd.Timestamp, float]] = {}
-        for r in all_rows:
+
+        buckets: dict[int, list[tuple[pd.Timestamp, float]]] = {}
+        for r in rows:
             sid = int(r["symbol_id"])
-            buckets.setdefault(sid, {})[
-                pd.to_datetime(r["trade_date"])
-            ] = float(r["factor"])
-        return {
-            sid: pd.Series(pairs).sort_index()
-            for sid, pairs in buckets.items()
-        }
+            buckets.setdefault(sid, []).append(
+                (pd.to_datetime(r["trade_date"]), float(r["factor"]))
+            )
+
+        out: dict[int, pd.Series] = {}
+        # SQL 已按 trade_date 升序返回；这里再 sort_index 一次防御即可。
+        for sid, pairs in buckets.items():
+            events = pd.Series(dict(pairs)).sort_index().astype("float64")
+            if events.empty:
+                continue
+            cum = events.cumprod()
+            cum_today = float(cum.iloc[-1])
+            if cum_today == 0.0 or not np.isfinite(cum_today):
+                # 理论上不会发生（source factor 全为正），出现就说明数据污染；
+                # 打 warning 后跳过该 sid，上层会自动回退到 factor=1.0。
+                logger.warning(
+                    "sid %s 的累积 qfq 因子 cum_today=%s 非正或非有限，跳过归一化",
+                    sid,
+                    cum_today,
+                )
+                continue
+            qfq = cum / cum_today
+            # 左边界哨兵：首个事件之前的日期以 1/cum_today 填充
+            # （语义：任何事件都没发生 → 比起"今天"要把价格整体压下去 cum_today 倍）。
+            qfq_full = pd.concat(
+                [
+                    pd.Series({pd.Timestamp("1900-01-01"): 1.0 / cum_today}),
+                    qfq,
+                ]
+            ).sort_index()
+            out[sid] = qfq_full
+        return out
 
     def _apply_qfq(
         self, df: pd.DataFrame, factor_map: dict[int, pd.Series]

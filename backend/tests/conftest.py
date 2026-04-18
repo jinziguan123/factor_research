@@ -220,23 +220,24 @@ def clean_qfq_factor():
 
 @pytest.fixture
 def seed_qfq_factor(clean_qfq_factor):
-    """制造一次除权事件用于 qfq 回归测试：
+    """制造稀疏事件因子用于 qfq 回归测试。
 
-    - sid=1 在 ``2024-01-15`` 之前因子=1.0，之后=0.5（除权一次）；
-    - 其它 symbol_id 因子始终=1.0；
-    - 与 ``seed_bar_1d`` 的日期范围保持一致。
+    ``fr_qfq_factor.factor`` 存的是除权除息事件当天的**单次比率**
+    ``r_i = P_除权前 / P_理论除权后``（通常 > 1），并非每日累积值。
+    fixture 故意按此稀疏结构写，复现真实 parquet 的语义，防止测试
+    把"每日乘子"的错误假设又写回来。
+
+    本 fixture 为 sid=1 造一次 2024-01-15 的 2:1 拆股事件（r=2.0），
+    其它 sid 不写任何因子；按 DataService 的新逻辑：
+
+    - 2024-01-15 之前：qfq_factor = 1 / cum_today = 1 / 2 = 0.5
+    - 2024-01-15 及之后：qfq_factor = 2 / 2 = 1.0（价格不变）
     """
     from backend.storage.mysql_client import mysql_conn
 
-    base = date(2024, 1, 2)
-    rows: list[tuple] = []
-    for sid in _TEST_SYMBOL_IDS:
-        for i in range(30):
-            d = base + timedelta(days=i)
-            if d.weekday() >= 5:
-                continue
-            factor = 0.5 if (sid == 1 and d >= date(2024, 1, 15)) else 1.0
-            rows.append((sid, d, factor, 1_700_000_000))
+    rows: list[tuple] = [
+        (1, date(2024, 1, 15), 2.0, 1_700_000_000),
+    ]
 
     with mysql_conn() as c:
         with c.cursor() as cur:
