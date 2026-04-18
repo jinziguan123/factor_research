@@ -18,6 +18,11 @@ const message = useMessage()
 const symbol = ref('000001.SZ')
 const freq = ref<'1d' | '1m'>('1d')
 const adjust = ref<'qfq' | 'none'>('qfq')
+// 涨跌配色：默认 A 股（红涨绿跌），一键切成币圈 / 美股风格（绿涨红跌）。
+const colorMode = ref<'a-share' | 'binance'>('a-share')
+function toggleColorMode() {
+  colorMode.value = colorMode.value === 'a-share' ? 'binance' : 'a-share'
+}
 
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
@@ -157,6 +162,9 @@ watch(freq, () => {
         <n-button type="primary" :loading="isLoading" @click="handleRefresh">
           刷新
         </n-button>
+        <n-button quaternary @click="toggleColorMode">
+          {{ colorMode === 'a-share' ? '红涨绿跌 (A 股)' : '绿涨红跌 (币圈)' }}
+        </n-button>
       </n-space>
     </n-card>
 
@@ -170,6 +178,7 @@ watch(freq, () => {
           :categories="chartData.categories"
           :ohlc="chartData.ohlc"
           :volumes="chartData.volumes"
+          :color-mode="colorMode"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">
