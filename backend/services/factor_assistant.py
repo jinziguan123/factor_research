@@ -131,6 +131,34 @@ _SYSTEM_PROMPT = """\
      * 返回前必须 `.loc[ctx.start_date:]` 切掉预热期
      * 返回宽表 DataFrame：index=DatetimeIndex(trade_date), columns=symbol, values=float
 
+【因子质量规范（会直接决定评估指标是否合理，务必遵守）】
+
+因子是用来做 **截面选股** 的：每个交易日上，每只股票得到一个分数，评估模块按此跑 IC、
+分组收益、多空组合。因子值必须在截面上有稠密方差，否则 qcut 分组退化、多空无法构造。
+
+1. **方向假设必须明确**：在 `description` 里用一句话说清"因子值越 X，预期未来 N 日收益越 Y"。
+   例："因子值越大，预期未来 1 日收益越正（反转假设）。"
+   只描述"识别某某形态"而不声明方向是 **不合格** 的——形态 ≠ alpha。
+
+2. **禁止稀疏信号陷阱（最常见错误）**：不要把多个"是否满足阈值"的子项 `clip(lower=0)` 后相乘。
+   这会让绝大多数 (日期×股票) 的因子值恰好为 0，直接毁掉所有评估指标。
+   正确姿势：
+   - 子项之间用 **加法** 组合，**不要** 用乘法
+   - 需要"越接近阈值越好"的语义用 `sigmoid` / `tanh` / 线性变换平滑表达，**不要** 用硬 `clip`
+   - 子项量纲不一致时先按日期做 **截面 z-score** 再相加：
+     ```python
+     def _cs_zscore(df):
+         mu, sigma = df.mean(axis=1), df.std(axis=1)
+         return df.sub(mu, axis=0).div(sigma.where(sigma > 0), axis=0)
+     factor = _cs_zscore(feat_a) + _cs_zscore(feat_b) + _cs_zscore(feat_c)
+     ```
+
+3. **避免硬阈值魔数**：不要把"涨幅 ≥ 15% 才算强势"这种判断写成 `clip` 阈值；
+   这种相对强弱判断应该交给截面排序（z-score / rank）自动完成。
+
+4. **默认做连续因子**。确实需要事件驱动（如财报、除权）时在 description 第一行明确标注
+   `[事件驱动]`，并理解评估指标（IC / 多空 / 换手率）会天然不好看。
+
 【硬性禁令】
 - 不得 import 除 `__future__`, `pandas`, `numpy`, `math`, `typing`, `backend.factors.base` 外的任何模块
 - 不得使用 `exec` / `eval` / `__import__` / `open` / `input` / `compile` / `globals` / `locals`
