@@ -73,11 +73,18 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     # LLM 调用超时（秒）；设大一点容忍中转偶发 RTT 抖动。
     openai_timeout_s: float = Field(default=60.0, alias="OPENAI_TIMEOUT_S")
-    # 是否在请求里带 response_format={type: json_object}。默认 True；但 reasoning 系列
-    # 模型（o1 / o3 / gpt-5 家族）不支持这个参数，带上会导致 content 字段被吞空，
-    # 这时要手动设 false 走 prompt 约束。chat 类模型（gpt-4o/4o-mini 等）保持 True。
+    # 是否在请求里带 response_format={type: json_object}（chat_completions 协议）
+    # / text.format={type: json_object}（responses 协议）。默认 True；少数老代理
+    # 不兼容时可手动关掉走 prompt 约束。
     openai_response_format_json: bool = Field(
         default=True, alias="OPENAI_RESPONSE_FORMAT_JSON"
+    )
+    # LLM HTTP 协议选择：
+    #   chat_completions —— 老协议，POST /v1/chat/completions，gpt-4o / 4o-mini / 3.5 等 chat 模型用这个；
+    #   responses        —— 新协议，POST /v1/responses，o1/o3/gpt-5 家族（reasoning 模型）必须用这个，
+    #                       否则走老协议时 message.content 会被吞空。
+    openai_api_protocol: str = Field(
+        default="chat_completions", alias="OPENAI_API_PROTOCOL"
     )
 
     model_config = SettingsConfigDict(

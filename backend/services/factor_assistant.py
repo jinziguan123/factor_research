@@ -176,33 +176,8 @@ def _build_user_prompt(description: str, hints: str | None) -> str:
 # ---------------------------- LLM 调用 ----------------------------
 
 
-def _call_openai_compatible(messages: list[dict]) -> str:
-    """调 OpenAI 兼容的 chat/completions，返回 assistant 消息的 content 字符串。
-
-    - 使用 ``response_format={"type":"json_object"}`` 让模型走 JSON mode——
-      大多数 OpenAI 兼容中转都支持；不支持时 fallback 回普通模式（仍能工作，
-      解析 JSON 时要兜底去除 markdown 代码块）。
-    - 温度降到 0.2：因子代码要稳定、可复现，不该让 LLM 发挥。
-    """
-    if not settings.openai_api_key:
-        raise FactorAssistantError(
-            "LLM 未配置：请在 backend/.env 中填写 OPENAI_API_KEY"
-        )
-
-    url = settings.openai_base_url.rstrip("/") + "/chat/completions"
-    payload: dict = {
-        "model": settings.openai_model,
-        "messages": messages,
-        "temperature": 0.2,
-        # 部分中转默认 stream=true，会返回 SSE 流，后端 resp.json() 解不出来——
-        # 显式置 false 保证一次性拿完整 JSON 回来。
-        "stream": False,
-    }
-    # reasoning 系列模型（o1/o3/gpt-5 家族）不支持 response_format；此开关默认开，
-    # 用户在 .env 里 OPENAI_RESPONSE_FORMAT_JSON=false 时跳过，靠 system prompt
-    # 里的 "严格返回 JSON" 约束兜底（_parse_llm_json 能剥 markdown fence）。
-    if settings.openai_response_format_json:
-        payload["response_format"] = {"type": "json_object"}
+def _post_and_validate(url: str, payload: dict) -> dict:
+    """共享的 HTTP 调用 + 响应健康检查。两种协议分支都会先走这里，再各自解 body。"""
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
@@ -211,21 +186,16 @@ def _call_openai_compatible(messages: list[dict]) -> str:
         with httpx.Client(timeout=settings.openai_timeout_s) as client:
             resp = client.post(url, headers=headers, json=payload)
     except httpx.HTTPError as e:
-        # 网络层错误：超时 / DNS / 连不上中转——全部视为"上游服务不可用"
         raise FactorAssistantError(f"调用 LLM 失败（网络层）：{e}") from e
 
     if resp.status_code >= 400:
-        # 不把 provider 的 error body 直接透给前端，里面可能带 API key 回显
-        logger.warning(
-            "LLM returned %d: %s", resp.status_code, resp.text[:500]
-        )
+        logger.warning("LLM returned %d: %s", resp.status_code, resp.text[:500])
         raise FactorAssistantError(
             f"LLM 返回错误状态 {resp.status_code}；详情请看后端日志"
         )
 
     # 2xx 但 content-type 不是 JSON —— 最常见是 OPENAI_BASE_URL 漏了 /v1，
-    # 中转把请求路由到了网关的 SPA 首页或普通 HTML 错误页。给一个明确提示，
-    # 省得用户对着 body preview 猜半天。
+    # 中转把请求路由到网关的 SPA 首页或普通 HTML 错误页。
     ctype = resp.headers.get("content-type", "").lower()
     if "json" not in ctype:
         logger.warning(
@@ -240,25 +210,117 @@ def _call_openai_compatible(messages: list[dict]) -> str:
         )
 
     try:
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, ValueError) as e:
-        # 结构 / JSON 解析失败——大概率是中转返回了 SSE 流 / HTML 错误页 / 空响应。
-        # 把原始 body 写日志（便于排查），再截 300 字回前端（避免遮蔽根因）。
-        # provider 能在 2xx 响应里漏 API key 的场景极少，先不做脱敏；真遇到再补。
+        return resp.json()
+    except ValueError as e:
         body_preview = (resp.text or "")[:500]
         logger.warning(
-            "LLM response parse failed (status=%d, ct=%s): %s; body[:500]=%r",
+            "LLM response parse failed (status=%d): %s; body[:500]=%r",
             resp.status_code,
-            resp.headers.get("content-type", ""),
             e,
             body_preview,
         )
         raise FactorAssistantError(
-            f"LLM 响应结构异常：{e}；HTTP {resp.status_code} "
-            f"content-type={resp.headers.get('content-type', '')!r} "
+            f"LLM 响应非法 JSON：{e}；HTTP {resp.status_code} "
             f"body[:300]={body_preview[:300]!r}"
         ) from e
+
+
+def _call_chat_completions(messages: list[dict]) -> str:
+    """老协议 ``POST /v1/chat/completions`` —— 绝大多数中转和 gpt-4o/4o-mini 的默认。"""
+    url = settings.openai_base_url.rstrip("/") + "/chat/completions"
+    payload: dict = {
+        "model": settings.openai_model,
+        "messages": messages,
+        "temperature": 0.2,
+        # 部分中转默认 stream=true 会返回 SSE，显式关。
+        "stream": False,
+    }
+    # reasoning 系列（o1/o3/gpt-5）不支持 response_format；关掉靠 prompt 约束。
+    if settings.openai_response_format_json:
+        payload["response_format"] = {"type": "json_object"}
+
+    data = _post_and_validate(url, payload)
+
+    try:
+        return data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        body_preview = json.dumps(data, ensure_ascii=False)[:500]
+        logger.warning("chat.completions missing content: %s; body=%r", e, body_preview)
+        raise FactorAssistantError(
+            f"LLM 响应结构异常（choices[0].message.content 缺失）：{e}；"
+            f"body[:300]={body_preview[:300]!r}。"
+            f"常见原因：用了 reasoning 模型（o1/o3/gpt-5 家族）走老 Chat Completions，"
+            f"把 content 吞空——改用 OPENAI_API_PROTOCOL=responses 切到新协议。"
+        ) from e
+
+
+def _call_responses(messages: list[dict]) -> str:
+    """新协议 ``POST /v1/responses`` —— gpt-5/o1/o3 等 reasoning 模型专用。
+
+    请求里 ``input`` 允许直接复用 Chat Completions 的 ``[{role, content: str}]`` 结构
+    （中转 / 官方都支持字符串 content）；返回的 ``output[]`` 里会有 reasoning 节点和
+    message 节点，只提 message 的 output_text 文本。
+    """
+    url = settings.openai_base_url.rstrip("/") + "/responses"
+    payload: dict = {
+        "model": settings.openai_model,
+        # messages 复用 chat 的结构；role 允许 system/user/assistant/developer。
+        "input": messages,
+        "stream": False,
+        # 默认 "high" 会把输出预算全烧在隐藏思考里，导致 output[] 空——
+        # "medium" 给可见回答留预算；简单任务也够用。
+        "reasoning": {"effort": "medium"},
+    }
+    # Responses API 的 JSON mode 在 ``text.format`` 下；reasoning 模型这条一般也不支持。
+    if settings.openai_response_format_json:
+        payload["text"] = {"format": {"type": "json_object"}}
+
+    data = _post_and_validate(url, payload)
+
+    # 从 output[] 提 message 节点里的 output_text
+    parts: list[str] = []
+    for item in data.get("output", []) or []:
+        if item.get("type") == "message":
+            for c in item.get("content", []) or []:
+                if c.get("type") == "output_text":
+                    parts.append(c.get("text", ""))
+
+    if parts:
+        return "".join(parts)
+
+    # output[] 里没 message 节点 —— token 全耗在 reasoning 或 provider 侧掉了。
+    usage = data.get("usage", {}) or {}
+    details = usage.get("output_tokens_details", {}) or {}
+    body_preview = json.dumps(data, ensure_ascii=False)[:500]
+    logger.warning("Responses API: no visible message; body=%r", body_preview)
+    raise FactorAssistantError(
+        f"LLM 没产出可见回答（output[] 里无 message 节点）；"
+        f"output_tokens={usage.get('output_tokens', 0)}, "
+        f"reasoning_tokens={details.get('reasoning_tokens', 0)}。"
+        f"常见原因：reasoning.effort 太高把预算全烧在思考里；"
+        f"或 prompt 不够明确让模型觉得没啥好说的。"
+    )
+
+
+def _call_openai_compatible(messages: list[dict]) -> str:
+    """按 ``OPENAI_API_PROTOCOL`` 分发到老 Chat Completions 或新 Responses API。
+
+    测试里会 monkeypatch 这个函数替换成桩，所以这一层只做协议分发，不做其它逻辑。
+    """
+    if not settings.openai_api_key:
+        raise FactorAssistantError(
+            "LLM 未配置：请在 backend/.env 中填写 OPENAI_API_KEY"
+        )
+
+    proto = (settings.openai_api_protocol or "chat_completions").lower()
+    if proto == "responses":
+        return _call_responses(messages)
+    if proto == "chat_completions":
+        return _call_chat_completions(messages)
+    raise FactorAssistantError(
+        f"OPENAI_API_PROTOCOL 非法：{proto!r}；"
+        f"可选 'chat_completions'（默认）或 'responses'"
+    )
 
 
 def _parse_llm_json(raw: str) -> dict:
