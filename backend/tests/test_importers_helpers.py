@@ -294,3 +294,108 @@ def test_incremental_start_ts_rewind_lower_bound():
     ts0 = _incremental_start_ts(date(2024, 3, 10), rewind_days=0)
     ts1 = _incremental_start_ts(date(2024, 3, 10), rewind_days=1)
     assert ts0 == ts1
+
+
+# ------------------------- stock_1m._compute_batch_boundaries -------------------------
+
+
+def _make_row(trade_date: date, minute_slot: int = 571) -> tuple:
+    """构造一个"只有 trade_date 位置有意义"的 9 元组占位 row，其它列 0/0.0。"""
+    return (trade_date, minute_slot, 1, 0.0, 0.0, 0.0, 0.0, 0, 0)
+
+
+def test_compute_batch_boundaries_empty():
+    from backend.scripts.importers.stock_1m import _compute_batch_boundaries
+
+    assert _compute_batch_boundaries([]) == []
+
+
+def test_compute_batch_boundaries_fits_in_one_batch():
+    """单只股票半年数据：行数远低于 50k 且只跨 6 个月 → 单批。"""
+    from backend.scripts.importers.stock_1m import _compute_batch_boundaries
+
+    rows: list[tuple] = []
+    for m in range(1, 7):  # 2024-01..2024-06
+        for d in range(1, 11):  # 每月 10 天
+            rows.append(_make_row(date(2024, m, d)))
+    assert _compute_batch_boundaries(rows) == [(0, len(rows))]
+
+
+def test_compute_batch_boundaries_row_limit_triggers():
+    """稠密场景：行数先达到 50k 上限 → 按行切。"""
+    from backend.scripts.importers.stock_1m import (
+        _CH_INSERT_BATCH_ROWS,
+        _compute_batch_boundaries,
+    )
+
+    # 全部放在同一月里，保证月数约束不会先触发。
+    n = _CH_INSERT_BATCH_ROWS + 1000
+    rows = [_make_row(date(2024, 1, 15)) for _ in range(n)]
+    bounds = _compute_batch_boundaries(rows)
+
+    assert len(bounds) == 2
+    assert bounds[0] == (0, _CH_INSERT_BATCH_ROWS)
+    assert bounds[1] == (_CH_INSERT_BATCH_ROWS, n)
+
+
+def test_compute_batch_boundaries_month_limit_triggers_for_sparse_b_share():
+    """B 股稀疏场景：每天只有 5 根，30 年总行数 < 50k，但跨 300+ 个月 → 必须按月切。
+
+    单批必须 <= 50 个月，避免 CH max_partitions_per_insert_block=100 被打爆。
+    """
+    from backend.scripts.importers.stock_1m import (
+        _CH_INSERT_BATCH_PARTITIONS,
+        _CH_INSERT_BATCH_ROWS,
+        _compute_batch_boundaries,
+    )
+
+    # 构造 30 年 × 每月 1 天 × 每天 5 根 = 1800 行，跨 360 个月。
+    # 远低于 50k 行阈值，必然由"月数"触发切批。
+    rows: list[tuple] = []
+    start_year = 1995
+    for year_offset in range(30):
+        for month in range(1, 13):
+            for _ in range(5):
+                rows.append(_make_row(date(start_year + year_offset, month, 15)))
+
+    total = len(rows)
+    assert total < _CH_INSERT_BATCH_ROWS, "前提：行数不到 50k，只能由月数触发切批"
+
+    bounds = _compute_batch_boundaries(rows)
+    # 360 个月 / 50 上限 = 8 批
+    assert len(bounds) >= 7
+
+    # 覆盖完整 + 不重叠
+    assert bounds[0][0] == 0
+    assert bounds[-1][1] == total
+    for (s1, e1), (s2, e2) in zip(bounds, bounds[1:]):
+        assert e1 == s2, f"batch 不连续：{(s1, e1)} -> {(s2, e2)}"
+
+    # 每批唯一月数都 <= 阈值
+    for s, e in bounds:
+        unique_months = {(r[0].year, r[0].month) for r in rows[s:e]}
+        assert len(unique_months) <= _CH_INSERT_BATCH_PARTITIONS, (
+            f"batch [{s},{e}) 跨了 {len(unique_months)} 个月，超过 "
+            f"{_CH_INSERT_BATCH_PARTITIONS} 上限"
+        )
+
+
+def test_compute_batch_boundaries_covers_all_rows():
+    """通用不变式：任何输入下，切批结果的并集 == [0, len(rows))。"""
+    from backend.scripts.importers.stock_1m import _compute_batch_boundaries
+
+    rows: list[tuple] = []
+    # 混合：前一段稀疏 (2 年 × 每月 2 天)，后一段稠密 (某天狂塞 5k 行)
+    for y in (2020, 2021):
+        for m in range(1, 13):
+            for d in (5, 20):
+                rows.append(_make_row(date(y, m, d)))
+    for _ in range(5000):
+        rows.append(_make_row(date(2022, 1, 10)))
+
+    bounds = _compute_batch_boundaries(rows)
+    assert bounds[0][0] == 0
+    assert bounds[-1][1] == len(rows)
+    for (s1, e1), (s2, e2) in zip(bounds, bounds[1:]):
+        assert e1 == s2
+        assert s1 < e1

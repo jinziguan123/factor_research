@@ -56,11 +56,18 @@ logger = logging.getLogger(__name__)
 # 增量模式默认回退的交易日数；实际按自然日回退（更保守）。
 _DEFAULT_REWIND_DAYS = 3
 
-# 单次 INSERT 的行数上限。`stock_bar_1m` 按 toYYYYMM(trade_date) 分区，CH 默认
-# `max_partitions_per_insert_block=100`；一只股票全量 10 年 = 120 个月会直接爆。
-# 50_000 行 ≈ 240 根/天 × 208 天 ≈ 10 个月分区，与 timing_driven 的
-# clickhouse_bar_storage 保持一致，稳稳低于 100 的硬限。
+# 单次 INSERT 的切批规则。`stock_bar_1m` 按 toYYYYMM(trade_date) 分区，CH 默认
+# `max_partitions_per_insert_block=100`；一只股票全量 10+ 年会撞上限。
+#
+# 需要两个维度一起管：
+# - 行数上限：控制单次 INSERT 的内存 / 网络包大小；
+# - **月分区上限**：活跃股每天 240 根，50k 行 ≈ 10 个月够用；但 B 股（200xxx.SZ）
+#   每天实际落盘常 <10 根，50k 行可能横跨 20+ 个月甚至更多，仍会爆 100 上限。
+#   所以必须显式限制"单批覆盖的唯一 (year, month) 数"。
+#
+# 50 个月阈值：明显低于 100 硬限，留足 50% 缓冲；对极限 B 股也足够切分到安全范围。
 _CH_INSERT_BATCH_ROWS = 50_000
+_CH_INSERT_BATCH_PARTITIONS = 50
 
 # ClickHouse 插入时的列顺序（与 stock_bar_1m 物理表对齐）；version 用 time_ns。
 _CH_COLUMNS = (
@@ -140,27 +147,58 @@ def _normalize_frame_rows(
         return []
 
 
+def _compute_batch_boundaries(rows: Sequence[tuple]) -> list[tuple[int, int]]:
+    """把 ``rows`` 切成 ``[(start, end), ...]``，保证每批同时满足：
+
+    - ``end - start <= _CH_INSERT_BATCH_ROWS``（控内存 / 包大小）；
+    - 批内唯一 ``(year, month)`` 数 ``<= _CH_INSERT_BATCH_PARTITIONS``（防爆 CH 100 硬限）。
+
+    假设 ``rows`` 中 ``trade_date`` 单调不减——这是 ``normalize_symbol_bar_frame``
+    的输出约定（mmap 按 time 升序读，后续 filter 不改序）。违反时退化为纯按行切，
+    仍合法、只是月数约束不再强保。
+    """
+    if not rows:
+        return []
+    boundaries: list[tuple[int, int]] = []
+    start = 0
+    months: set[tuple[int, int]] = set()
+    for i, r in enumerate(rows):
+        trade_date = r[0]
+        ym = (trade_date.year, trade_date.month)
+        is_new_month = ym not in months
+        over_rows = (i - start) >= _CH_INSERT_BATCH_ROWS
+        over_months = is_new_month and len(months) >= _CH_INSERT_BATCH_PARTITIONS
+        if i > start and (over_rows or over_months):
+            boundaries.append((start, i))
+            start = i
+            months = set()
+        months.add(ym)
+    if start < len(rows):
+        boundaries.append((start, len(rows)))
+    return boundaries
+
+
 def _insert_ch_rows(rows: Sequence[tuple], *, base_version: int) -> int:
     """把 (trade_date, minute_slot, symbol_id, o, h, l, c, volume, amount_k)
     批量写入 ClickHouse ``stock_bar_1m``。
 
     - 使用 clickhouse-driver 的 ``columnar=True`` 列式 INSERT，避免逐行转 tuple 的开销。
-    - **按 ``_CH_INSERT_BATCH_ROWS`` 分批**：``stock_bar_1m`` 按月分区，单股全量
-      10+ 年数据会触碰 CH 默认 100 分区上限（Code 252）；50k 行/批稳定低于此限。
-      version 在全量序号里单调递增，批与批之间不冲突。
-    - version = base_version + i，保证 ReplacingMergeTree 同一 PK 的新版本覆盖旧版本。
+    - 切批走 :func:`_compute_batch_boundaries`：同时约束"行数"和"唯一月数"，
+      后者避免 B 股等稀疏数据（每天实际落盘 <10 根）按行数切出现单批跨 100+ 个月
+      被 CH 拒绝（Code 252）。
+    - version = base_version + global_offset + i，保证 ReplacingMergeTree 同一 PK
+      的新版本覆盖旧版本，且跨批递增不冲突。
     """
     if not rows:
         return 0
-    n = len(rows)
     # rows 是 normalize_symbol_bar_frame 的输出，列顺序：
     # (trade_date, minute_slot, symbol_id, open, high, low, close, volume, amount_k)
     inserted = 0
     with ch_client() as ch:
-        for start in range(0, n, _CH_INSERT_BATCH_ROWS):
-            batch = rows[start : start + _CH_INSERT_BATCH_ROWS]
-            cols = list(zip(*batch))
+        for start, end in _compute_batch_boundaries(rows):
+            batch = rows[start:end]
             batch_n = len(batch)
+            cols = list(zip(*batch))
             versions = np.arange(batch_n, dtype=np.int64) + int(base_version) + start
             columns_np = [
                 np.asarray(cols[2], dtype=np.uint32),           # symbol_id
