@@ -194,6 +194,9 @@ def _call_openai_compatible(messages: list[dict]) -> str:
         "model": settings.openai_model,
         "messages": messages,
         "temperature": 0.2,
+        # 部分中转默认 stream=true，会返回 SSE 流，后端 resp.json() 解不出来——
+        # 显式置 false 保证一次性拿完整 JSON 回来。
+        "stream": False,
         "response_format": {"type": "json_object"},
     }
     headers = {
@@ -220,8 +223,21 @@ def _call_openai_compatible(messages: list[dict]) -> str:
         data = resp.json()
         return data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, ValueError) as e:
+        # 结构 / JSON 解析失败——大概率是中转返回了 SSE 流 / HTML 错误页 / 空响应。
+        # 把原始 body 写日志（便于排查），再截 300 字回前端（避免遮蔽根因）。
+        # provider 能在 2xx 响应里漏 API key 的场景极少，先不做脱敏；真遇到再补。
+        body_preview = (resp.text or "")[:500]
+        logger.warning(
+            "LLM response parse failed (status=%d, ct=%s): %s; body[:500]=%r",
+            resp.status_code,
+            resp.headers.get("content-type", ""),
+            e,
+            body_preview,
+        )
         raise FactorAssistantError(
-            f"LLM 响应结构异常：{e}；详情请看后端日志"
+            f"LLM 响应结构异常：{e}；HTTP {resp.status_code} "
+            f"content-type={resp.headers.get('content-type', '')!r} "
+            f"body[:300]={body_preview[:300]!r}"
         ) from e
 
 
