@@ -11,9 +11,10 @@ import { computed, h, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NDescriptions, NDescriptionsItem, NTag, NSpace,
-  NButton, NDataTable, NSpin, NModal, NInput, NAlert,
+  NButton, NDataTable, NSpin, NModal, NAlert,
   useMessage, useDialog,
 } from 'naive-ui'
+import PyCodeEditor from '@/components/forms/PyCodeEditor.vue'
 import {
   useFactor, useFactorCode, useUpdateFactorCode, useDeleteFactor,
 } from '@/api/factors'
@@ -210,13 +211,11 @@ function confirmDelete() {
       </n-alert>
 
       <n-spin :show="codeLoading">
-        <n-input
-          v-model:value="editCode"
-          type="textarea"
-          placeholder="加载中..."
-          :autosize="{ minRows: 20, maxRows: 36 }"
+        <py-code-editor
+          v-model="editCode"
           :disabled="savePending"
-          style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px"
+          height="520px"
+          placeholder="加载中..."
         />
       </n-spin>
 

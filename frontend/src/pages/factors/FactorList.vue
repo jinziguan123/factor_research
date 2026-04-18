@@ -17,6 +17,7 @@ import {
 import { useFactors, useCreateFactor } from '@/api/factors'
 import type { Factor } from '@/api/factors'
 import { useGenerateFactor, type GenerateFactorOut } from '@/api/factor_assistant'
+import PyCodeEditor from '@/components/forms/PyCodeEditor.vue'
 
 const router = useRouter()
 const message = useMessage()
@@ -297,12 +298,11 @@ async function submitTemplate() {
             <code style="font-size: 12px">{{ JSON.stringify(aiResult.default_params) }}</code>
           </n-form-item>
           <n-form-item label="源码预览">
-            <n-input
-              :value="aiResult.code"
-              type="textarea"
+            <py-code-editor
+              :model-value="aiResult.code"
               readonly
-              :autosize="{ minRows: 8, maxRows: 20 }"
-              style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px"
+              height="360px"
+              @update:model-value="() => {}"
             />
           </n-form-item>
         </n-form>
@@ -350,12 +350,10 @@ async function submitTemplate() {
         </n-form-item>
 
         <n-form-item label="源码">
-          <n-input
-            v-model:value="tplCode"
-            type="textarea"
-            :autosize="{ minRows: 20, maxRows: 32 }"
+          <py-code-editor
+            v-model="tplCode"
             :disabled="tplPending"
-            style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px"
+            height="480px"
           />
         </n-form-item>
       </n-form>
