@@ -15,8 +15,9 @@
 - ``incremental``：从 ``max(trade_date)+1`` 到今天（或 ``--end``）增量聚合；
   **空库** 情形回退为"什么也不做"（或按用户传入的 start），由 CLI 侧决定
 
-安全：开头调 ``_safety_check()``，拒绝在生产库上执行聚合。聚合虽然不修改原始分钟数据，
-但会覆盖日线（大版本覆盖小版本），在生产库误跑可能产生未预期的日线刷新。
+安全：本脚本**不再**调 ``_safety_check()``。那是 ``run_init.py`` 的 DDL 护栏，
+聚合属于日常数据维护（前端按钮触发 / 计划任务），应当连到 .env 指向的目标库，
+而不是被 host 白名单挡下。真要防误连生产，由部署侧控制 .env / 凭据即可。
 """
 from __future__ import annotations
 
@@ -32,7 +33,6 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from backend.config import settings
-from backend.scripts.run_init import _safety_check
 from backend.storage.clickhouse_client import ch_client
 
 logger = logging.getLogger(__name__)
@@ -83,12 +83,7 @@ def aggregate(start: date, end: date) -> int:
     1. 执行 INSERT ... SELECT，一次 ClickHouse 内部批处理完成。
     2. 执行 ``SELECT count() FROM stock_bar_1d FINAL WHERE ...``，返回窗口内行数，
        便于 CLI 打印 / 调用方做完整性校验。
-
-    开头调用 ``_safety_check()``：和 ``import_qfq.run_import`` 保持一致，避免他处
-    ``from aggregate_bar_1d import aggregate`` 时绕过 CLI 的生产库护栏。
     """
-    _safety_check()
-
     if start > end:
         raise ValueError(f"invalid window: start={start} > end={end}")
 
@@ -142,9 +137,6 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    # 这里也显式调一次：``incremental`` 模式在进入 ``aggregate()`` 之前还会先查
-    # ``stock_bar_1d``（get_latest_aggregated_date），该查询同样不应在生产库上发生。
-    _safety_check()
 
     if args.mode == "full":
         start, end = args.start, args.end

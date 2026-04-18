@@ -15,7 +15,8 @@ parquet 约定：
   ``(symbol_id, trade_date)``，重复跑同一文件行数不增长。
 - **source_file_mtime**：记录 parquet 文件 mtime（``int(os.path.getmtime)``），方便后续
   增量判断是否需要重跑。
-- **安全**：开头调 ``_safety_check()``，避免误连生产库。
+- **不调 _safety_check**：那是 ``run_init.py`` 的 DDL 护栏；qfq 导入是日常数据维护，
+  该连哪个库由 .env 决定，由部署侧控制凭据，不在脚本层挡。
 """
 from __future__ import annotations
 
@@ -36,7 +37,6 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from backend.config import settings
-from backend.scripts.run_init import _safety_check
 from backend.storage.mysql_client import mysql_conn
 from backend.storage.symbol_resolver import SymbolResolver
 
@@ -121,8 +121,6 @@ def run_import(
     - ``skipped_count``：stock_symbol 中找不到的股票数
     - ``source_file_mtime``：parquet 文件 mtime（int 秒）
     """
-    _safety_check()
-
     path = Path(file_path) if file_path is not None else Path(settings.qfq_factor_path)
     if not path.exists():
         raise FileNotFoundError(f"QFQ parquet not found: {path}")

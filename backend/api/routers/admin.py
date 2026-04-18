@@ -67,7 +67,7 @@ class Bar1mImportIn(BaseModel):
 def _run_aggregate_safely(start: date, end: date) -> None:
     """BackgroundTasks 回调：异常必须被吞掉，否则会污染 ASGI 事件循环日志。"""
     try:
-        # 延迟 import：aggregate_bar_1d 会做 _safety_check，启动阶段不该触发。
+        # 延迟 import：aggregate_bar_1d 在 import 时会触碰 settings，启动阶段不该触发。
         from backend.scripts.aggregate_bar_1d import aggregate
 
         aggregate(start, end)

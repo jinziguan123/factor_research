@@ -142,12 +142,14 @@ def _split_sql(sql: str) -> list[str]:
 def _safety_check() -> None:
     """阻止在未确认的生产库上执行 DDL。
 
-    - ``mysql_host`` 和 ``clickhouse_host`` 必须都在 ``_SAFE_HOSTS`` 白名单里；
-    - 否则除非显式设置 ``FR_ALLOW_PRODUCTION_INIT=1``，立即 ``sys.exit(1)``。
+    **只服务于 run_init.py**（DDL / CREATE TABLE 路径）。数据维护类任务
+    （aggregate_bar_1d / 各 importers）不应调用本函数——写业务数据本身是合法用途，
+    再走一遍 host 白名单等于把用户正常操作也挡住。
 
-    设计动机：Task 1 code review 明确指出，开发者若误把生产 IP 写进 .env 跑
-    ``run_init``，脚本会真的在生产库执行 DDL。幂等 DDL 虽然不会破坏数据，
-    但依然是一次不期而至的变更事件，且容易掩盖误配置。
+    - ``mysql_host`` 和 ``clickhouse_host`` 必须都在 ``_SAFE_HOSTS`` 白名单里；
+    - 否则除非显式设置 ``FR_ALLOW_PRODUCTION_INIT=1``，抛 ``RuntimeError``。
+      历史上这里是 ``sys.exit(1)``，但若被误调在 ASGI BackgroundTask 线程里会
+      让 response hook 直接崩栈；改抛异常由上层捕获，更稳。
     """
     risky = []
     if settings.mysql_host not in _SAFE_HOSTS:
@@ -169,23 +171,19 @@ def _safety_check() -> None:
         return
 
     # 默认：拒绝执行
-    print("=" * 70, file=sys.stderr)
-    print(
-        "[run_init] 拒绝执行：检测到可能指向生产库的 host：",
-        file=sys.stderr,
-    )
+    lines = ["检测到可能指向生产库的 host："]
     for label, host in risky:
-        print(f"  - {label}: {host}", file=sys.stderr)
-    print(
-        "\n白名单 host: " + ", ".join(sorted(_SAFE_HOSTS)),
-        file=sys.stderr,
+        lines.append(f"  - {label}: {host}")
+    lines.append("白名单 host: " + ", ".join(sorted(_SAFE_HOSTS)))
+    lines.append(
+        f"如确需在生产库执行，请显式设置环境变量：{_PRODUCTION_OPT_IN_ENV}=1 再重试。"
     )
-    print(
-        f"\n如确需在生产库执行，请显式设置环境变量：{_PRODUCTION_OPT_IN_ENV}=1 再重试。",
-        file=sys.stderr,
-    )
+    msg = "\n".join(lines)
+    # stderr 打印给 CLI 用户看；同时抛异常让 import 它的上层能捕获。
     print("=" * 70, file=sys.stderr)
-    sys.exit(1)
+    print("[run_init] 拒绝执行：" + msg, file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+    raise RuntimeError(msg)
 
 
 def _run_mysql() -> None:
@@ -227,7 +225,12 @@ def _run_clickhouse() -> None:
 
 
 def main() -> None:
-    _safety_check()
+    # CLI 场景：把 _safety_check 抛出的 RuntimeError 转成干净的 exit(1)，避免
+    # 用户直接看到 Python traceback（stderr 里的拦截原因已经在 _safety_check 打印过）。
+    try:
+        _safety_check()
+    except RuntimeError:
+        sys.exit(1)
     print("Initializing MySQL ...")
     _run_mysql()
     print("Initializing ClickHouse ...")

@@ -106,8 +106,13 @@ def test_split_sql_basic() -> None:
 
 
 def test_safety_check_blocks_production_host(monkeypatch) -> None:
-    """把 mysql_host 设为生产 IP 时，_safety_check 必须 sys.exit(1)。"""
-    import sys
+    """把 mysql_host 设为生产 IP 时，_safety_check 必须抛 RuntimeError。
+
+    历史上这里是 sys.exit(1)，但若 _safety_check 被误挂在 ASGI BackgroundTask
+    里会让 response hook 直接崩栈。改抛异常后：CLI 的 main() 自己兜 try/except
+    转 sys.exit；线程/import 层面的调用由各自 try/except 捕获。
+    """
+    import pytest
 
     from backend.scripts import run_init
     from backend.config import settings
@@ -116,12 +121,8 @@ def test_safety_check_blocks_production_host(monkeypatch) -> None:
     monkeypatch.setattr(settings, "clickhouse_host", "127.0.0.1")
     monkeypatch.delenv("FR_ALLOW_PRODUCTION_INIT", raising=False)
 
-    try:
+    with pytest.raises(RuntimeError, match="MySQL"):
         run_init._safety_check()
-    except SystemExit as exc:
-        assert exc.code == 1
-    else:
-        raise AssertionError("生产 host 应该触发 sys.exit(1)")
 
 
 def test_safety_check_allows_override(monkeypatch) -> None:
