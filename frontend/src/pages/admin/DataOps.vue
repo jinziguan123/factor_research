@@ -1,16 +1,53 @@
 <script setup lang="ts">
 /**
  * 数据维护面板
- * 聚合日线 + 导入复权因子
+ * 导入分钟线 (QMT .DAT → stock_bar_1m) + 聚合日线 + 导入复权因子
+ *
+ * 推荐执行顺序：分钟线 → 聚合日线 → 复权因子。
+ * 所有任务走后端 BackgroundTasks，提交后在"最近任务"（/api/admin/jobs）里查看进度。
  */
 import { ref } from 'vue'
 import {
   NPageHeader, NCard, NDatePicker, NButton, NSpace, NAlert,
-  NInputNumber, useMessage,
+  NInputNumber, NInput, NSelect, useMessage,
 } from 'naive-ui'
 import { client } from '@/api/client'
 
 const message = useMessage()
+
+// ---- 导入分钟线 (QMT .DAT → stock_bar_1m) ----
+// 留空约定：symbol / base_dir 留空 → 后端使用环境变量 IQUANT_LOCAL_DATA_DIR + 全量扫目录。
+const barMode = ref<'full' | 'incremental'>('incremental')
+const barSymbol = ref('')
+const barBaseDir = ref('')
+const barRewindDays = ref(3)
+const barLoading = ref(false)
+const barSuccess = ref(false)
+
+const barModeOptions = [
+  { label: '增量 (incremental)', value: 'incremental' },
+  { label: '全量 (full)', value: 'full' },
+]
+
+async function handleBar1mImport() {
+  barLoading.value = true
+  barSuccess.value = false
+  try {
+    await client.post('/admin/bar_1m:import', {
+      mode: barMode.value,
+      // 空字符串 → null，让后端走默认分支
+      symbol: barSymbol.value.trim() || null,
+      base_dir: barBaseDir.value.trim() || null,
+      rewind_days: barRewindDays.value,
+    })
+    barSuccess.value = true
+    message.success('分钟线导入任务已提交到后台')
+  } catch (e: any) {
+    message.error(e?.message || '提交失败')
+  } finally {
+    barLoading.value = false
+  }
+}
 
 // ---- 聚合日线 ----
 const aggDateRange = ref<[number, number] | null>(null)
@@ -60,6 +97,54 @@ async function handleQfqImport() {
 <template>
   <div>
     <n-page-header title="数据维护" style="margin-bottom: 16px" />
+
+    <!-- 导入分钟线 -->
+    <n-card title="导入分钟线 (QMT .DAT → stock_bar_1m)" style="margin-bottom: 16px">
+      <n-space vertical>
+        <n-space align="center" :wrap-item="false" style="row-gap: 8px" wrap>
+          <span style="color: #666">模式：</span>
+          <n-select
+            v-model:value="barMode"
+            :options="barModeOptions"
+            style="width: 180px"
+          />
+          <span style="color: #666">回退天数：</span>
+          <n-input-number
+            v-model:value="barRewindDays"
+            :min="0"
+            :max="30"
+            :step="1"
+            style="width: 120px"
+          />
+        </n-space>
+        <n-space align="center" :wrap-item="false" style="row-gap: 8px" wrap>
+          <span style="color: #666">单股 (可选)：</span>
+          <n-input
+            v-model:value="barSymbol"
+            placeholder="留空扫全目录，如 000001.SZ"
+            style="width: 220px"
+            clearable
+          />
+          <span style="color: #666">数据目录 (可选)：</span>
+          <n-input
+            v-model:value="barBaseDir"
+            placeholder="留空用 IQUANT_LOCAL_DATA_DIR"
+            style="width: 360px"
+            clearable
+          />
+          <n-button
+            type="primary"
+            :loading="barLoading"
+            @click="handleBar1mImport"
+          >
+            执行导入
+          </n-button>
+        </n-space>
+        <n-alert v-if="barSuccess" type="success" closable>
+          分钟线导入任务已提交到后台，请到下方"最近任务"查看进度
+        </n-alert>
+      </n-space>
+    </n-card>
 
     <!-- 聚合日线 -->
     <n-card title="聚合日线数据 (bar_1d)" style="margin-bottom: 16px">

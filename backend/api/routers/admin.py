@@ -48,6 +48,22 @@ class QfqImportIn(BaseModel):
     chunk_size: int = 500
 
 
+class Bar1mImportIn(BaseModel):
+    """``POST /api/admin/bar_1m:import`` 请求体。
+
+    - ``mode``：``"full"`` 全量 / ``"incremental"`` 增量；增量用 ClickHouse
+      ``MAX(trade_date)`` 作为起点；
+    - ``symbol``：单股模式（调试用，如 ``000001.SZ``）；留空则扫 ``base_dir``；
+    - ``base_dir``：QMT 数据根目录；留空则用环境变量 ``IQUANT_LOCAL_DATA_DIR``；
+    - ``rewind_days``：增量模式回退的自然日数，默认 3（留足除权 / 周末安全窗）。
+    """
+
+    mode: str = "incremental"
+    symbol: str | None = None
+    base_dir: str | None = None
+    rewind_days: int = 3
+
+
 def _run_aggregate_safely(start: date, end: date) -> None:
     """BackgroundTasks 回调：异常必须被吞掉，否则会污染 ASGI 事件循环日志。"""
     try:
@@ -61,12 +77,42 @@ def _run_aggregate_safely(start: date, end: date) -> None:
 
 def _run_qfq_import_safely(file_path: str | None, chunk_size: int) -> None:
     try:
-        from backend.scripts.import_qfq import run_import
+        from backend.scripts.importers.qfq import run_import
 
         run_import(file_path=file_path, chunk_size=chunk_size)
     except Exception:  # noqa: BLE001
         log.exception(
             "admin qfq import failed: file=%s chunk=%d", file_path, chunk_size
+        )
+
+
+def _run_bar_1m_import_safely(
+    mode: str,
+    symbol: str | None,
+    base_dir: str | None,
+    rewind_days: int,
+) -> None:
+    """BackgroundTasks 回调：QMT .DAT → ClickHouse stock_bar_1m。
+
+    异常必须被吞掉——BackgroundTasks 的 hook 里抛异常会污染 ASGI 日志；失败信息
+    已在 run_import 内写入 ``stock_bar_import_job``，前端通过 ``/api/admin/jobs``
+    能看到 status / error。
+    """
+    try:
+        from backend.scripts.importers.stock_1m import run_import
+
+        run_import(
+            mode=mode,
+            symbol=symbol,
+            base_dir=base_dir,
+            rewind_days=rewind_days,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "admin bar_1m import failed: mode=%s symbol=%s base_dir=%s",
+            mode,
+            symbol,
+            base_dir,
         )
 
 
@@ -94,6 +140,37 @@ def trigger_qfq_import(body: QfqImportIn, bt: BackgroundTasks) -> dict:
             "message": "qfq import task submitted; see server logs for progress",
             "file_path": body.file_path,
             "chunk_size": body.chunk_size,
+        }
+    )
+
+
+@router.post("/bar_1m:import")
+def trigger_bar_1m_import(body: Bar1mImportIn, bt: BackgroundTasks) -> dict:
+    """触发 QMT .DAT → ClickHouse stock_bar_1m 导入任务（异步）。
+
+    mode 只允许 ``full`` / ``incremental``；其它值直接 400。单用户研究场景不做并发
+    锁——后端目前也没有运行中 job 去重机制；如果用户连点两下会起两次任务，
+    两次都安全（ReplacingMergeTree 会以更大 version 覆盖），只是浪费时间。
+    """
+    if body.mode not in {"full", "incremental"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode must be 'full' or 'incremental', got {body.mode!r}",
+        )
+    bt.add_task(
+        _run_bar_1m_import_safely,
+        body.mode,
+        body.symbol,
+        body.base_dir,
+        body.rewind_days,
+    )
+    return ok(
+        {
+            "message": "bar_1m import task submitted; see /api/admin/jobs for status",
+            "mode": body.mode,
+            "symbol": body.symbol,
+            "base_dir": body.base_dir,
+            "rewind_days": body.rewind_days,
         }
     )
 
