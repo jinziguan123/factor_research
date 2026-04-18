@@ -220,6 +220,38 @@ class FactorRegistry:
             )
         return self.scan_and_register()
 
+    def unregister(self, factor_id: str) -> bool:
+        """从内存表里移除 ``factor_id``，并把 ``fr_factor_meta`` 软删（``is_active=0``）。
+
+        语义：
+        - 进程内的 ``_classes`` / ``_code_hash`` / ``_version`` 三张表同时 pop；
+          未注册直接返回 False（幂等，不抛）。
+        - MySQL 里保留行（历史评估 / 回测记录仍引用 version），只标 ``is_active=0``。
+          如果用户后来又创建同名 ``factor_id``，``_persist_meta`` 的 UPSERT 会把
+          ``is_active`` 改回 1，自然复活——这是 "软删 + 幂等重建" 的预期行为。
+        - 不负责删物理文件（调用方应在 unregister 前或后自行 ``Path.unlink``）；
+          也不负责 ``reset_pool``（同上，调用方统一调度）。
+
+        Returns:
+            True  —— 确实移除了一条记录；
+            False —— factor_id 未注册，属于幂等 no-op。
+        """
+        with self._lock:
+            if factor_id not in self._classes:
+                return False
+            self._classes.pop(factor_id, None)
+            self._code_hash.pop(factor_id, None)
+            self._version.pop(factor_id, None)
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "UPDATE fr_factor_meta SET is_active=0 WHERE factor_id=%s",
+                    (factor_id,),
+                )
+            c.commit()
+        logger.info("unregister 因子 %s (软删 fr_factor_meta.is_active=0)", factor_id)
+        return True
+
     # ---------------------------- 内部实现 ----------------------------
 
     def _register_one(

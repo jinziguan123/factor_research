@@ -1,5 +1,11 @@
 // 因子 API 层
-import { useQuery } from '@tanstack/vue-query'
+//
+// 读：list / detail / source code
+// 写：PUT 覆写源码 / DELETE 删因子 / POST 空白模板新建（不经 LLM）
+//
+// 后端写接口只接受位于 backend/factors/llm_generated/ 的因子；手写的业务目录
+// （momentum / reversal / ...）由 editable 字段告知前端不给编辑入口。
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { client } from './client'
 import type { Ref } from 'vue'
 
@@ -12,6 +18,22 @@ export interface Factor {
   default_params: Record<string, any>
   supported_freqs: string[]
   version?: number
+  /** 仅详情接口返回：当前因子源码是否位于 llm_generated/，据此决定是否展示"编辑源码 / 删除"按钮。 */
+  editable?: boolean
+}
+
+export interface FactorCode {
+  factor_id: string
+  code: string
+  editable: boolean
+}
+
+export interface FactorMutationResult {
+  factor_id: string
+  display_name: string
+  category: string
+  description: string
+  version: number
 }
 
 /** 获取全部因子列表 */
@@ -28,5 +50,58 @@ export function useFactor(factorId: Ref<string>) {
     queryKey: ['factor', factorId],
     queryFn: () => client.get(`/factors/${factorId.value}`).then(r => r.data),
     enabled: () => !!factorId.value,
+  })
+}
+
+/** 获取单个因子源码（所有已注册因子均可读）。 */
+export function useFactorCode(factorId: Ref<string>, enabled: Ref<boolean>) {
+  return useQuery<FactorCode>({
+    queryKey: ['factor_code', factorId],
+    queryFn: () => client.get(`/factors/${factorId.value}/code`).then(r => r.data),
+    // 弹窗关闭时关掉查询，避免后台无意义重试
+    enabled: () => !!factorId.value && enabled.value,
+    // 编辑器里要拿最新磁盘内容，不走缓存，避免多次编辑看到陈旧 code
+    staleTime: 0,
+    gcTime: 0,
+  })
+}
+
+/** PUT /api/factors/{id}/code：覆写源码（仅限 llm_generated/）。 */
+export function useUpdateFactorCode() {
+  const qc = useQueryClient()
+  return useMutation<FactorMutationResult, any, { factor_id: string; code: string }>({
+    mutationFn: ({ factor_id, code }) =>
+      client.put(`/factors/${factor_id}/code`, { code }).then(r => r.data),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['factors'] })
+      qc.invalidateQueries({ queryKey: ['factor', vars.factor_id] })
+      qc.invalidateQueries({ queryKey: ['factor_code', vars.factor_id] })
+    },
+  })
+}
+
+/** DELETE /api/factors/{id}：删文件 + 从注册表摘除（仅限 llm_generated/）。 */
+export function useDeleteFactor() {
+  const qc = useQueryClient()
+  return useMutation<{ deleted: string }, any, string>({
+    mutationFn: (factor_id) =>
+      client.delete(`/factors/${factor_id}`).then(r => r.data),
+    onSuccess: (_data, factor_id) => {
+      qc.invalidateQueries({ queryKey: ['factors'] })
+      qc.removeQueries({ queryKey: ['factor', factor_id] })
+      qc.removeQueries({ queryKey: ['factor_code', factor_id] })
+    },
+  })
+}
+
+/** POST /api/factors：用用户填的源码直接创建（走 llm_generated/，不经 LLM）。 */
+export function useCreateFactor() {
+  const qc = useQueryClient()
+  return useMutation<FactorMutationResult, any, { factor_id: string; code: string }>({
+    mutationFn: (body) =>
+      client.post('/factors', body).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['factors'] })
+    },
   })
 }

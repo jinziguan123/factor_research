@@ -1,42 +1,175 @@
-"""因子目录（CRUD 只读 + reload）。
+"""因子目录 CRUD。
 
 - ``GET /api/factors``：列所有已注册因子；调用前先 ``scan_and_register`` 兜底初始扫描，
   防止部分测试场景 startup 未触发（例如不使用 ``with TestClient`` 的 health 型测试）；
   实现在 registry 内是幂等的，不会重复 bump version。
-- ``GET /api/factors/{factor_id}``：返回单个因子详情；未注册走 404。
-- ``POST /api/factors/reload``：重扫因子目录 + 重置 worker 进程池，把 worker 里
-  的陈旧字节码也冲掉——与前端"手动刷新"按钮配合。
+- ``GET /api/factors/{factor_id}``：返回单个因子详情；未注册走 404。多带一个
+  ``editable: bool``——源码位于 ``backend/factors/llm_generated/`` 下为 True，
+  前端据此决定是否展示"编辑源码 / 删除"按钮。
+- ``GET /api/factors/{factor_id}/code``：返回源码文本（所有因子可读）。
+- ``PUT /api/factors/{factor_id}/code``：覆写源码；**只允许 llm_generated 下的因子**，
+  过 AST 白名单 + 类 factor_id 一致性校验，落盘后强制 reload + 重置 worker 进程池。
+- ``DELETE /api/factors/{factor_id}``：删源码文件 + 注册表摘除；同样只允许 llm_generated。
+- ``POST /api/factors``：从源码创建新因子，落盘到 ``llm_generated/<factor_id>.py``。
+  与 ``factor_assistant`` 复用 AST 校验 / 落盘逻辑，区别是源码由用户直接提供（不走 LLM）。
+- ``POST /api/factors/reload``：重扫因子目录 + 重置 worker 进程池。
+
+**安全边界**：写操作（PUT / DELETE / POST）只能落在 ``backend/factors/llm_generated/``
+下；手写的业务目录（momentum / reversal / ...）永远不让前端动，避免误删用户的代码资产。
+路径校验通过 ``Path.resolve().relative_to()`` 完成，不信任任何用户输入的路径片段。
 """
 from __future__ import annotations
 
+import ast
+import inspect
+import logging
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from backend.api.schemas import ok
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import reset_pool
+from backend.services import factor_assistant as fa
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/factors", tags=["factors"])
+
+# llm_generated 目录的绝对路径；计算方式与 factor_assistant._LLM_FACTORS_DIR 对齐
+# （后者在 services/，本文件在 api/routers/，两者都 parent.parent 到 backend/ 再往下）。
+_LLM_DIR = (Path(__file__).resolve().parent.parent.parent / "factors" / "llm_generated").resolve()
+
+
+# ---------------------------- 辅助 ----------------------------
+
+
+def _is_under_llm_dir(p: Path) -> bool:
+    """判断路径 ``p`` 是否位于 ``backend/factors/llm_generated/`` 下。
+
+    用 ``Path.resolve().relative_to()`` 防 symlink / ``..`` 穿越；不用字符串 startswith
+    比较（会被 ``/backend/factors/llm_generated_evil/x.py`` 这类前缀匹配绕过）。
+    """
+    try:
+        p.resolve().relative_to(_LLM_DIR)
+        return True
+    except ValueError:
+        return False
+
+
+def _factor_source_file(factor_id: str, reg: FactorRegistry) -> Path:
+    """定位 factor_id 的源码文件；未注册 → 404，定位失败 → 500。"""
+    try:
+        inst = reg.get(factor_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail="factor not found") from e
+    src = inspect.getsourcefile(inst.__class__)
+    if not src:
+        # inspect 对动态生成的类会返回 None；理论上扫描注册过的都是文件里定义的类。
+        raise HTTPException(status_code=500, detail=f"无法定位 {factor_id!r} 的源码文件")
+    return Path(src).resolve()
+
+
+def _require_llm_file(factor_id: str, reg: FactorRegistry) -> Path:
+    """拿到源码文件路径并强制要求位于 llm_generated/ 下；否则 403。"""
+    p = _factor_source_file(factor_id, reg)
+    if not _is_under_llm_dir(p):
+        raise HTTPException(
+            status_code=403,
+            detail=f"该因子位于 {p.parent.name}/，不是 llm_generated/，禁止通过 API 修改或删除",
+        )
+    return p
+
+
+def _verify_class_factor_id(code: str, expected: str) -> None:
+    """解析 AST，确认代码里至少有一个 ``class X(BaseFactor)`` 且其 ``factor_id`` 属性等于 ``expected``。
+
+    动机：
+    - PUT 时如果用户在编辑器里把 ``factor_id = "foo"`` 改成 ``"bar"``，但 URL 还是 foo，
+      落盘后 scan 会注册出 bar 而保留旧 foo，造成"改名成功但前端看不到"的诡异状态；
+    - POST 时如果用户传的 ``factor_id`` 和代码里的类属性不一致，``_save_factor_file`` 会按
+      URL 里的 id 命名文件，但 scan 又按类属性注册，文件名与 factor_id 错位难排查。
+
+    所以在写盘前强制一致。
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        raise HTTPException(
+            status_code=400, detail=f"代码语法错误：{e.msg}"
+        ) from e
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        # 只看顶层继承里带 BaseFactor 的类
+        has_base = any(
+            (isinstance(b, ast.Name) and b.id == "BaseFactor")
+            or (isinstance(b, ast.Attribute) and b.attr == "BaseFactor")
+            for b in node.bases
+        )
+        if not has_base:
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for tgt in stmt.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "factor_id":
+                    val = stmt.value
+                    got = val.value if isinstance(val, ast.Constant) else None
+                    if got == expected:
+                        return
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"代码里类属性 factor_id={got!r} 与请求中的 {expected!r} 不一致；"
+                            f"改名请同时修改 URL / 请求体"
+                        ),
+                    )
+    raise HTTPException(
+        status_code=400,
+        detail="代码中未找到 `class X(BaseFactor): factor_id = '...'` 顶层赋值",
+    )
+
+
+# ---------------------------- 请求体 ----------------------------
+
+
+class UpdateFactorCodeIn(BaseModel):
+    """PUT /api/factors/{factor_id}/code 的请求体。"""
+
+    code: str = Field(..., min_length=10, max_length=40_000, description="完整 .py 文件内容")
+
+
+class CreateFactorIn(BaseModel):
+    """POST /api/factors 的请求体。"""
+
+    factor_id: str = Field(..., min_length=3, max_length=48, description="snake_case，与代码里类属性一致")
+    code: str = Field(..., min_length=10, max_length=40_000, description="完整 .py 文件内容")
+
+
+# ---------------------------- 只读路由 ----------------------------
 
 
 @router.get("")
 def list_factors() -> dict:
     """列出所有已注册因子。"""
     reg = FactorRegistry()
-    # 保证即便 startup 未跑，也能返回一份一致的因子清单（例如某些集成测试不开 lifespan）。
     reg.scan_and_register()
     return ok(reg.list())
 
 
 @router.get("/{factor_id}")
 def get_factor(factor_id: str) -> dict:
-    """返回单个因子的详细元数据（含 params_schema、当前 version）。"""
+    """返回单个因子的详细元数据（含 params_schema、当前 version、editable）。"""
     reg = FactorRegistry()
     reg.scan_and_register()
     try:
         inst = reg.get(factor_id)
     except KeyError:
-        # 交给全局异常 handler 统一转成 ``{"code":404, "message":...}``。
         raise HTTPException(status_code=404, detail="factor not found")
+    src = inspect.getsourcefile(inst.__class__)
+    editable = bool(src) and _is_under_llm_dir(Path(src))
     return ok(
         {
             "factor_id": inst.factor_id,
@@ -47,6 +180,138 @@ def get_factor(factor_id: str) -> dict:
             "default_params": inst.default_params,
             "supported_freqs": list(inst.supported_freqs),
             "version": reg.current_version(factor_id),
+            "editable": editable,
+        }
+    )
+
+
+@router.get("/{factor_id}/code")
+def get_factor_code(factor_id: str) -> dict:
+    """返回源码文本。所有已注册因子均可读（不限 llm_generated）。"""
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    p = _factor_source_file(factor_id, reg)
+    try:
+        code = p.read_text(encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"读取源码失败：{e}") from e
+    return ok(
+        {
+            "factor_id": factor_id,
+            "code": code,
+            "editable": _is_under_llm_dir(p),
+        }
+    )
+
+
+# ---------------------------- 写路由 ----------------------------
+
+
+@router.put("/{factor_id}/code")
+def update_factor_code(factor_id: str, body: UpdateFactorCodeIn) -> dict:
+    """覆写 ``llm_generated/<factor_id>.py`` 的源码。
+
+    流程：locate 文件 → 权限 check（必须 llm_generated）→ AST 白名单校验 →
+    类属性一致性校验 → 落盘 → reload_module + reset_pool → 回读元数据。
+    """
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    p = _require_llm_file(factor_id, reg)
+
+    try:
+        fa._validate_code_ast(body.code)
+    except fa.FactorAssistantError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _verify_class_factor_id(body.code, factor_id)
+
+    body_text = body.code if body.code.endswith("\n") else body.code + "\n"
+    p.write_text(body_text, encoding="utf-8")
+    # watchdog 的 write 事件也会触发 reload，但 API 层用户等返回；主动 reload 拿到
+    # 新 version 再返回，避免"保存成功但前端刷新一次才看到新属性"的闪屏。
+    mod = inspect.getmodule(reg.get(factor_id).__class__)
+    if mod is not None:
+        reg.reload_module(mod.__name__)
+    reset_pool()
+    inst = reg.get(factor_id)
+    logger.info("update_factor_code: factor_id=%s path=%s", factor_id, p)
+    return ok(
+        {
+            "factor_id": inst.factor_id,
+            "display_name": inst.display_name,
+            "category": inst.category,
+            "description": inst.description,
+            "version": reg.current_version(factor_id),
+        }
+    )
+
+
+@router.delete("/{factor_id}")
+def delete_factor(factor_id: str) -> dict:
+    """删除 ``llm_generated/<factor_id>.py`` 并从 registry 摘除。
+
+    - 文件位置非 llm_generated/ → 403（不可删）；
+    - fr_factor_meta 行保留（软删，is_active=0），历史评估 / 回测记录仍可引用其 version；
+    - 删完重置 worker 进程池，避免子进程里还缓存着旧字节码。
+    """
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    p = _require_llm_file(factor_id, reg)
+    try:
+        p.unlink()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"删除文件失败：{e}") from e
+    reg.unregister(factor_id)
+    reset_pool()
+    logger.info("delete_factor: factor_id=%s path=%s", factor_id, p)
+    return ok({"deleted": factor_id})
+
+
+@router.post("")
+def create_factor(body: CreateFactorIn) -> dict:
+    """从源码创建新因子，落盘到 ``llm_generated/<factor_id>.py``。
+
+    与 ``factor_assistant.translate_and_save`` 的区别：源码直接来自用户输入、不经 LLM，
+    因此跳过 JSON 解析 / 字段映射那层，直接走 AST 校验 + 落盘。
+    """
+    if not fa._FACTOR_ID_RE.match(body.factor_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"factor_id 不合法：{body.factor_id!r}；应为 3-48 位 snake_case",
+        )
+    try:
+        fa._validate_code_ast(body.code)
+    except fa.FactorAssistantError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    _verify_class_factor_id(body.code, body.factor_id)
+
+    try:
+        saved = fa._save_factor_file(body.factor_id, body.code)
+    except fa.FactorAssistantError as e:
+        # _save_factor_file 的失败语义就是 "文件已存在"，正好对应 409。
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    reset_pool()
+    try:
+        inst = reg.get(body.factor_id)
+    except KeyError:
+        # 正常流水线不可达：文件落盘成功 + scan 跑过；真到这里多半是类的 factor_id 属性
+        # 与 URL 里的不一致（_verify_class_factor_id 应提前拦下，但留个兜底）。
+        raise HTTPException(
+            status_code=500,
+            detail="落盘成功但注册失败；请检查代码中 factor_id 类属性与请求是否一致",
+        )
+    logger.info(
+        "create_factor: factor_id=%s path=%s", body.factor_id, saved
+    )
+    return ok(
+        {
+            "factor_id": inst.factor_id,
+            "display_name": inst.display_name,
+            "category": inst.category,
+            "description": inst.description,
+            "version": reg.current_version(body.factor_id),
         }
     )
 
@@ -60,7 +325,5 @@ def reload_factors() -> dict:
     """
     reg = FactorRegistry()
     updated = reg.scan_and_register()
-    # 只要用户显式点了 reload，就重建池。代价是让正在途中的任务失去后续 submit 资格
-    # （但不会被取消），换得"立即生效"的确定性。
     reset_pool()
     return ok({"updated": updated})

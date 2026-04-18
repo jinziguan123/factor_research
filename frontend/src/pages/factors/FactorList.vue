@@ -14,7 +14,7 @@ import {
   NButton, NModal, NInput, NForm, NFormItem, NSpace, NAlert,
   useMessage,
 } from 'naive-ui'
-import { useFactors } from '@/api/factors'
+import { useFactors, useCreateFactor } from '@/api/factors'
 import type { Factor } from '@/api/factors'
 import { useGenerateFactor, type GenerateFactorOut } from '@/api/factor_assistant'
 
@@ -91,13 +91,100 @@ function goToGenerated() {
     router.push(`/factors/${aiResult.value.factor_id}`)
   }
 }
+
+// --- 从模板新建因子对话框（纯代码，不走 LLM）---
+// 给新手一个最小合法骨架，省得每次从 ai_generated 拷贝；
+// BaseFactor 接口要求的四个必填字段（factor_id / required_warmup / compute / category）
+// 都保留了占位注释，提示用户"这里要改什么 / 不改会怎样"。
+const TEMPLATE_CODE = `from __future__ import annotations
+
+import pandas as pd
+
+from backend.factors.base import BaseFactor, FactorContext
+
+
+class MyFactor(BaseFactor):
+    """一句话说明因子含义与方向（正向 / 反向）。"""
+
+    # 与 POST /api/factors 请求体里的 factor_id 必须一致
+    factor_id = "my_factor"
+    display_name = "示例因子"
+    # 允许值：reversal / momentum / volatility / volume / custom
+    category = "custom"
+    description = ""
+
+    default_params = {"window": 20}
+    params_schema = {
+        "window": {"type": "int", "min": 2, "max": 250, "default": 20},
+    }
+    supported_freqs = ("1d",)
+
+    def required_warmup(self, params: dict) -> int:
+        # 预热天数：窗口需要多少根 bar 才能吐出第一条有效值
+        return int(params.get("window", 20))
+
+    def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
+        """返回 long 格式 DataFrame：必须含列 [date, symbol, value]。"""
+        window = int(params.get("window", 20))
+        df = ctx.bars.copy()
+        # TODO: 按业务替换这一行
+        df["value"] = (
+            df.groupby("symbol")["close"]
+              .pct_change(window)
+        )
+        return df[["date", "symbol", "value"]].dropna()
+`
+
+const tplModalOpen = ref(false)
+const tplFactorId = ref('')
+const tplCode = ref('')
+const tplError = ref('')
+const { mutateAsync: createFactor, isPending: tplPending } = useCreateFactor()
+
+function openTemplateModal() {
+  tplFactorId.value = ''
+  tplCode.value = TEMPLATE_CODE
+  tplError.value = ''
+  tplModalOpen.value = true
+}
+
+async function submitTemplate() {
+  tplError.value = ''
+  const fid = tplFactorId.value.trim()
+  // 与后端 _FACTOR_ID_RE（snake_case，3-48 位）保持一致，客户端先挡一道
+  if (!/^[a-z][a-z0-9_]{2,47}$/.test(fid)) {
+    tplError.value = 'factor_id 必须是 3-48 位 snake_case（小写字母开头，仅字母数字下划线）'
+    return
+  }
+  // 自动把模板里的 factor_id 占位符替换为用户填的值，省得两边不一致被后端 400 拦
+  // （后端 _verify_class_factor_id 会强制类属性等于请求体 factor_id）。
+  let code = tplCode.value
+  if (!code.includes(`factor_id = "${fid}"`)) {
+    code = code.replace(/factor_id\s*=\s*"[^"]*"/, `factor_id = "${fid}"`)
+  }
+  try {
+    const res = await createFactor({ factor_id: fid, code })
+    message.success(`创建成功：${res.display_name}（v${res.version}）`)
+    tplModalOpen.value = false
+    router.push(`/factors/${res.factor_id}`)
+  } catch (e: any) {
+    tplError.value =
+      e?.response?.data?.message ??
+      e?.response?.data?.detail ??
+      e?.message ??
+      '创建失败'
+  }
+}
 </script>
 
 <template>
   <div>
     <n-page-header title="因子库" style="margin-bottom: 16px">
       <template #extra>
-        <n-button type="primary" @click="openAIModal">+ AI 生成</n-button>
+        <n-space>
+          <n-button secondary @click="openTemplateModal">+ 从模板新建</n-button>
+          <n-button type="primary" @click="openAIModal">+ AI 生成</n-button>
+        </n-space>
       </template>
     </n-page-header>
 
@@ -233,6 +320,56 @@ function goToGenerated() {
             <n-button @click="aiModalOpen = false">关闭</n-button>
             <n-button type="primary" @click="goToGenerated">查看因子详情</n-button>
           </template>
+        </n-space>
+      </template>
+    </n-modal>
+
+    <!-- 从模板新建因子对话框（纯代码，不走 LLM）-->
+    <n-modal
+      v-model:show="tplModalOpen"
+      preset="card"
+      title="从模板新建因子"
+      style="width: 960px; max-width: 95vw"
+      :mask-closable="!tplPending"
+      :close-on-esc="!tplPending"
+    >
+      <n-alert type="info" :show-icon="false" style="margin-bottom: 12px">
+        直接写 Python 源码落盘到 <code>backend/factors/llm_generated/&lt;factor_id&gt;.py</code>，
+        不经 LLM。保存前后端做 AST 白名单校验 + 类属性 <code>factor_id</code> 与请求一致性校验。
+      </n-alert>
+
+      <n-form>
+        <n-form-item label="因子 ID（snake_case）" required>
+          <n-input
+            v-model:value="tplFactorId"
+            placeholder="例：my_reversal_20d"
+            :disabled="tplPending"
+            maxlength="48"
+            show-count
+          />
+        </n-form-item>
+
+        <n-form-item label="源码">
+          <n-input
+            v-model:value="tplCode"
+            type="textarea"
+            :autosize="{ minRows: 20, maxRows: 32 }"
+            :disabled="tplPending"
+            style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px"
+          />
+        </n-form-item>
+      </n-form>
+
+      <n-alert v-if="tplError" type="error" :show-icon="false" style="margin-top: 8px">
+        {{ tplError }}
+      </n-alert>
+
+      <template #action>
+        <n-space justify="end">
+          <n-button :disabled="tplPending" @click="tplModalOpen = false">取消</n-button>
+          <n-button type="primary" :loading="tplPending" @click="submitTemplate">
+            {{ tplPending ? '创建中…' : '创建' }}
+          </n-button>
         </n-space>
       </template>
     </n-modal>
