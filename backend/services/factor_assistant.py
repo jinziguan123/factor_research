@@ -190,15 +190,19 @@ def _call_openai_compatible(messages: list[dict]) -> str:
         )
 
     url = settings.openai_base_url.rstrip("/") + "/chat/completions"
-    payload = {
+    payload: dict = {
         "model": settings.openai_model,
         "messages": messages,
         "temperature": 0.2,
         # 部分中转默认 stream=true，会返回 SSE 流，后端 resp.json() 解不出来——
         # 显式置 false 保证一次性拿完整 JSON 回来。
         "stream": False,
-        "response_format": {"type": "json_object"},
     }
+    # reasoning 系列模型（o1/o3/gpt-5 家族）不支持 response_format；此开关默认开，
+    # 用户在 .env 里 OPENAI_RESPONSE_FORMAT_JSON=false 时跳过，靠 system prompt
+    # 里的 "严格返回 JSON" 约束兜底（_parse_llm_json 能剥 markdown fence）。
+    if settings.openai_response_format_json:
+        payload["response_format"] = {"type": "json_object"}
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
