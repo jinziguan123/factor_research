@@ -133,6 +133,23 @@ def test_value_histogram_all_nan():
     assert hist["counts"] == []
 
 
+def test_value_histogram_ignores_inf():
+    """混入 ±inf 不应让 np.histogram 的 range 推断崩溃；应只计有限值。
+
+    历史事故：composition_service 走到 evaluate_factor_panel → value_histogram
+    时，若因子表里有 inf（pct_change(close=0) 是常见来源），会抛
+    ``ValueError: autodetected range is not finite``。修复后过滤 np.isfinite。
+    """
+    f = pd.DataFrame(
+        {"A": [1.0, 2.0, 3.0, 4.0, 5.0, np.inf, -np.inf, np.nan]},
+        index=pd.date_range("2024-01-01", periods=8, freq="B"),
+    )
+    hist = metrics.value_histogram(f, bins=5)
+    # 只剩 5 个有限值。
+    assert sum(hist["counts"]) == 5
+    assert all(np.isfinite(e) for e in hist["bins"])
+
+
 def test_long_short_metrics_basic():
     """常数 5bp 日收益 → 年化 = 0.0005 * 252。"""
     idx = pd.date_range("2024-01-01", periods=252, freq="B")

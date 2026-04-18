@@ -106,7 +106,12 @@ def _zscore_per_day(F: pd.DataFrame) -> pd.DataFrame:
     （等价于"该日所有股票因子值完全相同"，合成后贡献 0）。
 
     保留 NaN（某日某股票原始缺失）原样不填，下游等权/加权相加时另行 NaN 安全。
+
+    入口先把 ±inf 换成 NaN：上游因子（尤其是 pct_change / realized_vol 在 close=0
+    时）偶尔会漏出 inf，留着会让 mean/std 全部变 NaN 或污染合成后的直方图。
     """
+    if not np.isfinite(F.to_numpy(dtype=float, na_value=np.nan)).all():
+        F = F.replace([np.inf, -np.inf], np.nan)
     mu = F.mean(axis=1)
     sigma = F.std(axis=1, ddof=1).replace(0, np.nan)
     # broadcast：index 是日期，values 是标量；减法会按 index 对齐。

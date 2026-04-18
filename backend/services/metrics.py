@@ -381,7 +381,12 @@ def value_histogram(values: pd.DataFrame, bins: int = 50) -> dict:
         全 NaN 返回 ``{"bins": [], "counts": []}``。
     """
     arr = values.values.ravel() if isinstance(values, pd.DataFrame) else np.asarray(values).ravel()
-    arr = arr[~np.isnan(arr.astype(float, copy=False))]
+    # 必须过滤非有限值（NaN / ±inf）而不只是 NaN：np.histogram 的 range auto-detect
+    # 会对 ±inf 边界直接抛 ValueError("range ... is not finite")，把一次原本可恢复的
+    # 画图调用变成整条 run 崩溃。源头常见是 pct_change 在 close=0 上得到 inf，
+    # 因子缓存里混入异常值时以前这里会炸，现在统一在直方图边界上挡住。
+    arr = arr.astype(float, copy=False)
+    arr = arr[np.isfinite(arr)]
     if arr.size == 0:
         return {"bins": [], "counts": []}
     counts, edges = np.histogram(arr, bins=bins)
