@@ -28,6 +28,7 @@ from backend.api.routers import (
     compositions,
     cost_sensitivity,
     evals,
+    factor_assistant,
     factors,
     pools,
     symbols,
@@ -174,3 +175,4 @@ app.include_router(cost_sensitivity.router)
 app.include_router(compositions.router)
 app.include_router(bars.router)
 app.include_router(admin.router)
+app.include_router(factor_assistant.router)

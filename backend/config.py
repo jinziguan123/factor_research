@@ -63,6 +63,17 @@ class Settings(BaseSettings):
         alias="FR_FACTORS_DIR",
     )
 
+    # ---------- LLM（因子助手用；走 OpenAI 兼容协议，中转 / 官方都行） ----------
+    # 为空串时 factor_assistant API 会直接报 503，提醒用户先在 .env 里配好 key。
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    # 中转服务的场景改这里，如 https://api.your-proxy.com/v1；官方即 OpenAI。
+    openai_base_url: str = Field(
+        default="https://api.openai.com/v1", alias="OPENAI_BASE_URL"
+    )
+    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    # LLM 调用超时（秒）；设大一点容忍中转偶发 RTT 抖动。
+    openai_timeout_s: float = Field(default=60.0, alias="OPENAI_TIMEOUT_S")
+
     model_config = SettingsConfigDict(
         env_file=str(_BACKEND_ROOT / ".env"),
         env_file_encoding="utf-8",
