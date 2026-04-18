@@ -19,5 +19,6 @@ export const routes: RouteRecordRaw[] = [
   { path: '/compositions', component: () => import('@/pages/compositions/CompositionList.vue') },
   { path: '/compositions/new', component: () => import('@/pages/compositions/CompositionCreate.vue') },
   { path: '/compositions/:runId', component: () => import('@/pages/compositions/CompositionDetail.vue') },
+  { path: '/klines', component: () => import('@/pages/klines/KlineViewer.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
 ]
