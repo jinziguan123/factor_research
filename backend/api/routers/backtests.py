@@ -26,6 +26,10 @@ from backend.config import settings
 from backend.runtime.entries import backtest_entry
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import submit
+from backend.services.backtest_artifact_view import (
+    load_equity_series,
+    load_trades_page,
+)
 from backend.services.params_hash import params_hash
 from backend.storage.mysql_client import mysql_conn
 
@@ -268,3 +272,31 @@ def download_trades(run_id: str) -> FileResponse:
         media_type="application/octet-stream",
         filename=f"{run_id}-trades.parquet",
     )
+
+
+# ---------------------------- 产物在线查看 ----------------------------
+#
+# 产物下载（上方）把 parquet 直接丢给用户自己拿 pandas 分析；在线查看端点则把
+# parquet 读成前端图表 / 表格可直接吃的 JSON，避免"为了看一眼净值也得下载"。
+# 实际的 parquet 解析在 backend/services/backtest_artifact_view.py 里做单测覆盖；
+# 这里只做 HTTP 层：路径校验复用 _resolve_artifact，参数校验交给 FastAPI。
+
+
+@router.get("/{run_id}/equity_series")
+def get_equity_series(run_id: str, max_points: int = 2000) -> dict:
+    """读 equity.parquet → ``{dates, values, total, sampled}`` JSON。
+
+    ``max_points`` 默认 2000：折线图超过这个点数后眼睛已经分辨不出单点差异，
+    多余点纯浪费带宽 / 渲染。超过时做等步长抽样并强制保留首尾。
+    """
+    # 上限做个硬防御：20k 点浏览器也还画得动，再高就不合理了
+    max_points = max(1, min(int(max_points), 20_000))
+    path = _resolve_artifact(run_id, "equity")
+    return ok(load_equity_series(path, max_points=max_points))
+
+
+@router.get("/{run_id}/trades_page")
+def get_trades_page(run_id: str, page: int = 1, size: int = 50) -> dict:
+    """读 trades.parquet → 分页 JSON ``{total, page, size, columns, rows}``。"""
+    path = _resolve_artifact(run_id, "trades")
+    return ok(load_trades_page(path, page=page, size=size))

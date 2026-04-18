@@ -1,18 +1,19 @@
 <script setup lang="ts">
 /**
  * 回测详情页
- * 自动轮询到完成，展示 metrics 表格 + 产物下载
- * 净值图：payload 中不含 equity 时序，MVP 阶段显示下载提示
+ * 运行中轮询状态；成功后在线展示净值曲线 + 分页交易列表（不再只能下载 parquet）。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
-  NProgress, NSpin, NButton, NSpace, NAlert, NGrid, NGridItem, NEmpty,
+  NProgress, NSpin, NButton, NSpace, NAlert, NEmpty, NDataTable, NTag,
+  type DataTableColumns,
 } from 'naive-ui'
-import { useBacktest } from '@/api/backtests'
+import { useBacktest, useEquitySeries, useTradesPage } from '@/api/backtests'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
+import EquityCurveChart from '@/components/charts/EquityCurveChart.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -29,6 +30,55 @@ const artifacts = computed(() => (btRun.value as any)?.artifacts ?? [])
 const isRunning = computed(() =>
   btRun.value?.status === 'pending' || btRun.value?.status === 'running'
 )
+const isSuccess = computed(() => btRun.value?.status === 'success')
+
+// 只有 success 才拉产物；pending / running / failed 不请求，避免 4xx 噪音
+const { data: equityData, isLoading: equityLoading, isError: equityError } =
+  useEquitySeries(runId, isSuccess)
+
+const tradesPage = ref(1)
+const tradesSize = ref(20)
+const { data: tradesData, isLoading: tradesLoading } = useTradesPage(
+  runId,
+  tradesPage,
+  tradesSize,
+  isSuccess,
+)
+
+// trades 列表表头直接按后端返回的 columns 动态渲染——VectorBT 改列名时前端不用同步。
+// NaN / datetime 已在后端标准化为 string / number / null。
+const tradesColumns = computed<DataTableColumns<Record<string, any>>>(() => {
+  const cols = tradesData.value?.columns ?? []
+  return cols.map(c => ({
+    title: c,
+    key: c,
+    ellipsis: { tooltip: true },
+    render: (row) => {
+      const v = row[c]
+      if (v == null) return '-'
+      if (typeof v === 'number') {
+        // 整数（trade id / status 码）直接展示；小数保留 4 位
+        return Number.isInteger(v) ? String(v) : v.toFixed(4)
+      }
+      return String(v)
+    },
+  }))
+})
+
+const tradesPagination = computed(() => ({
+  page: tradesPage.value,
+  pageSize: tradesSize.value,
+  itemCount: tradesData.value?.total ?? 0,
+  showSizePicker: true,
+  pageSizes: [20, 50, 100],
+  prefix: (info: { itemCount?: number }) => `共 ${info.itemCount ?? 0} 条`,
+}))
+
+function onPageChange(p: number) { tradesPage.value = p }
+function onPageSizeChange(s: number) {
+  tradesSize.value = s
+  tradesPage.value = 1
+}
 
 function fmtPct(v: any, digits = 2): string {
   if (v == null) return '-'
@@ -92,21 +142,37 @@ function downloadArtifact(type: string) {
       </n-descriptions>
 
       <!-- 成功时展示 -->
-      <template v-if="btRun?.status === 'success'">
-        <!-- 净值图区域 - MVP 阶段提示下载 -->
-        <n-card title="净值曲线" size="small" style="margin-bottom: 16px">
-          <n-empty description="请下载 equity.parquet 查看净值曲线详情">
-            <template #extra>
-              <n-button
-                v-if="hasArtifact('equity')"
-                size="small"
-                type="primary"
-                @click="downloadArtifact('equity')"
-              >
-                下载 equity.parquet
-              </n-button>
-            </template>
-          </n-empty>
+      <template v-if="isSuccess">
+        <!-- 净值曲线 -->
+        <n-card size="small" style="margin-bottom: 16px">
+          <template #header>
+            <n-space align="center" :size="8">
+              <span>净值曲线</span>
+              <n-tag v-if="equityData?.sampled" size="small" type="info" :bordered="false">
+                已降采样（原 {{ equityData.total }} 点）
+              </n-tag>
+            </n-space>
+          </template>
+          <n-spin :show="equityLoading">
+            <div v-if="equityError" style="padding: 40px 0">
+              <n-empty description="净值数据读取失败，可尝试下载 equity.parquet 查看">
+                <template #extra>
+                  <n-button
+                    v-if="hasArtifact('equity')"
+                    size="small"
+                    @click="downloadArtifact('equity')"
+                  >
+                    下载 equity.parquet
+                  </n-button>
+                </template>
+              </n-empty>
+            </div>
+            <equity-curve-chart
+              v-else-if="equityData && equityData.dates.length > 0"
+              :equity="{ dates: equityData.dates, values: equityData.values }"
+            />
+            <n-empty v-else-if="!equityLoading" description="暂无净值数据" style="padding: 40px 0" />
+          </n-spin>
         </n-card>
 
         <!-- Metrics 指标 -->
@@ -123,7 +189,23 @@ function downloadArtifact(type: string) {
           暂无指标数据
         </n-alert>
 
-        <!-- 产物下载 -->
+        <!-- 交易列表 -->
+        <n-card title="交易记录" size="small" style="margin-bottom: 16px">
+          <n-data-table
+            remote
+            :columns="tradesColumns"
+            :data="tradesData?.rows ?? []"
+            :pagination="tradesPagination"
+            :loading="tradesLoading"
+            :bordered="false"
+            size="small"
+            :scroll-x="1200"
+            @update:page="onPageChange"
+            @update:page-size="onPageSizeChange"
+          />
+        </n-card>
+
+        <!-- 产物下载：保留，方便用户离线做深度分析 -->
         <h3 style="margin-bottom: 12px">产物下载</h3>
         <n-space>
           <n-button

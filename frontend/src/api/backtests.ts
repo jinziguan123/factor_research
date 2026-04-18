@@ -3,6 +3,21 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { toValue, type MaybeRefOrGetter, type Ref } from 'vue'
 import { client } from './client'
 
+export interface EquitySeries {
+  dates: string[]
+  values: (number | null)[]
+  total: number
+  sampled: boolean
+}
+
+export interface TradesPage {
+  total: number
+  page: number
+  size: number
+  columns: string[]
+  rows: Record<string, any>[]
+}
+
 export interface BacktestRun {
   run_id: string
   factor_id: string
@@ -53,5 +68,41 @@ export function useDeleteBacktest() {
   return useMutation({
     mutationFn: (runId: string) => client.delete(`/backtests/${runId}`).then(r => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests'] }),
+  })
+}
+
+/** 拉净值曲线（已在后端降采样，max_points 默认走后端 2000）。
+ *  只有在回测 status=success 且 run_id 有值时才发请求，避免跑着的任务被无意义轮询。
+ */
+export function useEquitySeries(
+  runId: Ref<string>,
+  enabled: MaybeRefOrGetter<boolean>,
+) {
+  return useQuery<EquitySeries>({
+    queryKey: ['backtest-equity', runId],
+    queryFn: () =>
+      client.get(`/backtests/${runId.value}/equity_series`).then(r => r.data),
+    enabled: () => !!runId.value && !!toValue(enabled),
+    staleTime: 60_000, // 完成态产物不会变，一分钟内不重复请求
+  })
+}
+
+/** 拉分页交易列表。page / size 用 getter 以便 UI 切页时自动 refetch。 */
+export function useTradesPage(
+  runId: Ref<string>,
+  page: MaybeRefOrGetter<number>,
+  size: MaybeRefOrGetter<number>,
+  enabled: MaybeRefOrGetter<boolean>,
+) {
+  return useQuery<TradesPage>({
+    queryKey: ['backtest-trades', runId, page, size],
+    queryFn: () =>
+      client
+        .get(`/backtests/${runId.value}/trades_page`, {
+          params: { page: toValue(page), size: toValue(size) },
+        })
+        .then(r => r.data),
+    enabled: () => !!runId.value && !!toValue(enabled),
+    staleTime: 60_000,
   })
 }
