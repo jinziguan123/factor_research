@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NGrid, NGridItem, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NEmpty, NAlert, NCard, NTag,
+  NTable,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
 import { usePoolNameMap } from '@/api/pools'
@@ -378,47 +379,75 @@ const rankIcMeanDiverged = computed(() =>
             训练段 / 测试段 IC 出现显著分歧（符号翻转或幅度相差 2 倍以上），
             因子在样本外可能失效，谨慎使用。
           </n-alert>
-          <n-descriptions bordered :column="3" label-placement="left">
-            <n-descriptions-item label="">
-              <b>指标</b>
-            </n-descriptions-item>
-            <n-descriptions-item label="">
-              <b>训练段</b>
-              <span style="color: #848E9C; font-size: 12px; margin-left: 4px">
-                [start, {{ payload?.split_date }})
-              </span>
-            </n-descriptions-item>
-            <n-descriptions-item label="">
-              <b>测试段</b>
-              <span style="color: #848E9C; font-size: 12px; margin-left: 4px">
-                [{{ payload?.split_date }}, end]
-              </span>
-            </n-descriptions-item>
-
-            <n-descriptions-item label="IC 均值">
-              <n-tag v-if="icMeanDiverged" type="warning" size="small" round>分歧</n-tag>
-            </n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(icSummaryTrain.ic_mean) }}</n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(icSummaryTest.ic_mean) }}</n-descriptions-item>
-
-            <n-descriptions-item label="IC IR"></n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(icSummaryTrain.ic_ir) }}</n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(icSummaryTest.ic_ir) }}</n-descriptions-item>
-
-            <n-descriptions-item label="IC 胜率"></n-descriptions-item>
-            <n-descriptions-item>{{ fmtPct(icSummaryTrain.ic_win_rate) }}</n-descriptions-item>
-            <n-descriptions-item>{{ fmtPct(icSummaryTest.ic_win_rate) }}</n-descriptions-item>
-
-            <n-descriptions-item label="Rank IC 均值">
-              <n-tag v-if="rankIcMeanDiverged" type="warning" size="small" round>分歧</n-tag>
-            </n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(rankIcSummaryTrain.ic_mean) }}</n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(rankIcSummaryTest.ic_mean) }}</n-descriptions-item>
-
-            <n-descriptions-item label="Rank IC IR"></n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(rankIcSummaryTrain.ic_ir) }}</n-descriptions-item>
-            <n-descriptions-item>{{ fmtNum(rankIcSummaryTest.ic_ir) }}</n-descriptions-item>
-          </n-descriptions>
+          <!--
+            这里刻意不再用 n-descriptions：后者是 label+content 成对渲染的语义，强行
+            把它当 3 列网格用会出现"label 列空占位 / content 位串到下一格"的错位。
+            改用 n-table 简单 3 列真表格：指标名 | 训练段 | 测试段。
+          -->
+          <n-table :bordered="true" :single-line="false" size="small">
+            <thead>
+              <tr>
+                <th style="width: 180px">指标</th>
+                <th>
+                  训练段
+                  <span style="color: #848E9C; font-size: 12px; margin-left: 4px">
+                    [start, {{ payload?.split_date }})
+                  </span>
+                </th>
+                <th>
+                  测试段
+                  <span style="color: #848E9C; font-size: 12px; margin-left: 4px">
+                    [{{ payload?.split_date }}, end]
+                  </span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  IC 均值
+                  <n-tag
+                    v-if="icMeanDiverged"
+                    type="warning"
+                    size="small"
+                    round
+                    style="margin-left: 6px"
+                  >分歧</n-tag>
+                </td>
+                <td>{{ fmtNum(icSummaryTrain.ic_mean) }}</td>
+                <td>{{ fmtNum(icSummaryTest.ic_mean) }}</td>
+              </tr>
+              <tr>
+                <td>IC IR</td>
+                <td>{{ fmtNum(icSummaryTrain.ic_ir) }}</td>
+                <td>{{ fmtNum(icSummaryTest.ic_ir) }}</td>
+              </tr>
+              <tr>
+                <td>IC 胜率</td>
+                <td>{{ fmtPct(icSummaryTrain.ic_win_rate) }}</td>
+                <td>{{ fmtPct(icSummaryTest.ic_win_rate) }}</td>
+              </tr>
+              <tr>
+                <td>
+                  Rank IC 均值
+                  <n-tag
+                    v-if="rankIcMeanDiverged"
+                    type="warning"
+                    size="small"
+                    round
+                    style="margin-left: 6px"
+                  >分歧</n-tag>
+                </td>
+                <td>{{ fmtNum(rankIcSummaryTrain.ic_mean) }}</td>
+                <td>{{ fmtNum(rankIcSummaryTest.ic_mean) }}</td>
+              </tr>
+              <tr>
+                <td>Rank IC IR</td>
+                <td>{{ fmtNum(rankIcSummaryTrain.ic_ir) }}</td>
+                <td>{{ fmtNum(rankIcSummaryTest.ic_ir) }}</td>
+              </tr>
+            </tbody>
+          </n-table>
         </template>
       </template>
     </n-spin>

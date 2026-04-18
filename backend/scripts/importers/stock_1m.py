@@ -56,6 +56,12 @@ logger = logging.getLogger(__name__)
 # 增量模式默认回退的交易日数；实际按自然日回退（更保守）。
 _DEFAULT_REWIND_DAYS = 3
 
+# 单次 INSERT 的行数上限。`stock_bar_1m` 按 toYYYYMM(trade_date) 分区，CH 默认
+# `max_partitions_per_insert_block=100`；一只股票全量 10 年 = 120 个月会直接爆。
+# 50_000 行 ≈ 240 根/天 × 208 天 ≈ 10 个月分区，与 timing_driven 的
+# clickhouse_bar_storage 保持一致，稳稳低于 100 的硬限。
+_CH_INSERT_BATCH_ROWS = 50_000
+
 # ClickHouse 插入时的列顺序（与 stock_bar_1m 物理表对齐）；version 用 time_ns。
 _CH_COLUMNS = (
     "symbol_id",
@@ -139,36 +145,44 @@ def _insert_ch_rows(rows: Sequence[tuple], *, base_version: int) -> int:
     批量写入 ClickHouse ``stock_bar_1m``。
 
     - 使用 clickhouse-driver 的 ``columnar=True`` 列式 INSERT，避免逐行转 tuple 的开销。
+    - **按 ``_CH_INSERT_BATCH_ROWS`` 分批**：``stock_bar_1m`` 按月分区，单股全量
+      10+ 年数据会触碰 CH 默认 100 分区上限（Code 252）；50k 行/批稳定低于此限。
+      version 在全量序号里单调递增，批与批之间不冲突。
     - version = base_version + i，保证 ReplacingMergeTree 同一 PK 的新版本覆盖旧版本。
     """
     if not rows:
         return 0
     n = len(rows)
-    versions = np.arange(n, dtype=np.int64) + int(base_version)
     # rows 是 normalize_symbol_bar_frame 的输出，列顺序：
     # (trade_date, minute_slot, symbol_id, open, high, low, close, volume, amount_k)
-    cols = list(zip(*rows))
-    columns_np = [
-        np.asarray(cols[2], dtype=np.uint32),           # symbol_id
-        np.asarray(cols[0], dtype=object),              # trade_date (datetime.date)
-        np.asarray(cols[1], dtype=np.uint16),           # minute_slot
-        np.asarray(cols[3], dtype=np.float32),          # open
-        np.asarray(cols[4], dtype=np.float32),          # high
-        np.asarray(cols[5], dtype=np.float32),          # low
-        np.asarray(cols[6], dtype=np.float32),          # close
-        np.asarray(cols[7], dtype=np.uint32),           # volume
-        np.asarray(cols[8], dtype=np.uint32),           # amount_k
-        versions.astype(np.uint64),                     # version
-    ]
+    inserted = 0
     with ch_client() as ch:
-        ch.execute(
-            "INSERT INTO quant_data.stock_bar_1m "
-            "(symbol_id, trade_date, minute_slot, open, high, low, close, "
-            "volume, amount_k, version) VALUES",
-            columns_np,
-            columnar=True,
-        )
-    return n
+        for start in range(0, n, _CH_INSERT_BATCH_ROWS):
+            batch = rows[start : start + _CH_INSERT_BATCH_ROWS]
+            cols = list(zip(*batch))
+            batch_n = len(batch)
+            versions = np.arange(batch_n, dtype=np.int64) + int(base_version) + start
+            columns_np = [
+                np.asarray(cols[2], dtype=np.uint32),           # symbol_id
+                np.asarray(cols[0], dtype=object),              # trade_date (datetime.date)
+                np.asarray(cols[1], dtype=np.uint16),           # minute_slot
+                np.asarray(cols[3], dtype=np.float32),          # open
+                np.asarray(cols[4], dtype=np.float32),          # high
+                np.asarray(cols[5], dtype=np.float32),          # low
+                np.asarray(cols[6], dtype=np.float32),          # close
+                np.asarray(cols[7], dtype=np.uint32),           # volume
+                np.asarray(cols[8], dtype=np.uint32),           # amount_k
+                versions.astype(np.uint64),                     # version
+            ]
+            ch.execute(
+                "INSERT INTO quant_data.stock_bar_1m "
+                "(symbol_id, trade_date, minute_slot, open, high, low, close, "
+                "volume, amount_k, version) VALUES",
+                columns_np,
+                columnar=True,
+            )
+            inserted += batch_n
+    return inserted
 
 
 def _import_one_symbol(
@@ -300,8 +314,9 @@ def run_import(
                     dat_path=dat_path,
                     incremental=incremental,
                     rewind_days=rewind_days,
-                    # 每只股票一个递增 base_version，避免 ReplacingMergeTree 同分钟冲突。
-                    base_version=base_version + idx * 1_000_000,
+                    # 每只股票预留 10M 个 version 步长：单股 10 年分钟线约 576k 行，
+                    # 10M 足够安全，且避免相邻股票 version 段重叠。
+                    base_version=base_version + idx * 10_000_000,
                 )
                 inserted_rows += n
                 success += 1
