@@ -12,8 +12,11 @@ export interface Pool {
   pool_id: number
   pool_name: string
   description: string | null
-  // 后端返回 [{symbol, name}, ...]；旧代码里错写成 string[]，渲染会显示 [object Object]。
-  symbols: StockSymbol[]
+  // 详情接口返回 [{symbol, name}, ...]，列表接口不返回；旧代码里错写成 string[]，
+  // 渲染会显示 [object Object]。
+  symbols?: StockSymbol[]
+  /** 列表接口附带，详情接口没有；前端列表渲染"股票数"用这个。 */
+  symbols_count?: number
   created_at: string
   updated_at: string
 }

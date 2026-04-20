@@ -95,14 +95,23 @@ def _bulk_insert_pool_symbols(
 
 @router.get("")
 def list_pools() -> dict:
-    """列出本 owner 下所有 is_active 的股票池，按创建时间倒序。"""
+    """列出本 owner 下所有 is_active 的股票池，按创建时间倒序。
+
+    附带 ``symbols_count``：LEFT JOIN + COUNT 一次算出每个池的成员数，
+    避免前端用 ``row.symbols?.length`` 判断——列表接口没返回 symbols 数组，
+    那条路径永远算出 0（#股票池计数=0 bug）。
+    """
     with mysql_conn() as c:
         with c.cursor() as cur:
             cur.execute(
-                "SELECT pool_id, pool_name, description, is_active, "
-                "created_at, updated_at FROM stock_pool "
-                "WHERE owner_key=%s AND is_active=1 "
-                "ORDER BY created_at DESC, pool_id DESC",
+                "SELECT p.pool_id, p.pool_name, p.description, p.is_active, "
+                "p.created_at, p.updated_at, "
+                "COALESCE(COUNT(s.symbol_id), 0) AS symbols_count "
+                "FROM stock_pool p "
+                "LEFT JOIN stock_pool_symbol s ON s.pool_id = p.pool_id "
+                "WHERE p.owner_key=%s AND p.is_active=1 "
+                "GROUP BY p.pool_id "
+                "ORDER BY p.created_at DESC, p.pool_id DESC",
                 (settings.owner_key,),
             )
             return ok(cur.fetchall())

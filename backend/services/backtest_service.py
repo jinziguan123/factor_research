@@ -37,6 +37,7 @@ import pandas as pd
 from backend.config import settings
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
+from backend.services.abort_check import AbortedError, check_abort
 from backend.services.params_hash import params_hash as _hash
 from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
@@ -418,6 +419,9 @@ def run_backtest(run_id: str, body: dict) -> None:
     """
     try:
         _update_status(run_id, status="running", started=True, progress=5)
+        # 协作式中断：阶段边界轮询 status='aborting'，命中就抛 AbortedError
+        # 交给下面专属 except 分支落 aborted。
+        check_abort("backtest", run_id)
 
         # 1~4) 复用公共 prepare：因子 / close / size 一条龙
         inputs = _prepare_backtest_inputs(body)
@@ -425,6 +429,7 @@ def run_backtest(run_id: str, body: dict) -> None:
         cost_bps = float(body.get("cost_bps", 3))
 
         _update_status(run_id, progress=70)
+        check_abort("backtest", run_id)  # VectorBT 跑起来就停不下，先查一次
 
         # 5) VectorBT 组合回测
         # 延迟 import：VectorBT 冷启动 ~1s（numba JIT），放函数内避免污染进程启动。
@@ -442,6 +447,7 @@ def run_backtest(run_id: str, body: dict) -> None:
         )
 
         _update_status(run_id, progress=85)
+        check_abort("backtest", run_id)  # parquet 落盘前最后一次检查
 
         # 6) 导出产物
         run_dir = ARTIFACT_DIR / run_id
@@ -525,6 +531,13 @@ def run_backtest(run_id: str, body: dict) -> None:
             c.commit()
 
         _update_status(run_id, status="success", progress=100, finished=True)
+    except AbortedError as exc:
+        # 主动中断：落 aborted，不写 error_message；与 failed 区分语义，前端按不同 badge 展示。
+        log.info("backtest aborted: run_id=%s reason=%s", run_id, exc)
+        try:
+            _update_status(run_id, status="aborted", finished=True)
+        except Exception:
+            log.exception("_update_status 落 aborted 失败: run_id=%s", run_id)
     except Exception:
         log.exception("backtest failed: run_id=%s", run_id)
         # 嵌套 try：_update_status 自己也可能抛（例如 DB 挂了），避免把 run 永远卡在 running。

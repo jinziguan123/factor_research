@@ -3,14 +3,14 @@
  * 回测结果列表
  * 过滤器：因子 / 状态 / limit；表格支持查看、删除
  */
-import { computed, h, ref } from 'vue'
+import { computed, h, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   NButton, NDataTable, NSpace, NPageHeader, NPopconfirm,
   NSelect, NInputNumber, NTag, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { useBacktests, useDeleteBacktest } from '@/api/backtests'
+import { useBacktests, useDeleteBacktest, useAbortBacktest } from '@/api/backtests'
 import type { BacktestRun } from '@/api/backtests'
 import { useFactors } from '@/api/factors'
 import { usePoolNameMap } from '@/api/pools'
@@ -29,8 +29,28 @@ const listParams = computed<Record<string, any>>(() => ({
   limit: limit.value,
 }))
 
-const { data: backtests, isLoading } = useBacktests(listParams)
+// 与 EvalList 同款：运行中的行启动 1.5s 轮询，让"中断中 → 已中断"的状态过渡
+// 能在列表页即时反映；全终态时停定时器省资源。
+const listQuery = useBacktests(listParams)
+const { data: backtests, isLoading, refetch } = listQuery
 const deleteMut = useDeleteBacktest()
+const abortMut = useAbortBacktest()
+
+let pollTimer: number | null = null
+function maybeStartPolling() {
+  const rows = backtests.value ?? []
+  const hasActive = rows.some((r) =>
+    r.status === 'pending' || r.status === 'running' || r.status === 'aborting',
+  )
+  if (hasActive && pollTimer == null) {
+    pollTimer = window.setInterval(() => { refetch() }, 1500)
+  } else if (!hasActive && pollTimer != null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+watch(backtests, maybeStartPolling, { immediate: true })
+onUnmounted(() => { if (pollTimer != null) clearInterval(pollTimer) })
 
 const { data: factors } = useFactors()
 // NSelect 的 SelectMixedOption 不允许 value: null；原来 "全部因子/全部状态" 这样的哨兵项
@@ -43,6 +63,8 @@ const statusOptions = [
   { label: '运行中', value: 'running' },
   { label: '成功', value: 'success' },
   { label: '失败', value: 'failed' },
+  { label: '中断中', value: 'aborting' },
+  { label: '已中断', value: 'aborted' },
 ]
 
 // 池名映射：pool_id → pool_name；查不到（软删 / 列表未载入）回退到 "#<id>"。
@@ -83,29 +105,50 @@ const columns: DataTableColumns<BacktestRun> = [
   {
     title: '操作',
     key: 'actions',
-    width: 160,
-    render: (row) =>
-      h(NSpace, { size: 4 }, {
-        default: () => [
-          h(NButton, {
-            size: 'small',
-            quaternary: true,
-            type: 'primary',
-            onClick: () => router.push(`/backtests/${row.run_id}`),
-          }, { default: () => '查看' }),
+    width: 200,
+    render: (row) => {
+      const canAbort = row.status === 'pending' || row.status === 'running'
+      const buttons: any[] = [
+        h(NButton, {
+          size: 'small',
+          quaternary: true,
+          type: 'primary',
+          onClick: () => router.push(`/backtests/${row.run_id}`),
+        }, { default: () => '查看' }),
+      ]
+      if (canAbort) {
+        buttons.push(
           h(NPopconfirm, {
             onPositiveClick: () => {
-              deleteMut.mutate(row.run_id, {
-                onSuccess: () => message.success('已删除'),
-                onError: (e: any) => message.error(e?.message || '删除失败'),
+              abortMut.mutate(row.run_id, {
+                onSuccess: () => message.info('中断请求已发送，最坏需等当前阶段结束'),
+                onError: (e: any) =>
+                  message.error(e?.response?.data?.detail || e?.message || '中断失败'),
               })
             },
           }, {
-            trigger: () => h(NButton, { size: 'small', quaternary: true, type: 'error' }, { default: () => '删除' }),
-            default: () => `确认删除 ${row.run_id.slice(0, 8)}...？`,
+            trigger: () => h(NButton, {
+              size: 'small', quaternary: true, type: 'warning',
+            }, { default: () => '中断' }),
+            default: () => `确认中断 ${row.run_id.slice(0, 8)}...？`,
           }),
-        ],
-      }),
+        )
+      }
+      buttons.push(
+        h(NPopconfirm, {
+          onPositiveClick: () => {
+            deleteMut.mutate(row.run_id, {
+              onSuccess: () => message.success('已删除'),
+              onError: (e: any) => message.error(e?.message || '删除失败'),
+            })
+          },
+        }, {
+          trigger: () => h(NButton, { size: 'small', quaternary: true, type: 'error' }, { default: () => '删除' }),
+          default: () => `确认删除 ${row.run_id.slice(0, 8)}...？`,
+        }),
+      )
+      return h(NSpace, { size: 4 }, { default: () => buttons })
+    },
   },
 ]
 </script>

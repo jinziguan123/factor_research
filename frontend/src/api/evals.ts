@@ -23,7 +23,12 @@ export interface EvalMetrics {
 export interface EvalRun {
   run_id: string
   factor_id: string
-  status: 'pending' | 'running' | 'success' | 'failed'
+  /**
+   * pending / running / success / failed 之外新增两个状态：
+   * - aborting：用户已点"中断"，worker 还在当前阶段跑；
+   * - aborted ：worker 在阶段边界检测到中断请求并退出。
+   */
+  status: 'pending' | 'running' | 'success' | 'failed' | 'aborting' | 'aborted'
   params_json?: string
   pool_id: number
   start_date: string
@@ -70,5 +75,24 @@ export function useDeleteEval() {
   return useMutation({
     mutationFn: (runId: string) => client.delete(`/evals/${runId}`).then(r => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['evals'] }),
+  })
+}
+
+/** 请求中断一个运行中的评估任务（POST /api/evals/{id}/abort）。
+ *
+ * 后端只改 status='aborting'；worker 在阶段边界检测到后抛 AbortedError 退出，
+ * 最终状态变为 'aborted'。中断不是立即生效——最坏等一个阶段（数据加载 / 因子计算
+ * / 指标计算，几秒到 30s 不等）。
+ */
+export function useAbortEval() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      client.post(`/evals/${runId}/abort`).then(r => r.data),
+    onSuccess: (_res, runId) => {
+      // 列表 + 详情都要刷新（列表 badge 变"中断中"，详情页状态同步）
+      qc.invalidateQueries({ queryKey: ['evals'] })
+      qc.invalidateQueries({ queryKey: ['eval', runId] })
+    },
   })
 }

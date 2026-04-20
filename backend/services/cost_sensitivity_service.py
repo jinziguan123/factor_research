@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from backend.services.abort_check import AbortedError, check_abort
 from backend.services.backtest_service import (
     BacktestInputs,
     _prepare_backtest_inputs,
@@ -182,6 +183,7 @@ def run_cost_sensitivity(run_id: str, body: dict) -> None:
     """
     try:
         _update_status(run_id, status="running", started=True, progress=5)
+        check_abort("cost_sensitivity", run_id)
 
         cost_bps_list = list(body.get("cost_bps_list") or [])
         # 去重 + 保持顺序（用户可能意外传 [3, 5, 3]，保留一份）。保留用户给的顺序
@@ -204,6 +206,9 @@ def run_cost_sensitivity(run_id: str, body: dict) -> None:
         points: list[dict[str, Any]] = []
         total = len(unique_list)
         for idx, cost_bps in enumerate(unique_list):
+            # 每个成本点之间都查一次：grid 是最需要中断的场景（用户选了 10 个点
+            # 才发现参数不对，不能让他等完所有点）。
+            check_abort("cost_sensitivity", run_id)
             point = _compute_point(inputs, cost_bps)
             points.append(point)
             # 进度限制在 40..95 区间，避免最后一点结束时 progress=95（留 5% 给入库）。
@@ -220,6 +225,14 @@ def run_cost_sensitivity(run_id: str, body: dict) -> None:
             points_json=points_json,
             finished=True,
         )
+    except AbortedError as exc:
+        # 主动中断：落 aborted；已经算完的 points 就扔了——如果用户真在乎前面几个
+        # 点的结果，应该重跑一次剔除掉剩余点，而不是保存一个"半成品 success"。
+        log.info("cost_sensitivity aborted: run_id=%s reason=%s", run_id, exc)
+        try:
+            _update_status(run_id, status="aborted", finished=True)
+        except Exception:
+            log.exception("_update_status 落 aborted 失败: run_id=%s", run_id)
     except Exception:
         log.exception("cost_sensitivity failed: run_id=%s", run_id)
         try:

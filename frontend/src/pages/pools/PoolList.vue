@@ -21,9 +21,14 @@ const columns: DataTableColumns<Pool> = [
   { title: '描述', key: 'description', ellipsis: { tooltip: true } },
   {
     title: '股票数',
-    key: 'symbols',
+    key: 'symbols_count',
     width: 100,
-    render: (row) => h('span', {}, (row.symbols?.length ?? 0).toString()),
+    // 列表接口返回 symbols_count（后端 LEFT JOIN 聚合），
+    // 详情接口才有 symbols 数组——两个字段都兼容下，列表页以 symbols_count 为主。
+    render: (row) => h(
+      'span', {},
+      String(row.symbols_count ?? row.symbols?.length ?? 0),
+    ),
   },
   { title: '创建时间', key: 'created_at', width: 180 },
   {

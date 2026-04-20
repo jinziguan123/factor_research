@@ -29,6 +29,7 @@ import pandas as pd
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
 from backend.services import metrics
+from backend.services.abort_check import AbortedError, check_abort
 from backend.services.params_hash import params_hash as _hash
 from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
@@ -426,6 +427,9 @@ def run_eval(run_id: str, body: dict) -> None:
     """
     try:
         _set_status(run_id, status="running", started=True, progress=5)
+        # 协作式中断：每个阶段边界查一次 status，用户点"中断"后这里就会抛
+        # AbortedError，由下方专属 except 分支落 aborted 终态。
+        check_abort("eval", run_id)
 
         reg = FactorRegistry()
         reg.scan_and_register()
@@ -462,6 +466,7 @@ def run_eval(run_id: str, body: dict) -> None:
         )
 
         _set_status(run_id, progress=15)
+        check_abort("eval", run_id)  # 下面 factor.compute 可能跑几十秒，先查一次
         # Task 7 接入 factor_value_1d 缓存：相同 (factor_id, version, params_hash)
         # 下，若缓存窗口覆盖 [start, end] 且非空，直接复用；否则全量重算并回写。
         # 部分覆盖不做"增量补算"——保守策略，防止与上游 qfq 因子回填、数据回灌导致
@@ -487,6 +492,7 @@ def run_eval(run_id: str, body: dict) -> None:
             if not F.empty:
                 data.save_factor_values(body["factor_id"], version, phash, F)
         _set_status(run_id, progress=40)
+        check_abort("eval", run_id)  # close 加载 + 指标计算前最后一次机会
 
         close = data.load_panel(
             symbols, start.date(), end.date(), field="close", adjust="qfq"
@@ -537,6 +543,14 @@ def run_eval(run_id: str, body: dict) -> None:
             c.commit()
 
         _set_status(run_id, status="success", progress=100, finished=True)
+    except AbortedError as exc:
+        # 用户主动中断：落 "aborted" 终态，不写 error_message（没有 traceback 可言）。
+        # 单独一条日志行便于运维区分被动失败和主动终止。
+        log.info("eval aborted: run_id=%s reason=%s", run_id, exc)
+        try:
+            _set_status(run_id, status="aborted", finished=True)
+        except Exception:
+            log.exception("_set_status 落 aborted 失败: run_id=%s", run_id)
     except Exception:
         # 任何异常（KeyError / DB 连不上 / 因子 compute 崩 / JSON 序列化失败）统一收口。
         log.exception("eval failed: run_id=%s", run_id)

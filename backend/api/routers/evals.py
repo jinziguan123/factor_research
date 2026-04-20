@@ -163,6 +163,49 @@ def get_eval_status(run_id: str) -> dict:
     return ok(r)
 
 
+@router.post("/{run_id}/abort")
+def abort_eval(run_id: str) -> dict:
+    """请求中断一个正在排队 / 运行中的评估任务（协作式）。
+
+    语义：
+    - ``pending`` / ``running`` → 原子地改为 ``aborting``。worker 下次在阶段边界
+      调用 ``abort_check.check_abort`` 时会检测到并抛 ``AbortedError``，
+      service 的 ``except AbortedError`` 分支把最终状态落成 ``aborted``。
+    - ``aborting`` → 幂等 no-op，返回 200（避免 UI 重复点击时报错）。
+    - 终态（``success`` / ``failed`` / ``aborted``）→ 409，已完成的任务不再可中断。
+    - 不存在 → 404。
+
+    为什么不做"立即杀进程"：``ProcessPoolExecutor.Future.cancel()`` 在任务派发后
+    无效，硬 kill 会破坏进程内 numba JIT 缓存和连接池。协作式响应时间是"当前阶段
+    剩余时间"，最坏 ~30s，对评估 / 回测场景完全够用。
+    """
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            # 条件 UPDATE：只对 pending / running 生效，避免覆盖终态。
+            cur.execute(
+                "UPDATE fr_factor_eval_runs SET status='aborting' "
+                "WHERE run_id=%s AND status IN ('pending','running')",
+                (run_id,),
+            )
+            changed = cur.rowcount
+            cur.execute(
+                "SELECT status FROM fr_factor_eval_runs WHERE run_id=%s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        c.commit()
+    if row is None:
+        raise HTTPException(status_code=404, detail="eval run not found")
+    current_status = row["status"]
+    if changed == 0 and current_status != "aborting":
+        # 终态不可中断：返回当前状态，便于前端展示具体原因。
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot abort: current status is '{current_status}'",
+        )
+    return ok({"run_id": run_id, "status": current_status})
+
+
 @router.delete("/{run_id}")
 def delete_eval(run_id: str) -> dict:
     """硬删 run + metrics。不取消已派发的 worker（``BackgroundTasks`` 无取消句柄）。"""

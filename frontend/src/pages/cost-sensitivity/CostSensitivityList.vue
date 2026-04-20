@@ -3,7 +3,7 @@
  * 成本敏感性记录列表。
  * 过滤：因子 / 状态 / limit；操作：查看、删除。结构同 BacktestList。
  */
-import { computed, h, ref } from 'vue'
+import { computed, h, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   NButton, NDataTable, NSpace, NPageHeader, NPopconfirm,
@@ -13,6 +13,7 @@ import type { DataTableColumns } from 'naive-ui'
 import {
   useCostSensitivityRuns,
   useDeleteCostSensitivity,
+  useAbortCostSensitivity,
 } from '@/api/cost_sensitivity'
 import type { CostSensitivityRun } from '@/api/cost_sensitivity'
 import { useFactors } from '@/api/factors'
@@ -32,8 +33,28 @@ const listParams = computed<Record<string, any>>(() => ({
   limit: limit.value,
 }))
 
-const { data: runs, isLoading } = useCostSensitivityRuns(listParams)
+// grid 场景尤其适用协作式中断（10 个 cost_bps 点一个一个跑）。
+// 列表页轮询让"中断中 → 已中断"的过渡能被及时看到。
+const listQuery = useCostSensitivityRuns(listParams)
+const { data: runs, isLoading, refetch } = listQuery
 const deleteMut = useDeleteCostSensitivity()
+const abortMut = useAbortCostSensitivity()
+
+let pollTimer: number | null = null
+function maybeStartPolling() {
+  const rows = runs.value ?? []
+  const hasActive = rows.some((r) =>
+    r.status === 'pending' || r.status === 'running' || r.status === 'aborting',
+  )
+  if (hasActive && pollTimer == null) {
+    pollTimer = window.setInterval(() => { refetch() }, 2000)
+  } else if (!hasActive && pollTimer != null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+watch(runs, maybeStartPolling, { immediate: true })
+onUnmounted(() => { if (pollTimer != null) clearInterval(pollTimer) })
 
 const { data: factors } = useFactors()
 const factorOptions = computed(() =>
@@ -44,6 +65,8 @@ const statusOptions = [
   { label: '运行中', value: 'running' },
   { label: '成功', value: 'success' },
   { label: '失败', value: 'failed' },
+  { label: '中断中', value: 'aborting' },
+  { label: '已中断', value: 'aborted' },
 ]
 
 const { lookup: lookupPoolName } = usePoolNameMap()
@@ -96,29 +119,50 @@ const columns: DataTableColumns<CostSensitivityRun> = [
   {
     title: '操作',
     key: 'actions',
-    width: 160,
-    render: (row) =>
-      h(NSpace, { size: 4 }, {
-        default: () => [
-          h(NButton, {
-            size: 'small',
-            quaternary: true,
-            type: 'primary',
-            onClick: () => router.push(`/cost-sensitivity/${row.run_id}`),
-          }, { default: () => '查看' }),
+    width: 200,
+    render: (row) => {
+      const canAbort = row.status === 'pending' || row.status === 'running'
+      const buttons: any[] = [
+        h(NButton, {
+          size: 'small',
+          quaternary: true,
+          type: 'primary',
+          onClick: () => router.push(`/cost-sensitivity/${row.run_id}`),
+        }, { default: () => '查看' }),
+      ]
+      if (canAbort) {
+        buttons.push(
           h(NPopconfirm, {
             onPositiveClick: () => {
-              deleteMut.mutate(row.run_id, {
-                onSuccess: () => message.success('已删除'),
-                onError: (e: any) => message.error(e?.message || '删除失败'),
+              abortMut.mutate(row.run_id, {
+                onSuccess: () => message.info('中断请求已发送，最坏需等当前成本点算完'),
+                onError: (e: any) =>
+                  message.error(e?.response?.data?.detail || e?.message || '中断失败'),
               })
             },
           }, {
-            trigger: () => h(NButton, { size: 'small', quaternary: true, type: 'error' }, { default: () => '删除' }),
-            default: () => `确认删除 ${row.run_id.slice(0, 8)}...？`,
+            trigger: () => h(NButton, {
+              size: 'small', quaternary: true, type: 'warning',
+            }, { default: () => '中断' }),
+            default: () => `确认中断 ${row.run_id.slice(0, 8)}...？`,
           }),
-        ],
-      }),
+        )
+      }
+      buttons.push(
+        h(NPopconfirm, {
+          onPositiveClick: () => {
+            deleteMut.mutate(row.run_id, {
+              onSuccess: () => message.success('已删除'),
+              onError: (e: any) => message.error(e?.message || '删除失败'),
+            })
+          },
+        }, {
+          trigger: () => h(NButton, { size: 'small', quaternary: true, type: 'error' }, { default: () => '删除' }),
+          default: () => `确认删除 ${row.run_id.slice(0, 8)}...？`,
+        }),
+      )
+      return h(NSpace, { size: 4 }, { default: () => buttons })
+    },
   },
 ]
 </script>

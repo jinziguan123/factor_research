@@ -31,7 +31,7 @@ export interface CostSensitivityRun {
   position: string
   init_cash: number
   cost_bps_list: number[] | string
-  status: 'pending' | 'running' | 'success' | 'failed'
+  status: 'pending' | 'running' | 'success' | 'failed' | 'aborting' | 'aborted'
   progress: number
   error_message?: string
   created_at: string
@@ -82,5 +82,18 @@ export function useDeleteCostSensitivity() {
     mutationFn: (runId: string) =>
       client.delete(`/cost-sensitivity/${runId}`).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['cost-sensitivity-list'] }),
+  })
+}
+
+/** 中断运行中的敏感性扫描。grid 场景特别适用：每个 cost_bps 点前会 check_abort。 */
+export function useAbortCostSensitivity() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      client.post(`/cost-sensitivity/${runId}/abort`).then((r) => r.data),
+    onSuccess: (_res, runId) => {
+      qc.invalidateQueries({ queryKey: ['cost-sensitivity-list'] })
+      qc.invalidateQueries({ queryKey: ['cost-sensitivity', runId] })
+    },
   })
 }

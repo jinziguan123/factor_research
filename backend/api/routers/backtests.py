@@ -174,6 +174,34 @@ def get_backtest_status(run_id: str) -> dict:
     return ok(r)
 
 
+@router.post("/{run_id}/abort")
+def abort_backtest(run_id: str) -> dict:
+    """请求中断一个排队 / 运行中的回测任务。语义与 abort_eval 一致（协作式）。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE fr_backtest_runs SET status='aborting' "
+                "WHERE run_id=%s AND status IN ('pending','running')",
+                (run_id,),
+            )
+            changed = cur.rowcount
+            cur.execute(
+                "SELECT status FROM fr_backtest_runs WHERE run_id=%s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        c.commit()
+    if row is None:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+    current_status = row["status"]
+    if changed == 0 and current_status != "aborting":
+        raise HTTPException(
+            status_code=409,
+            detail=f"cannot abort: current status is '{current_status}'",
+        )
+    return ok({"run_id": run_id, "status": current_status})
+
+
 @router.delete("/{run_id}")
 def delete_backtest(run_id: str) -> dict:
     """硬删 run + metrics + artifacts 三张表记录。不清磁盘 parquet 文件。"""

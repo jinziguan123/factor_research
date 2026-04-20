@@ -21,7 +21,8 @@ export interface TradesPage {
 export interface BacktestRun {
   run_id: string
   factor_id: string
-  status: 'pending' | 'running' | 'success' | 'failed'
+  /** 新增 aborting / aborted：见 StatusBadge 和 abort_check.py。 */
+  status: 'pending' | 'running' | 'success' | 'failed' | 'aborting' | 'aborted'
   params: Record<string, any>
   pool_id: number
   start_date: string
@@ -68,6 +69,19 @@ export function useDeleteBacktest() {
   return useMutation({
     mutationFn: (runId: string) => client.delete(`/backtests/${runId}`).then(r => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests'] }),
+  })
+}
+
+/** 中断一个运行中的回测任务。协作式，语义与 useAbortEval 一致。 */
+export function useAbortBacktest() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      client.post(`/backtests/${runId}/abort`).then(r => r.data),
+    onSuccess: (_res, runId) => {
+      qc.invalidateQueries({ queryKey: ['backtests'] })
+      qc.invalidateQueries({ queryKey: ['backtest', runId] })
+    },
   })
 }
 
