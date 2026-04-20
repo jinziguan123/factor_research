@@ -116,6 +116,29 @@ class CreateCostSensitivityIn(BaseModel):
         return self
 
 
+class PreviewParamSensitivityIn(BaseModel):
+    """``POST /api/param-sensitivity/preview`` 请求体。
+
+    扫描因子的单个超参数（param_name）在 values 中取各值时的评估指标。同步返回，
+    不落库——研究场景"扫一次得结论"占 80%，持久化/中断/历史列表留到 MVP 之后。
+
+    校验策略：
+    - param_name 必须是 factor.params_schema 的 key（router 层会校验）；
+    - values 至少 2 个点（单点没有"邻域"概念）；上限 15，防止扫到天黑。
+    """
+
+    factor_id: str
+    param_name: str
+    values: list[float] = Field(..., min_length=2, max_length=15)
+    pool_id: int
+    start_date: date
+    end_date: date
+    freq: str = "1d"
+    n_groups: int = Field(default=5, ge=2, le=20)
+    forward_periods: list[int] = Field(default_factory=lambda: [1, 5, 10])
+    base_params: dict | None = None
+
+
 class CompositionFactorItem(BaseModel):
     """合成请求里单个因子项：因子 id + 可选 params。
 

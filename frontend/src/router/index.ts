@@ -22,4 +22,5 @@ export const routes: RouteRecordRaw[] = [
   { path: '/klines', component: () => import('@/pages/klines/KlineViewer.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
   { path: '/docs/factor-guide', component: () => import('@/pages/docs/FactorGuide.vue') },
+  { path: '/param-sensitivity', component: () => import('@/pages/param-sensitivity/ParamSensitivityPreview.vue') },
 ]

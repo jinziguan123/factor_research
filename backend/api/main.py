@@ -30,6 +30,7 @@ from backend.api.routers import (
     evals,
     factor_assistant,
     factors,
+    param_sensitivity,
     pools,
     symbols,
 )
@@ -172,6 +173,7 @@ app.include_router(symbols.router)
 app.include_router(evals.router)
 app.include_router(backtests.router)
 app.include_router(cost_sensitivity.router)
+app.include_router(param_sensitivity.router)
 app.include_router(compositions.router)
 app.include_router(bars.router)
 app.include_router(admin.router)
