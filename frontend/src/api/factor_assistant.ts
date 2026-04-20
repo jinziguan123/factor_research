@@ -18,6 +18,11 @@ const LLM_REQUEST_TIMEOUT_MS = 180_000
 export interface GenerateFactorIn {
   description: string
   hints?: string | null
+  /**
+   * 可选：data URI 列表（`data:image/...;base64,...`），最多 4 张、每张 ≤ 2MB。
+   * 让用户用 K 线截图辅助 vision 模型理解因子意图；后端同步使用、不落盘、用完即抛。
+   */
+  images?: string[] | null
 }
 
 export interface GenerateFactorOut {

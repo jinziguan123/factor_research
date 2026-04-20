@@ -12,12 +12,19 @@ import { useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NGrid, NGridItem, NTag, NSpin, NEmpty,
   NButton, NModal, NInput, NForm, NFormItem, NSpace, NAlert,
+  NUpload,
   useMessage,
+  type UploadFileInfo,
 } from 'naive-ui'
 import { useFactors, useCreateFactor } from '@/api/factors'
 import type { Factor } from '@/api/factors'
 import { useGenerateFactor, type GenerateFactorOut } from '@/api/factor_assistant'
 import PyCodeEditor from '@/components/forms/PyCodeEditor.vue'
+
+// 单张截图允许的原始字节上限（压缩后 / 选择后）。base64 膨胀 ~1.37x 后
+// data URI 长度上限约 2.7MB，与后端 2.5M 字符上限配对，给留一点边界余量。
+const IMAGE_MAX_BYTES = 2 * 1024 * 1024
+const IMAGE_MAX_COUNT = 4
 
 const router = useRouter()
 const message = useMessage()
@@ -49,6 +56,9 @@ const aiDescription = ref('')
 const aiHints = ref('')
 const aiError = ref('')
 const aiResult = ref<GenerateFactorOut | null>(null)
+// 上传的参考截图。NUpload 维护完整 UploadFileInfo 列表（渲染用），
+// 提交时再把每个 file 读成 base64 data URI；不预先读，避免用户频繁增删重复读。
+const aiFileList = ref<UploadFileInfo[]>([])
 
 const { mutateAsync: generateFactor, isPending: aiPending } = useGenerateFactor()
 
@@ -57,7 +67,40 @@ function openAIModal() {
   aiHints.value = ''
   aiError.value = ''
   aiResult.value = null
+  aiFileList.value = []
   aiModalOpen.value = true
+}
+
+/** 把 File 读成 `data:image/...;base64,...` 字符串。 */
+function readFileAsDataUri(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('读取图片失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+/**
+ * NUpload 的 beforeUpload 钩子：只做本地校验（类型 / 大小 / 张数），返回 false 阻断
+ * 组件的自动上传——我们走"提交时才一起读 base64"的路径，所以压根不需要 HTTP 上传。
+ */
+function beforeAddImage(options: { file: UploadFileInfo; fileList: UploadFileInfo[] }) {
+  const f = options.file.file
+  if (!f) return false
+  if (!f.type.startsWith('image/')) {
+    message.warning(`${f.name} 不是图片格式，已忽略`)
+    return false
+  }
+  if (f.size > IMAGE_MAX_BYTES) {
+    message.warning(`${f.name} 超过 2MB，已忽略；可先截图压缩后再上传`)
+    return false
+  }
+  if (options.fileList.length > IMAGE_MAX_COUNT) {
+    message.warning(`最多只能传 ${IMAGE_MAX_COUNT} 张截图`)
+    return false
+  }
+  return true
 }
 
 async function submitAI() {
@@ -69,10 +112,24 @@ async function submitAI() {
     aiError.value = '描述太短了，至少写 4 个字说清楚因子逻辑'
     return
   }
+
+  // 把已选的图片全部转 base64。列表里 `file` 可能因为历史拖拽为空（极少见），过滤掉。
+  let images: string[] | null = null
+  const files = aiFileList.value.map(f => f.file).filter((f): f is File => !!f)
+  if (files.length > 0) {
+    try {
+      images = await Promise.all(files.map(readFileAsDataUri))
+    } catch (e: any) {
+      aiError.value = `读取图片失败：${e?.message ?? e}`
+      return
+    }
+  }
+
   try {
     const out = await generateFactor({
       description: desc,
       hints: aiHints.value.trim() || null,
+      images,
     })
     aiResult.value = out
     message.success(`生成成功：${out.display_name}`)
@@ -263,6 +320,29 @@ async function submitTemplate() {
               maxlength="2000"
               show-count
             />
+          </n-form-item>
+
+          <n-form-item label="参考截图（可选，最多 4 张）">
+            <div style="width: 100%">
+              <n-upload
+                v-model:file-list="aiFileList"
+                list-type="image-card"
+                accept="image/*"
+                :max="IMAGE_MAX_COUNT"
+                :multiple="true"
+                :disabled="aiPending"
+                :default-upload="false"
+                :show-retry-button="false"
+                :show-download-button="false"
+                :on-before-upload="beforeAddImage"
+              >
+                点击或拖拽图片
+              </n-upload>
+              <div style="color: #848E9C; font-size: 12px; margin-top: 6px; line-height: 1.5">
+                常见用法：截一两张理想的 K 线形态示例给模型看。单张 ≤ 2MB；图像只作为参考，
+                不代表要完全复刻这张图的走势。
+              </div>
+            </div>
           </n-form-item>
         </n-form>
 

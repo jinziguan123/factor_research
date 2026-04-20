@@ -18,7 +18,7 @@ Phase 0 不做：
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from backend.api.schemas import ok
 from backend.services.factor_assistant import (
@@ -29,14 +29,47 @@ from backend.services.factor_assistant import (
 router = APIRouter(prefix="/api/factor_assistant", tags=["factor_assistant"])
 
 
+# 单张图 data URI 的字符串长度上限。base64 编码比原图膨胀 ~1.37x，
+# 2.5M 字符 ≈ 1.8MB 原图，够 K 线截图用。上限主要是兜底误操作 / 恶意请求；
+# 真正的交互提示由前端负责。
+_IMAGE_MAX_DATA_URI_LEN = 2_500_000
+_IMAGE_MAX_COUNT = 4
+
+
 class TranslateIn(BaseModel):
     """``POST /api/factor_assistant/translate`` 请求体。
 
     ``description`` 走中文自然语言，``hints`` 可留空——预留给 Phase 2 的追问上下文。
+
+    ``images``：可选 data URI（``data:image/...;base64,...``）列表，最多 4 张，每张 ≤ 2MB。
+    走同步一把梭，不落盘、随请求体传输，用完即抛——完全不引入存储/清理成本。
     """
 
     description: str = Field(..., min_length=4, max_length=2000)
     hints: str | None = Field(default=None, max_length=2000)
+    images: list[str] | None = Field(
+        default=None,
+        description="可选 data URI 列表，最多 4 张，每张 ≤ 2MB",
+    )
+
+    @model_validator(mode="after")
+    def _check_images(self) -> "TranslateIn":
+        if not self.images:
+            return self
+        if len(self.images) > _IMAGE_MAX_COUNT:
+            raise ValueError(
+                f"images 最多 {_IMAGE_MAX_COUNT} 张，当前 {len(self.images)} 张"
+            )
+        for i, uri in enumerate(self.images):
+            if not isinstance(uri, str) or not uri.startswith("data:image/"):
+                raise ValueError(
+                    f"images[{i}] 必须是 `data:image/...;base64,...` 格式的 data URI"
+                )
+            if len(uri) > _IMAGE_MAX_DATA_URI_LEN:
+                raise ValueError(
+                    f"images[{i}] 过大（{len(uri)} 字符），请压缩到 ≤ 2MB 再上传"
+                )
+        return self
 
 
 def _map_error_to_status(err: FactorAssistantError) -> int:
@@ -66,7 +99,7 @@ def translate(body: TranslateIn) -> dict:
     注册该因子，不需要重启服务。
     """
     try:
-        gen = translate_and_save(body.description, body.hints)
+        gen = translate_and_save(body.description, body.hints, body.images)
     except FactorAssistantError as e:
         raise HTTPException(status_code=_map_error_to_status(e), detail=str(e))
 

@@ -201,6 +201,43 @@ def _build_user_prompt(description: str, hints: str | None) -> str:
     return text
 
 
+def _build_user_content(
+    description: str, hints: str | None, images: list[str] | None, protocol: str
+) -> str | list[dict]:
+    """按是否有图 + 协议分支，构造 user message 的 content。
+
+    - 无图 → 返回原来的纯文本字符串（兼容两种协议）。
+    - 有图 → 返回 content 数组；在文本段开头额外加一句引导语，让 LLM 不要把图当装饰，
+      而是把它当做"用户关于因子形态的示例"去理解。
+    - Responses API 的图片分片 type 是 ``input_image`` / ``input_text``；Chat Completions
+      是 ``image_url`` / ``text``——两套词表，按 ``protocol`` 分发。
+    """
+    text = _build_user_prompt(description, hints)
+    if not images:
+        return text
+
+    # prepend instead of append：让 LLM 在读图前先知道这些图是"参考"而不是"目标形态"，
+    # 避免它直接去拟合某一张图的特定走势。
+    preface = (
+        f"【附带参考截图】用户上传了 {len(images)} 张截图（通常是 K 线形态示例），"
+        f"请结合图像中的价格 / 成交量特征理解其因子意图。图像是 *参考样例*，"
+        f"你的任务仍是给出可泛化的因子表达，而不是专门拟合这几张图。"
+    )
+    text = f"{preface}\n\n{text}"
+
+    if protocol == "responses":
+        parts: list[dict] = [{"type": "input_text", "text": text}]
+        for uri in images:
+            parts.append({"type": "input_image", "image_url": uri})
+        return parts
+
+    # chat_completions：图片分片用 {"type":"image_url","image_url":{"url": data_uri}}
+    parts = [{"type": "text", "text": text}]
+    for uri in images:
+        parts.append({"type": "image_url", "image_url": {"url": uri}})
+    return parts
+
+
 # ---------------------------- LLM 调用 ----------------------------
 
 
@@ -531,9 +568,14 @@ def _save_factor_file(factor_id: str, code: str) -> Path:
 
 
 def translate_and_save(
-    description: str, hints: str | None = None
+    description: str,
+    hints: str | None = None,
+    images: list[str] | None = None,
 ) -> GeneratedFactor:
     """一次性把自然语言描述变成落盘的因子文件。
+
+    ``images`` 为 data URI 列表（前端把截图转成 base64 data URI 传进来），
+    用来让 vision-capable 的模型"看"到用户心里的 K 线形态；router 层已校验大小和张数。
 
     会抛 ``FactorAssistantError`` 的已知失败点：
 
@@ -548,15 +590,19 @@ def translate_and_save(
     if not description or not description.strip():
         raise FactorAssistantError("description 不能为空")
 
+    protocol = (settings.openai_api_protocol or "chat_completions").lower()
+    user_content = _build_user_content(description, hints, images, protocol)
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": _build_user_prompt(description, hints)},
+        {"role": "user", "content": user_content},
     ]
     logger.info(
-        "factor_assistant: translate desc=%r hints=%r model=%s",
+        "factor_assistant: translate desc=%r hints=%r images=%d model=%s protocol=%s",
         description[:100],
         (hints or "")[:100],
+        len(images or []),
         settings.openai_model,
+        protocol,
     )
 
     raw = _call_openai_compatible(messages)
