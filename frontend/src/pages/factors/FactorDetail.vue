@@ -74,7 +74,10 @@ watch(factorCode, (v) => {
 
 function openEdit() {
   editError.value = ''
-  editCode.value = ''  // 清空，等 useFactorCode 填充
+  // 用缓存里的 code 立即填充，避免空窗期。
+  // 不能只靠下面的 watch(factorCode) 塞值：Vue Query 默认开 structural sharing，
+  // 第二次 refetch 返回相同内容时 data 引用不变 → watch 不触发 → 编辑器停在空串。
+  editCode.value = factorCode.value?.code ?? ''
   editOpen.value = true
 }
 
