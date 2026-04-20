@@ -7,7 +7,7 @@
  * LLM → AST 安全校验 → 落盘流水线。成功后展示元信息与源码片段，
  * 热加载 watchdog 扫到新文件后列表自动刷新（onSuccess 里也 invalidate 兜底）。
  */
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NGrid, NGridItem, NTag, NSpin, NEmpty,
@@ -102,6 +102,61 @@ function beforeAddImage(options: { file: UploadFileInfo; fileList: UploadFileInf
   }
   return true
 }
+
+/**
+ * AI 对话框全局 paste 监听：从剪贴板里挑出 image/* 追加到 aiFileList。
+ * - 只在对话框打开、未提交中、未出结果时生效；
+ * - 剪贴板里没有图片就不拦截，让 textarea 的普通文本粘贴照常走；
+ * - 同 beforeAddImage 的校验（尺寸、张数上限）。
+ */
+function handleModalPaste(e: ClipboardEvent) {
+  if (!aiModalOpen.value || aiPending.value || aiResult.value) return
+  const items = e.clipboardData?.items
+  if (!items || items.length === 0) return
+
+  const imageFiles: File[] = []
+  for (const item of items) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const f = item.getAsFile()
+      if (f) imageFiles.push(f)
+    }
+  }
+  if (imageFiles.length === 0) return
+  e.preventDefault()
+
+  let accepted = 0
+  let rejectedSize = 0
+  for (const raw of imageFiles) {
+    if (aiFileList.value.length >= IMAGE_MAX_COUNT) {
+      message.warning(`最多只能传 ${IMAGE_MAX_COUNT} 张截图，剩余已忽略`)
+      break
+    }
+    if (raw.size > IMAGE_MAX_BYTES) {
+      rejectedSize++
+      continue
+    }
+    // 浏览器剪贴板给的 file.name 常常是固定的 "image.png"，多张会重名；重新命名一下
+    const ext = (raw.type.split('/')[1] || 'png').split('+')[0]
+    const synthName = `clipboard-${Date.now()}-${accepted}.${ext}`
+    const renamed = new File([raw], synthName, { type: raw.type })
+    aiFileList.value.push({
+      id: `paste-${Date.now()}-${accepted}-${Math.random().toString(36).slice(2, 6)}`,
+      name: synthName,
+      status: 'finished',
+      file: renamed,
+      type: raw.type,
+      percentage: 100,
+      // image-card 预览用；对象 URL 随页面卸载自动释放，单次对话框最多 4 张，不单独 revoke
+      url: URL.createObjectURL(renamed),
+    } as UploadFileInfo)
+    accepted++
+  }
+  if (accepted > 0) message.success(`已粘贴 ${accepted} 张截图`)
+  if (rejectedSize > 0) message.warning(`${rejectedSize} 张截图超过 2MB，已忽略`)
+}
+
+onMounted(() => document.addEventListener('paste', handleModalPaste))
+onBeforeUnmount(() => document.removeEventListener('paste', handleModalPaste))
 
 async function submitAI() {
   aiError.value = ''
@@ -336,11 +391,12 @@ async function submitTemplate() {
                 :show-download-button="false"
                 :on-before-upload="beforeAddImage"
               >
-                点击或拖拽图片
+                点击、拖拽或 Ctrl/⌘+V 粘贴图片
               </n-upload>
               <div style="color: #848E9C; font-size: 12px; margin-top: 6px; line-height: 1.5">
-                常见用法：截一两张理想的 K 线形态示例给模型看。单张 ≤ 2MB；图像只作为参考，
-                不代表要完全复刻这张图的走势。
+                常见用法：截一两张理想的 K 线形态示例给模型看。支持从剪贴板直接粘贴（先用系统截图
+                工具截到剪贴板，再在本对话框里 Ctrl/⌘+V）。单张 ≤ 2MB；图像只作为参考，不代表要
+                完全复刻这张图的走势。
               </div>
             </div>
           </n-form-item>
