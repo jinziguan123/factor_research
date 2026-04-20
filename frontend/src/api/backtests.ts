@@ -101,21 +101,43 @@ export function useEquitySeries(
   })
 }
 
-/** 拉分页交易列表。page / size 用 getter 以便 UI 切页时自动 refetch。 */
+export interface TradesFilter {
+  /** 股票代码子串（大小写不敏感）。空串 / undefined 表示不过滤。 */
+  symbol?: string
+  /** 按 Entry Timestamp 起始日，YYYY-MM-DD。 */
+  startDate?: string | null
+  /** 按 Entry Timestamp 结束日，YYYY-MM-DD（闭区间）。 */
+  endDate?: string | null
+}
+
+/**
+ * 拉分页交易列表。page / size / filter 均用 getter 以便 UI 切换时自动 refetch。
+ *
+ * filter 中的空字段会被剥掉，避免 axios 把 `symbol=""` 编进 URL——后端虽然会把
+ * 空串当作"不过滤"，但无意义 refetch 也要省。
+ */
 export function useTradesPage(
   runId: Ref<string>,
   page: MaybeRefOrGetter<number>,
   size: MaybeRefOrGetter<number>,
   enabled: MaybeRefOrGetter<boolean>,
+  filter?: MaybeRefOrGetter<TradesFilter | undefined>,
 ) {
   return useQuery<TradesPage>({
-    queryKey: ['backtest-trades', runId, page, size],
-    queryFn: () =>
-      client
-        .get(`/backtests/${runId.value}/trades_page`, {
-          params: { page: toValue(page), size: toValue(size) },
-        })
-        .then(r => r.data),
+    queryKey: ['backtest-trades', runId, page, size, filter],
+    queryFn: () => {
+      const f = toValue(filter) ?? {}
+      const params: Record<string, string | number> = {
+        page: toValue(page),
+        size: toValue(size),
+      }
+      if (f.symbol && f.symbol.trim()) params.symbol = f.symbol.trim()
+      if (f.startDate) params.start_date = f.startDate
+      if (f.endDate) params.end_date = f.endDate
+      return client
+        .get(`/backtests/${runId.value}/trades_page`, { params })
+        .then(r => r.data)
+    },
     enabled: () => !!runId.value && !!toValue(enabled),
     staleTime: 60_000,
   })

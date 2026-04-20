@@ -88,8 +88,37 @@ def load_equity_series(
     }
 
 
+def _resolve_symbol_column(columns: list[str]) -> str | None:
+    """在 trades.parquet 列里找代表 symbol 的列名。
+
+    VectorBT ``records_readable`` 默认叫 ``Column``；如果未来换版本改名我们也兜
+    几个常见词。返回 ``None`` 表示没有 symbol 维度——这种情况调用方要么拒绝
+    symbol 筛选，要么忽略它。
+    """
+    candidates = ("Column", "symbol", "Symbol", "code", "Code")
+    for c in candidates:
+        if c in columns:
+            return c
+    return None
+
+
+def _resolve_entry_time_column(columns: list[str]) -> str | None:
+    """找表示开仓时间的列。同上，VectorBT 默认 ``Entry Timestamp``。"""
+    candidates = ("Entry Timestamp", "entry_time", "Entry Time", "entry_timestamp")
+    for c in candidates:
+        if c in columns:
+            return c
+    return None
+
+
 def load_trades_page(
-    path: Path | str, *, page: int = 1, size: int = 50
+    path: Path | str,
+    *,
+    page: int = 1,
+    size: int = 50,
+    symbol: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     """读 ``trades.parquet`` → 分页 JSON ``{total, page, size, columns, rows}``。
 
@@ -97,13 +126,50 @@ def load_trades_page(
     - ``columns`` 是 parquet 的列名（顺序保留），前端直接拿来当表头；这样 VectorBT
       改列名时不用同步改前端。
     - ``rows`` 元素是 ``{col: value, ...}``；时间 / datetime 列统一 ISO 字符串。
+
+    筛选参数（可选）：
+    - ``symbol``：股票代码子串匹配（大小写不敏感），对 ``Column`` 列应用。
+    - ``start_date`` / ``end_date``（``YYYY-MM-DD``）：按 ``Entry Timestamp`` 做闭区间过滤。
+
+    筛选发生在分页之前，因此 ``total`` 是筛选后的总数，而非原始全量；前端
+    ``itemCount`` 直接来自 ``total`` 即可，不会让用户翻页穿越被筛掉的行。
     """
     page = max(1, int(page))
     size = max(1, min(int(size), 500))
 
     df = pd.read_parquet(str(path))
-    total = len(df)
     columns = [str(c) for c in df.columns]
+
+    # ---- 筛选（在切片之前）----
+    if symbol and symbol.strip():
+        sym_col = _resolve_symbol_column(columns)
+        if sym_col is None:
+            raise ValueError(
+                "trades.parquet 中未找到 symbol 列；当前列：" + str(columns)
+            )
+        needle = symbol.strip().lower()
+        df = df[df[sym_col].astype(str).str.lower().str.contains(needle, na=False)]
+
+    if start_date or end_date:
+        et_col = _resolve_entry_time_column(columns)
+        if et_col is None:
+            raise ValueError(
+                "trades.parquet 中未找到 Entry Timestamp 列；当前列：" + str(columns)
+            )
+        # 原列可能已是 datetime64，也可能是 str；to_datetime 统一兜住
+        et_series = pd.to_datetime(df[et_col], errors="coerce")
+        if start_date:
+            mask = et_series >= pd.to_datetime(start_date)
+            df = df[mask]
+            et_series = et_series.loc[df.index]
+        if end_date:
+            # 闭区间 + 当日 23:59:59；用户填 2024-01-31 也想包含当天开的仓
+            end_ts = pd.to_datetime(end_date) + pd.Timedelta(
+                hours=23, minutes=59, seconds=59
+            )
+            df = df[et_series <= end_ts]
+
+    total = len(df)
 
     if total == 0:
         return {

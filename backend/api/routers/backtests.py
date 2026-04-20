@@ -324,7 +324,36 @@ def get_equity_series(run_id: str, max_points: int = 2000) -> dict:
 
 
 @router.get("/{run_id}/trades_page")
-def get_trades_page(run_id: str, page: int = 1, size: int = 50) -> dict:
-    """读 trades.parquet → 分页 JSON ``{total, page, size, columns, rows}``。"""
+def get_trades_page(
+    run_id: str,
+    page: int = 1,
+    size: int = 50,
+    symbol: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict:
+    """读 trades.parquet → 分页 JSON ``{total, page, size, columns, rows}``。
+
+    支持三个可选筛选：
+    - ``symbol``：股票代码子串匹配（大小写不敏感）。VectorBT 的 ``records_readable``
+      默认把 symbol 放在 ``Column`` 列；子串匹配覆盖"我只记得代码前几位"的常见用法。
+    - ``start_date`` / ``end_date``（YYYY-MM-DD）：按 **开仓时间**（``Entry Timestamp``）
+      作为筛选锚点——"这段时间里开的仓"比"这段时间里平的仓"对问答更直观。
+
+    筛选在 **分页之前** 做，所以 ``total`` 反映的是筛选后的总条数；前端拿到直接驱动
+    NPagination 的 itemCount 即可，用户翻页不会穿越被筛掉的行。
+    """
     path = _resolve_artifact(run_id, "trades")
-    return ok(load_trades_page(path, page=page, size=size))
+    try:
+        data = load_trades_page(
+            path,
+            page=page,
+            size=size,
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except ValueError as e:
+        # schema mismatch / 非法日期格式——用户层可读的 400 错，胜过全局 500
+        raise HTTPException(status_code=400, detail=str(e))
+    return ok(data)

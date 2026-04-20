@@ -8,12 +8,42 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NAlert, NEmpty, NDataTable, NTag,
+  NInput, NDatePicker, NGrid, NGridItem, NFormItem,
   type DataTableColumns,
 } from 'naive-ui'
-import { useBacktest, useEquitySeries, useTradesPage } from '@/api/backtests'
+import { useBacktest, useEquitySeries, useTradesPage, type TradesFilter } from '@/api/backtests'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 import EquityCurveChart from '@/components/charts/EquityCurveChart.vue'
+
+// VectorBT `records_readable` 的英文列名 → 中文表头。parquet 列名稳定不走版本号，
+// 我们只翻知道的；未识别的列回退展示原列名，避免因 vectorbt 小版本改列就"漏渲染"。
+const TRADE_COLUMN_LABELS: Record<string, string> = {
+  'Exit Trade Id': '编号',
+  'Trade Id': '编号',
+  'Column': '股票代码',
+  'Size': '数量',
+  'Entry Timestamp': '开仓时间',
+  'Avg Entry Price': '开仓均价',
+  'Entry Price': '开仓均价',
+  'Entry Fees': '开仓手续费',
+  'Exit Timestamp': '平仓时间',
+  'Avg Exit Price': '平仓均价',
+  'Exit Price': '平仓均价',
+  'Exit Fees': '平仓手续费',
+  'PnL': '损益',
+  'Return': '收益率',
+  'Direction': '方向',
+  'Status': '状态',
+  'Position Id': '持仓编号',
+}
+
+// Direction / Status 是 VectorBT 内置枚举字符串，渲染时翻译成中文；
+// 其他值（数值 / 字符串）不动。
+const TRADE_VALUE_LABELS: Record<string, Record<string, string>> = {
+  Direction: { Long: '多', Short: '空' },
+  Status: { Open: '持仓中', Closed: '已平仓' },
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -38,31 +68,79 @@ const { data: equityData, isLoading: equityLoading, isError: equityError } =
 
 const tradesPage = ref(1)
 const tradesSize = ref(20)
-const { data: tradesData, isLoading: tradesLoading } = useTradesPage(
+
+// --- 筛选 state ---
+// symbolInput 是"用户正在输入的值"；tradesFilter 才是"已提交的筛选"，避免每键一下都重查。
+// 日期选择器双向绑定的是 naive-ui 的 daterange [startTs, endTs]（毫秒 ts）或 null。
+const symbolInput = ref('')
+const dateRange = ref<[number, number] | null>(null)
+const tradesFilter = ref<TradesFilter>({})
+
+const { data: tradesData, isLoading: tradesLoading, isError: tradesError, error: tradesErrObj } = useTradesPage(
   runId,
   tradesPage,
   tradesSize,
   isSuccess,
+  tradesFilter,
 )
 
-// trades 列表表头直接按后端返回的 columns 动态渲染——VectorBT 改列名时前端不用同步。
-// NaN / datetime 已在后端标准化为 string / number / null。
+function tsToYmd(ts: number | null | undefined): string | null {
+  if (ts == null) return null
+  const d = new Date(ts)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+function applyTradesFilter() {
+  tradesPage.value = 1  // 换筛选条件必须回到第 1 页，否则容易停在"超出结果范围"的页号上
+  tradesFilter.value = {
+    symbol: symbolInput.value.trim() || undefined,
+    startDate: tsToYmd(dateRange.value?.[0] ?? null) ?? null,
+    endDate: tsToYmd(dateRange.value?.[1] ?? null) ?? null,
+  }
+}
+
+function resetTradesFilter() {
+  symbolInput.value = ''
+  dateRange.value = null
+  tradesPage.value = 1
+  tradesFilter.value = {}
+}
+
+// 未识别的英文列也要有合理回退：直接用原列名，保证 vectorbt 改动不会让表头空白。
+function columnTitle(c: string): string {
+  return TRADE_COLUMN_LABELS[c] ?? c
+}
+
+// Return 是小数收益率（0.0123 = 1.23%），单独按 % 渲染；别的数值按 4 位小数。
+function renderTradeValue(col: string, v: any): string {
+  if (v == null || v === '') return '-'
+  const map = TRADE_VALUE_LABELS[col]
+  if (map && typeof v === 'string' && v in map) return map[v]
+  if (typeof v === 'number') {
+    if (col === 'Return') return (v * 100).toFixed(2) + '%'
+    return Number.isInteger(v) ? String(v) : v.toFixed(4)
+  }
+  return String(v)
+}
+
 const tradesColumns = computed<DataTableColumns<Record<string, any>>>(() => {
   const cols = tradesData.value?.columns ?? []
   return cols.map(c => ({
-    title: c,
+    title: columnTitle(c),
     key: c,
     ellipsis: { tooltip: true },
-    render: (row) => {
-      const v = row[c]
-      if (v == null) return '-'
-      if (typeof v === 'number') {
-        // 整数（trade id / status 码）直接展示；小数保留 4 位
-        return Number.isInteger(v) ? String(v) : v.toFixed(4)
-      }
-      return String(v)
-    },
+    render: (row) => renderTradeValue(c, row[c]),
   }))
+})
+
+// 筛选命中 0 条或后端 400 时，n-data-table 的默认 empty 不够清楚；我们自己贴一层提示。
+const tradesFilterErrorMsg = computed<string | null>(() => {
+  if (!tradesError.value) return null
+  const e: any = tradesErrObj.value
+  return e?.response?.data?.message ?? e?.response?.data?.detail ?? e?.message ?? '筛选失败'
 })
 
 const tradesPagination = computed(() => ({
@@ -191,6 +269,41 @@ function downloadArtifact(type: string) {
 
         <!-- 交易列表 -->
         <n-card title="交易记录" size="small" style="margin-bottom: 16px">
+          <!-- 筛选条：股票代码子串 + 开仓时间范围。符合后端"按 Entry Timestamp 过滤"的语义。 -->
+          <n-grid :cols="24" :x-gap="12" :y-gap="8" style="margin-bottom: 12px" responsive="screen">
+            <n-grid-item :span="8">
+              <n-form-item label="股票代码" label-placement="left" :show-feedback="false">
+                <n-input
+                  v-model:value="symbolInput"
+                  placeholder="代码或任意片段，如 000001"
+                  clearable
+                  @keydown.enter="applyTradesFilter"
+                />
+              </n-form-item>
+            </n-grid-item>
+            <n-grid-item :span="10">
+              <n-form-item label="开仓日期" label-placement="left" :show-feedback="false">
+                <n-date-picker
+                  v-model:value="dateRange"
+                  type="daterange"
+                  clearable
+                  style="width: 100%"
+                  :actions="['clear', 'confirm']"
+                />
+              </n-form-item>
+            </n-grid-item>
+            <n-grid-item :span="6">
+              <n-space style="margin-top: 4px">
+                <n-button type="primary" size="small" @click="applyTradesFilter">查询</n-button>
+                <n-button size="small" @click="resetTradesFilter">重置</n-button>
+              </n-space>
+            </n-grid-item>
+          </n-grid>
+
+          <n-alert v-if="tradesFilterErrorMsg" type="warning" :show-icon="false" style="margin-bottom: 8px">
+            {{ tradesFilterErrorMsg }}
+          </n-alert>
+
           <n-data-table
             remote
             :columns="tradesColumns"
