@@ -116,15 +116,16 @@ class CreateCostSensitivityIn(BaseModel):
         return self
 
 
-class PreviewParamSensitivityIn(BaseModel):
-    """``POST /api/param-sensitivity/preview`` 请求体。
+class CreateParamSensitivityIn(BaseModel):
+    """``POST /api/param-sensitivity`` 请求体。
 
-    扫描因子的单个超参数（param_name）在 values 中取各值时的评估指标。同步返回，
-    不落库——研究场景"扫一次得结论"占 80%，持久化/中断/历史列表留到 MVP 之后。
+    扫同一因子的一个超参数（param_name）在 values 中取各值时的评估指标；
+    任务异步执行，结果入 fr_param_sensitivity_runs，状态机同 cost_sensitivity。
 
     校验策略：
-    - param_name 必须是 factor.params_schema 的 key（router 层会校验）；
-    - values 至少 2 个点（单点没有"邻域"概念）；上限 15，防止扫到天黑。
+    - param_name 必须是 factor.params_schema 的 key（service 层也会校验一次）；
+    - values 至少 2 个点（单点没有"邻域"概念）；上限 15，防止扫到天黑——
+      单点 20-60s，15 点是现实下容忍度的天花板。
     """
 
     factor_id: str
@@ -137,6 +138,18 @@ class PreviewParamSensitivityIn(BaseModel):
     n_groups: int = Field(default=5, ge=2, le=20)
     forward_periods: list[int] = Field(default_factory=lambda: [1, 5, 10])
     base_params: dict | None = None
+
+    @model_validator(mode="after")
+    def _check_values(self) -> "CreateParamSensitivityIn":
+        # 去重后仍需 >=2 个：前端允许用户手填重复，这里统一按唯一值数量卡下限。
+        unique = {float(v) for v in self.values}
+        if len(unique) < 2:
+            raise ValueError("values 至少需要 2 个不同的扫描点")
+        if self.start_date >= self.end_date:
+            raise ValueError(
+                f"start_date={self.start_date} 必须早于 end_date={self.end_date}"
+            )
+        return self
 
 
 class CompositionFactorItem(BaseModel):

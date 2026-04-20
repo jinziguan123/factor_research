@@ -49,3 +49,10 @@ def composition_entry(run_id: str, body: dict) -> None:
     from backend.services.composition_service import run_composition
 
     run_composition(run_id, body)
+
+
+def param_sensitivity_entry(run_id: str, body: dict) -> None:
+    """参数敏感性任务入口：在 worker 进程内调用 ``run_param_sensitivity``。"""
+    from backend.services.param_sensitivity_service import run_param_sensitivity
+
+    run_param_sensitivity(run_id, body)

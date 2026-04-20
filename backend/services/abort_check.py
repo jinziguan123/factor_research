@@ -39,6 +39,7 @@ _ABORT_TABLES = {
     "eval": "fr_factor_eval_runs",
     "backtest": "fr_backtest_runs",
     "cost_sensitivity": "fr_cost_sensitivity_runs",
+    "param_sensitivity": "fr_param_sensitivity_runs",
 }
 
 

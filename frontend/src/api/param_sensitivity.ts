@@ -1,10 +1,9 @@
-/**
- * 参数敏感性 API（MVP）：单一同步接口 /param-sensitivity/preview。
- * 同步跑完返回，无列表 / 无状态查询。因扫描可能 1-3 分钟，timeout 显式拉到 10 分钟。
- */
-import { useMutation } from '@tanstack/vue-query'
+// 参数敏感性扫描 API 层（异步 + 持久化，结构同 cost_sensitivity）
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
+import { toValue, type MaybeRefOrGetter, type Ref } from 'vue'
 import { client } from './client'
 
+/** 单个参数取值的指标（与后端 param_sensitivity_service._compute_point 对齐）。 */
 export interface ParamSensitivityPoint {
   value: number
   ic_mean: number | null
@@ -18,24 +17,37 @@ export interface ParamSensitivityPoint {
   error: string | null
 }
 
-export interface ParamSensitivityResult {
+export interface ParamSensitivitySchemaEntry {
+  type?: string
+  min?: number
+  max?: number
+  default?: number
+  desc?: string
+}
+
+export interface ParamSensitivityRun {
+  run_id: string
   factor_id: string
+  factor_version: number
   param_name: string
-  default_value: number | null
-  base_params: Record<string, any>
-  schema_entry: {
-    type?: string
-    min?: number
-    max?: number
-    default?: number
-    desc?: string
-  } | null
+  values: number[] | null
+  base_params?: Record<string, any> | null
   pool_id: number
+  freq: string
   start_date: string
   end_date: string
-  forward_periods: number[]
   n_groups: number
-  points: ParamSensitivityPoint[]
+  forward_periods: number[] | null
+  status: 'pending' | 'running' | 'success' | 'failed' | 'aborting' | 'aborted'
+  progress: number
+  error_message?: string
+  created_at: string
+  started_at?: string
+  finished_at?: string
+  // 详情页专属（list 不返回）
+  points?: ParamSensitivityPoint[] | null
+  default_value?: number | null
+  schema_entry?: ParamSensitivitySchemaEntry | null
 }
 
 export interface ParamSensitivityInput {
@@ -51,11 +63,60 @@ export interface ParamSensitivityInput {
   base_params?: Record<string, any> | null
 }
 
-export function usePreviewParamSensitivity() {
-  return useMutation<ParamSensitivityResult, Error, ParamSensitivityInput>({
+/** 创建参数敏感性扫描任务 */
+export function useCreateParamSensitivity() {
+  return useMutation<{ run_id: string; status: string }, Error, ParamSensitivityInput>({
     mutationFn: (body) =>
+      client.post('/param-sensitivity', body).then((r) => r.data),
+  })
+}
+
+/** 获取单次扫描详情（未完成时轮询） */
+export function useParamSensitivity(runId: Ref<string>) {
+  return useQuery<ParamSensitivityRun>({
+    queryKey: ['param-sensitivity', runId],
+    queryFn: () =>
+      client.get(`/param-sensitivity/${runId.value}`).then((r) => r.data),
+    enabled: () => !!runId.value,
+    refetchInterval: (q) => {
+      const s = q.state?.data?.status
+      return s === 'pending' || s === 'running' ? 2000 : false
+    },
+  })
+}
+
+/** 列表 */
+export function useParamSensitivityRuns(
+  params?: MaybeRefOrGetter<Record<string, any> | undefined>,
+) {
+  return useQuery<ParamSensitivityRun[]>({
+    queryKey: ['param-sensitivity-list', params],
+    queryFn: () =>
       client
-        .post('/param-sensitivity/preview', body, { timeout: 600_000 })
+        .get('/param-sensitivity', { params: toValue(params) ?? {} })
         .then((r) => r.data),
+  })
+}
+
+/** 删除 */
+export function useDeleteParamSensitivity() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      client.delete(`/param-sensitivity/${runId}`).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['param-sensitivity-list'] }),
+  })
+}
+
+/** 中断运行中的参数扫描。每个扫描点前会 check_abort，最坏等一个点（~30-60s）。 */
+export function useAbortParamSensitivity() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      client.post(`/param-sensitivity/${runId}/abort`).then((r) => r.data),
+    onSuccess: (_res, runId) => {
+      qc.invalidateQueries({ queryKey: ['param-sensitivity-list'] })
+      qc.invalidateQueries({ queryKey: ['param-sensitivity', runId] })
+    },
   })
 }

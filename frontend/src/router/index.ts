@@ -22,5 +22,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/klines', component: () => import('@/pages/klines/KlineViewer.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
   { path: '/docs/factor-guide', component: () => import('@/pages/docs/FactorGuide.vue') },
-  { path: '/param-sensitivity', component: () => import('@/pages/param-sensitivity/ParamSensitivityPreview.vue') },
+  { path: '/param-sensitivity', component: () => import('@/pages/param-sensitivity/ParamSensitivityList.vue') },
+  { path: '/param-sensitivity/new', component: () => import('@/pages/param-sensitivity/ParamSensitivityCreate.vue') },
+  { path: '/param-sensitivity/:runId', component: () => import('@/pages/param-sensitivity/ParamSensitivityDetail.vue') },
 ]
