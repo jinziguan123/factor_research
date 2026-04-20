@@ -21,4 +21,5 @@ export const routes: RouteRecordRaw[] = [
   { path: '/compositions/:runId', component: () => import('@/pages/compositions/CompositionDetail.vue') },
   { path: '/klines', component: () => import('@/pages/klines/KlineViewer.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
+  { path: '/docs/factor-guide', component: () => import('@/pages/docs/FactorGuide.vue') },
 ]

@@ -16,6 +16,7 @@ const menuOptions = [
   { label: '多因子合成', key: '/compositions' },
   { label: 'K 线查看', key: '/klines' },
   { label: '数据维护', key: '/admin' },
+  { label: '因子手册', key: '/docs/factor-guide' },
 ]
 
 // 子路径激活父菜单：/factors/xxx → /factors
