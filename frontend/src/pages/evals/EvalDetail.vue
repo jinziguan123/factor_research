@@ -19,6 +19,7 @@ import TurnoverChart from '@/components/charts/TurnoverChart.vue'
 import GroupReturnsChart from '@/components/charts/GroupReturnsChart.vue'
 import ValueHistogram from '@/components/charts/ValueHistogram.vue'
 import EquityCurveChart from '@/components/charts/EquityCurveChart.vue'
+import IcDecayChart from '@/components/charts/IcDecayChart.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -294,6 +295,18 @@ const rankIcMeanDiverged = computed(() =>
             </chart-card>
           </n-grid-item>
         </n-grid>
+
+        <!-- IC 衰减 / 半衰期：仅当至少有 IC 或 Rank IC 的多周期数据时渲染。
+             数据来源复用 payload.ic / payload.rank_ic，前端就地算均值 + 半衰期，
+             不走后端——老评估无需重跑也能看。 -->
+        <n-card
+          v-if="payload.ic || payload.rank_ic"
+          title="IC 随前瞻期衰减 / 半衰期"
+          size="small"
+          style="margin-bottom: 24px"
+        >
+          <ic-decay-chart :ic="payload.ic" :rank-ic="payload.rank_ic" />
+        </n-card>
       </template>
 
       <!-- 因子体检卡片：跨年 IC 稳定性 / 横截面独特值率 / qcut 满组率 / 多空样本比 /
