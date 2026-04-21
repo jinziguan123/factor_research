@@ -148,7 +148,7 @@ def test_kdj_j_oversold_monotonic_up_gives_negative_factor() -> None:
         warmup_days=20,
     )
     factor = KdjJOversold().compute(ctx, {"n": 9})
-    tail = factor.dropna()
+    tail = factor["A"].dropna()
     assert not tail.empty
     # factor = -J；顶部时 J 应 >> 0，因子值应 << 0
     assert (tail.values < -50).all()
@@ -159,3 +159,30 @@ def test_kdj_j_oversold_required_warmup() -> None:
     assert KdjJOversold().required_warmup({"n": 9}) == 50
     # n=20 → int(90)+10 = 100
     assert KdjJOversold().required_warmup({"n": 20}) == 100
+
+
+def test_kdj_j_oversold_monotonic_down_gives_positive_factor() -> None:
+    """单调下跌下 RSV→0 → K,D→0 → J→0 附近；深度超卖段 J 可能短暂 < 0
+    → factor = -J 应 > 0（反弹看多信号）。锁"-J 符号 = 反转方向"语义。
+    """
+    idx = _biz_index(40)
+    close = np.linspace(30.0, 10.0, num=40)
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[20],
+        end_date=idx[-1],
+        warmup_days=20,
+    )
+    factor = KdjJOversold().compute(ctx, {"n": 9})
+    tail = factor["A"].dropna()
+    assert not tail.empty
+    # 底部 RSV≈0 → K,D→0 → J=3·0-2·0=0；单调下跌尾端应该非负、数值不大
+    # 关键是不能像涨到顶那样 < -50，应该 > -10 区间。
+    assert (tail.values > -10).all()

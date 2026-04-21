@@ -17,7 +17,7 @@ from __future__ import annotations
 import pandas as pd
 
 from backend.factors.base import BaseFactor, FactorContext
-from backend.factors.oscillator._kdj import compute_kdj
+from backend.factors.oscillator._kdj import compute_kdj, load_hlc
 
 
 class KdjJOversold(BaseFactor):
@@ -45,22 +45,9 @@ class KdjJOversold(BaseFactor):
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n = int(params.get("n", self.default_params["n"]))
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        high = ctx.data.load_panel(
-            ctx.symbols, data_start, ctx.end_date.date(),
-            freq="1d", field="high", adjust="qfq",
-        )
-        low = ctx.data.load_panel(
-            ctx.symbols, data_start, ctx.end_date.date(),
-            freq="1d", field="low", adjust="qfq",
-        )
-        close = ctx.data.load_panel(
-            ctx.symbols, data_start, ctx.end_date.date(),
-            freq="1d", field="close", adjust="qfq",
-        )
-        if high.empty or low.empty or close.empty:
+        panels = load_hlc(ctx, self.required_warmup(params))
+        if panels is None:
             return pd.DataFrame()
+        high, low, close = panels
         _, _, j = compute_kdj(high, low, close, n=n)
-        factor = -j
-        return factor.loc[ctx.start_date:]
+        return (-j).loc[ctx.start_date:]

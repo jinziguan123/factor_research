@@ -56,3 +56,36 @@ def compute_kdj(
     d = k.ewm(alpha=1 / 3, adjust=False).mean()
     j = 3 * k - 2 * d
     return k, d, j
+
+
+def load_hlc(ctx, warmup: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+    """加载 high / low / close 三宽表（所有 kdj_* 因子的共用入口）。
+
+    为什么抽出来：
+    - 5 个 kdj 因子的 compute 开头都是同样的 3× load_panel + empty check + data_start
+      计算，DRY；
+    - 统一 "empty guard" 行为：任一字段 load_panel 返空即返 None，调用方据此返
+      `pd.DataFrame()`（和 reversal_n 的空结果语义一致）；
+    - 未来要换前复权 / 不复权，改一个地方就够了。
+
+    Args:
+        ctx: FactorContext；只用到 data / symbols / start_date / end_date。
+        warmup: 向左多取的自然日天数，用于 rolling / ewm 的 warm-up。
+
+    Returns:
+        (high, low, close) 宽表三元组；任一 panel 为空时返 None。
+    """
+    data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
+    end = ctx.end_date.date()
+    high = ctx.data.load_panel(
+        ctx.symbols, data_start, end, freq="1d", field="high", adjust="qfq",
+    )
+    low = ctx.data.load_panel(
+        ctx.symbols, data_start, end, freq="1d", field="low", adjust="qfq",
+    )
+    close = ctx.data.load_panel(
+        ctx.symbols, data_start, end, freq="1d", field="close", adjust="qfq",
+    )
+    if high.empty or low.empty or close.empty:
+        return None
+    return high, low, close
