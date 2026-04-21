@@ -250,3 +250,56 @@ def test_kdj_cross_top_then_down_gives_negative() -> None:
 def test_kdj_cross_required_warmup() -> None:
     """warmup = int(n * 3 * 1.5) + 10；n=9 → 50。"""
     assert KdjCross().required_warmup({"n": 9}) == 50
+
+
+from backend.factors.oscillator.kdj_oversold_hinge import KdjOversoldHinge
+
+
+def test_kdj_oversold_hinge_zero_above_threshold() -> None:
+    """上涨段 K 应很快升到 threshold=20 以上，factor = max(0, 20-K) = 0。"""
+    idx = _biz_index(40)
+    close = np.linspace(10.0, 30.0, num=40)
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[20],
+        end_date=idx[-1],
+        warmup_days=20,
+    )
+    factor = KdjOversoldHinge().compute(ctx, {"n": 9, "threshold": 20})
+    tail = factor["A"].dropna()
+    assert not tail.empty
+    # 上涨到顶部 K→100，全都超过阈值，因子恒为 0
+    assert (tail.values == 0).all()
+
+
+def test_kdj_oversold_hinge_positive_below_threshold() -> None:
+    """下跌到底 K→0 时，factor = 20 - K ≈ 20 > 0。"""
+    idx = _biz_index(40)
+    close = np.linspace(30.0, 10.0, num=40)
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[20],
+        end_date=idx[-1],
+        warmup_days=20,
+    )
+    factor = KdjOversoldHinge().compute(ctx, {"n": 9, "threshold": 20})
+    # 末尾（底部）K≈0，因子值应接近 threshold=20
+    assert factor["A"].iloc[-1] > 15
+
+
+def test_kdj_oversold_hinge_required_warmup() -> None:
+    assert KdjOversoldHinge().required_warmup({"n": 9}) == 50
