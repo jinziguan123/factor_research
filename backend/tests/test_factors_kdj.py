@@ -122,3 +122,40 @@ def test_compute_kdj_rejects_mismatched_columns() -> None:
 
     with pytest.raises(ValueError, match="columns 必须一致"):
         compute_kdj(h, l, c, n=9)
+
+
+from backend.factors.oscillator.kdj_j_oversold import KdjJOversold
+
+
+def test_kdj_j_oversold_monotonic_up_gives_negative_factor() -> None:
+    """单调上涨下 RSV≈100 → K,D 收敛到 100 → J≈100 → factor = -J ≈ -100。
+
+    即"上涨到顶部"时因子强烈看空（负值大），符合反转语义。
+    """
+    idx = _biz_index(40)
+    close = np.linspace(10.0, 30.0, num=40)
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[20],
+        end_date=idx[-1],
+        warmup_days=20,
+    )
+    factor = KdjJOversold().compute(ctx, {"n": 9})
+    tail = factor.dropna()
+    assert not tail.empty
+    # factor = -J；顶部时 J 应 >> 0，因子值应 << 0
+    assert (tail.values < -50).all()
+
+
+def test_kdj_j_oversold_required_warmup() -> None:
+    """warmup 公式：int(n * 3 * 1.5) + 10。n=9 → int(40.5)+10 = 50。"""
+    assert KdjJOversold().required_warmup({"n": 9}) == 50
+    # n=20 → int(90)+10 = 100
+    assert KdjJOversold().required_warmup({"n": 20}) == 100
