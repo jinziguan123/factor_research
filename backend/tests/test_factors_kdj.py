@@ -186,3 +186,67 @@ def test_kdj_j_oversold_monotonic_down_gives_positive_factor() -> None:
     # 底部 RSV≈0 → K,D→0 → J=3·0-2·0=0；单调下跌尾端应该非负、数值不大
     # 关键是不能像涨到顶那样 < -50，应该 > -10 区间。
     assert (tail.values > -10).all()
+
+
+from backend.factors.oscillator.kdj_cross import KdjCross
+
+
+def test_kdj_cross_rebound_gives_positive() -> None:
+    """V 型反转末段：价格刚从低点反弹，RSV 快速从低位抬起，K 先于 D 抬升
+    （K 是对 RSV 的 EMA，D 是对 K 的 EMA），K - D 应为正（金叉强度）。
+    """
+    idx = _biz_index(50)
+    # 前 25 天 30→10 单调下跌，后 25 天 10→25 单调上涨
+    close = np.concatenate([
+        np.linspace(30.0, 10.0, num=25),
+        np.linspace(10.0, 25.0, num=25),
+    ])
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[30],  # 反弹段开始后几天
+        end_date=idx[-1],
+        warmup_days=30,
+    )
+    factor = KdjCross().compute(ctx, {"n": 9})
+    # 反弹段后期 K > D（金叉已发生），因子值应 > 0
+    assert factor["A"].iloc[-1] > 0
+
+
+def test_kdj_cross_top_then_down_gives_negative() -> None:
+    """倒 V 型：前段涨到顶，后段下跌。下跌段 K 先于 D 回落 → K-D < 0（死叉）。
+    锁"trend 方向"符号：不是 reversal 因子，涨时 + / 跌时 -。
+    """
+    idx = _biz_index(50)
+    # 前 25 天 10→30 上涨，后 25 天 30→10 下跌
+    close = np.concatenate([
+        np.linspace(10.0, 30.0, num=25),
+        np.linspace(30.0, 10.0, num=25),
+    ])
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[30],
+        end_date=idx[-1],
+        warmup_days=30,
+    )
+    factor = KdjCross().compute(ctx, {"n": 9})
+    # 下跌段后期 K < D（死叉），因子值应 < 0
+    assert factor["A"].iloc[-1] < 0
+
+
+def test_kdj_cross_required_warmup() -> None:
+    """warmup = int(n * 3 * 1.5) + 10；n=9 → 50。"""
+    assert KdjCross().required_warmup({"n": 9}) == 50
