@@ -303,3 +303,38 @@ def test_kdj_oversold_hinge_positive_below_threshold() -> None:
 
 def test_kdj_oversold_hinge_required_warmup() -> None:
     assert KdjOversoldHinge().required_warmup({"n": 9}) == 50
+
+
+from backend.factors.oscillator.kdj_k_pct_rev import KdjKPctRev
+
+
+def test_kdj_k_pct_rev_monotonic_up_gives_negative() -> None:
+    """单调上涨下 K 也单调上涨，K 在自身 lookback 历史里总处于最高分位→1.0，
+    factor = -rolling_pct_rank(K) ≈ -1.0。"""
+    idx = _biz_index(100)
+    # 指数增长而非线性：linear close 会让 RSV 数学上饱和成常数（因为 close 与
+    # n 日 low 的相对距离稳定），K 随之打平，pct_rank(常数窗) = 0.5 而非 1.0。
+    # geomspace 让 close 持续加速，K 才真的一路创新高、pct_rank 逼近 1.0。
+    close = np.geomspace(10.0, 50.0, num=100)
+    high = close + 0.2
+    low = close - 0.2
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[70],
+        end_date=idx[-1],
+        warmup_days=70,
+    )
+    factor = KdjKPctRev().compute(ctx, {"n": 9, "lookback": 30})
+    # K 一直创新高 → pct_rank 逼近 1.0 → factor 逼近 -1.0
+    assert factor["A"].iloc[-1] < -0.8
+
+
+def test_kdj_k_pct_rev_required_warmup() -> None:
+    """warmup = int((n*3 + lookback) * 1.5) + 10
+    n=9, lookback=60 → int((27+60)*1.5)+10 = int(130.5)+10 = 140。"""
+    assert KdjKPctRev().required_warmup({"n": 9, "lookback": 60}) == 140
