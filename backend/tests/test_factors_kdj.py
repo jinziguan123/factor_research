@@ -338,3 +338,43 @@ def test_kdj_k_pct_rev_required_warmup() -> None:
     """warmup = int((n*3 + lookback) * 1.5) + 10
     n=9, lookback=60 → int((27+60)*1.5)+10 = int(130.5)+10 = 140。"""
     assert KdjKPctRev().required_warmup({"n": 9, "lookback": 60}) == 140
+
+
+from backend.factors.oscillator.kdj_divergence import KdjDivergence
+
+
+def test_kdj_divergence_required_warmup() -> None:
+    """n=9, lookback=20 → int((27+20)*1.5)+10 = int(70.5)+10 = 80。"""
+    assert KdjDivergence().required_warmup({"n": 9, "lookback": 20}) == 80
+
+
+def test_kdj_divergence_output_shape_and_finite() -> None:
+    """烟雾测试：公式很复杂，做形状+有限性断言，数学性质靠实盘 IC 验证。
+
+    底背离的精确构造很难，我们这里只确保：
+    - 正常上涨序列上公式能跑通、输出非空、至少部分值非 NaN；
+    - 没有 inf（rolling_std 除零兜底生效）。
+    """
+    idx = _biz_index(100)
+    rng = np.random.default_rng(42)
+    # 带噪声的上涨趋势（避免完全单调导致 std=0）
+    close = np.linspace(10.0, 30.0, num=100) + rng.normal(0, 0.3, 100)
+    high = close + 0.5
+    low = close - 0.5
+    ctx = FactorContext(
+        data=FakeDataService(panels={
+            "high": pd.DataFrame({"A": high}, index=idx),
+            "low": pd.DataFrame({"A": low}, index=idx),
+            "close": pd.DataFrame({"A": close}, index=idx),
+        }),
+        symbols=["A"],
+        start_date=idx[60],
+        end_date=idx[-1],
+        warmup_days=60,
+    )
+    factor = KdjDivergence().compute(ctx, {"n": 9, "lookback": 20})
+    assert not factor.empty
+    tail = factor["A"].dropna()
+    assert not tail.empty
+    # 所有非 NaN 值有限
+    assert np.all(np.isfinite(tail.values))
