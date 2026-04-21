@@ -34,6 +34,12 @@ def compute_kdj(
     Returns:
         (K, D, J) 三个宽表，shape 与输入一致。前 n-1 行是 NaN（窗口未就绪）。
     """
+    # 输入 hlc 三表的 columns / index 必须一致——否则 pandas 会做广播，
+    # 产生全 NaN 列而不报错，下游因子会静默丢标的。fail-fast 比事后 debug 便宜。
+    if not (high.columns.equals(low.columns) and low.columns.equals(close.columns)):
+        raise ValueError("compute_kdj: high/low/close columns 必须一致")
+    if not (high.index.equals(low.index) and low.index.equals(close.index)):
+        raise ValueError("compute_kdj: high/low/close index 必须一致")
     # rolling 跨列一起算，min / max 自动忽略 NaN；但如果窗口内**全 NaN** 会返 NaN，
     # 这正是我们想要的（停牌段因子输出应为 NaN）。
     low_min = low.rolling(n, min_periods=n).min()
