@@ -150,6 +150,89 @@ def test_require_factor_file_rejects_non_py_suffix(tmp_path, monkeypatch):
     assert ".py" in str(excinfo.value.detail)
 
 
+# ---------------------------- _save_backup ----------------------------
+
+
+def test_save_backup_copies_file_with_timestamp(tmp_path, monkeypatch):
+    """备份产物:路径在 _FACTORS_ROOT/.backup/、文件名带时间戳、内容与源一致。"""
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+    src = tmp_path / "momentum" / "foo.py"
+    src.parent.mkdir()
+    src.write_text("# original content\n")
+
+    backup = factors_router._save_backup(src, "foo")
+
+    assert backup is not None
+    assert backup.parent == tmp_path.resolve() / ".backup"
+    assert backup.name.startswith("foo.") and backup.name.endswith(".py")
+    # 时间戳部分是 yyyyMMdd-HHmmss,长度固定 15
+    ts_part = backup.stem.split(".", 1)[1]
+    assert len(ts_part) == 15
+    assert backup.read_text() == "# original content\n"
+
+
+def test_save_backup_returns_none_when_source_missing(tmp_path, monkeypatch):
+    """源文件不存在（新因子首次 PUT 的防御分支）→ 返回 None,不报错。"""
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+    src = tmp_path / "does_not_exist.py"
+
+    got = factors_router._save_backup(src, "ghost")
+
+    assert got is None
+    assert not (tmp_path / ".backup").exists()  # 备份目录也不该被创建
+
+
+def test_save_backup_keeps_only_5_latest(tmp_path, monkeypatch):
+    """连续备份同一 factor_id 6 次,只保留最近 5 份。"""
+    import time
+
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+    src = tmp_path / "momentum" / "foo.py"
+    src.parent.mkdir()
+    src.write_text("v1\n")
+
+    # 为了让文件名时间戳不同,每次 sleep 1 秒
+    backups = []
+    for i in range(6):
+        src.write_text(f"v{i + 1}\n")
+        b = factors_router._save_backup(src, "foo")
+        backups.append(b)
+        time.sleep(1.01)  # 确保 yyyyMMdd-HHmmss 严格递增
+
+    backup_dir = tmp_path.resolve() / ".backup"
+    remaining = sorted(backup_dir.glob("foo.*.py"))
+    assert len(remaining) == 5
+    # 最老那份应已被清理
+    assert backups[0] not in remaining
+    # 最新 5 份都在
+    for b in backups[1:]:
+        assert b in remaining
+
+
+def test_save_backup_different_factors_dont_interfere(tmp_path, monkeypatch):
+    """两个不同 factor_id 各自备份,保留策略互不影响。"""
+    import time
+
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+    foo = tmp_path / "momentum" / "foo.py"
+    bar = tmp_path / "reversal" / "bar.py"
+    foo.parent.mkdir()
+    bar.parent.mkdir()
+    foo.write_text("foo1\n")
+    bar.write_text("bar1\n")
+
+    # foo 备份 3 次,bar 备份 1 次
+    for i in range(3):
+        foo.write_text(f"foo{i + 1}\n")
+        factors_router._save_backup(foo, "foo")
+        time.sleep(1.01)
+    factors_router._save_backup(bar, "bar")
+
+    backup_dir = tmp_path.resolve() / ".backup"
+    assert len(list(backup_dir.glob("foo.*.py"))) == 3
+    assert len(list(backup_dir.glob("bar.*.py"))) == 1
+
+
 # ---------------------------- _verify_class_factor_id ----------------------------
 
 

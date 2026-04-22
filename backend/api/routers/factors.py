@@ -23,6 +23,8 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -109,6 +111,30 @@ def _require_factor_file(factor_id: str, reg: FactorRegistry) -> Path:
             detail=f"源码文件必须是 .py，实际后缀 {p.suffix!r}",
         )
     return p
+
+
+def _save_backup(p: Path, factor_id: str) -> Path | None:
+    """覆写前把旧文件拷贝到 .backup/<factor_id>.<yyyyMMdd-HHmmss>.py。
+
+    - 旧文件不存在 → 返回 None、不创建 .backup 目录（新因子首次 PUT 的防御分支）
+    - 对每个 factor_id 只保留最近 5 份,多余按文件名字典序删除（yyyyMMdd-HHmmss
+      格式保证字典序 = 时间序）
+    - copy2 保留 mtime,便于外部工具按修改时间排序
+
+    备份范围:对所有 PUT 的因子都做（含 llm_generated）,保守一致。
+    """
+    if not p.exists():
+        return None
+    backup_dir = _FACTORS_ROOT / ".backup"
+    backup_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dest = backup_dir / f"{factor_id}.{ts}.py"
+    shutil.copy2(p, dest)
+    # 只保留最近 5 份,旧的按字典序删除
+    olds = sorted(backup_dir.glob(f"{factor_id}.*.py"))
+    for stale in olds[:-5]:
+        stale.unlink(missing_ok=True)
+    return dest
 
 
 def _verify_class_factor_id(code: str, expected: str) -> None:
