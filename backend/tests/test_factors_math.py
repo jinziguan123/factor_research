@@ -22,6 +22,7 @@ from backend.engine.base_factor import FactorContext
 from backend.factors.custom.neg_return_argmax_rank import NegReturnArgmaxRank
 from backend.factors.momentum.momentum_n import MomentumN
 from backend.factors.reversal.reversal_n import ReversalN
+from backend.factors.volatility.boll_down import BollDown
 from backend.factors.volatility.realized_vol import RealizedVol
 from backend.factors.volume.turnover_ratio import TurnoverRatio
 
@@ -147,6 +148,40 @@ def test_turnover_uses_amount_and_close() -> None:
     assert np.allclose(tail.values, 100.0, rtol=1e-9)
 
 
+def test_boll_down_constant_close_equals_one() -> None:
+    """常数价格序列下，STD=0，下轨=MA=close，因子 = close/close = 1。"""
+    idx = _biz_index(40)
+    close = pd.DataFrame({"000001.SZ": np.full(40, 100.0)}, index=idx)
+    ctx = FactorContext(
+        data=FakeDataService(panels={"close": close}),
+        symbols=["000001.SZ"],
+        start_date=idx[25],
+        end_date=idx[-1],
+        warmup_days=25,
+    )
+    factor = BollDown().compute(ctx, {"window": 20}).dropna()
+    assert not factor.empty
+    assert np.allclose(factor.values, 1.0, atol=1e-9)
+
+
+def test_boll_down_linear_rising_below_one() -> None:
+    """单调上涨时，当日 close 总是高于过去 window 日均值 -> 下轨比值 < 1。"""
+    idx = _biz_index(40)
+    close = pd.DataFrame(
+        {"000001.SZ": np.linspace(100.0, 140.0, num=40)}, index=idx
+    )
+    ctx = FactorContext(
+        data=FakeDataService(panels={"close": close}),
+        symbols=["000001.SZ"],
+        start_date=idx[25],
+        end_date=idx[-1],
+        warmup_days=25,
+    )
+    factor = BollDown().compute(ctx, {"window": 20}).dropna()
+    assert not factor.empty
+    assert (factor.values < 1.0).all()
+
+
 def test_required_warmup_values() -> None:
     """对照设计文档的 warmup 公式，避免未来改动后出现不一致。
 
@@ -158,6 +193,7 @@ def test_required_warmup_values() -> None:
     assert MomentumN().required_warmup({"window": 120, "skip": 5}) == 197
     assert RealizedVol().required_warmup({"window": 20}) == 40
     assert TurnoverRatio().required_warmup({"window": 20}) == 40
+    assert BollDown().required_warmup({"window": 20}) == 40
     # NegReturnArgmaxRank 用 int((window+1)*1.5) + 5：window=5 → int(9)+5 = 14
     assert NegReturnArgmaxRank().required_warmup({"window": 5}) == 14
 
