@@ -11,6 +11,7 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import IcDecayInterpretationSection from '@/components/docs/IcDecayInterpretationSection.vue'
+import GroupReturnsInterpretationSection from '@/components/docs/GroupReturnsInterpretationSection.vue'
 
 interface GlossaryRow {
   term: string
@@ -246,6 +247,16 @@ const pitfallsCols: DataTableColumns<PitfallRow> = [
             以下图表为教学用 mock 数据，仅用于说明“什么样算好、什么样算坏”，不代表真实评估结果。
           </n-alert>
           <ic-decay-interpretation-section />
+        </n-space>
+      </n-card>
+
+      <!-- 5. 图表解读（交互 Mock）· 分组累计净值 -->
+      <n-card title="五、图表解读（交互 Mock）· 分组累计净值" size="small">
+        <n-space vertical :size="12">
+          <n-alert type="info" :show-icon="false">
+            以下图表为教学用 mock 数据，仅用于说明“分组净值什么样算分层清晰”，不代表真实评估结果。
+          </n-alert>
+          <group-returns-interpretation-section />
         </n-space>
       </n-card>
 
