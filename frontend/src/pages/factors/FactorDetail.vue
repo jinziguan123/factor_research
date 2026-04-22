@@ -71,19 +71,18 @@ const { data: factorCode, isFetching: codeLoading } = useFactorCode(
   sourceOpen,
 )
 
-// 后端返回新源码时同步到文本域;同时重置 originalCode 快照。
-// 用 watch 而不是 onSuccess：v-model 需要响应式源,watch 简单直接。
-// 注意：Vue Query 默认开 structural sharing,第二次 refetch 返回相同内容时 data 引用不变 →
-// watch 不触发 → 编辑器停在空串;所以 openSource() 也会用当前 cache 立即填充。
-// Editing 态保护:窗口焦点切换 / 保存后 invalidate 都会触发 refetch,不能让后端 code
-// 静默覆盖用户正在编辑的 editCode。只在 ReadOnly 态同步 editCode;originalCode 始终
-// 同步以保持 dirty 基线对齐(用户再次进入 Editing 态时 snapshot 才是新鲜的)。
+// 后端返回新源码时同步到文本域。
+// - ReadOnly 态:editCode + originalCode 都刷新为后端最新值。
+// - Editing 态:两个都冻结,避免 window focus 自动 refetch / 保存后 invalidate refetch
+//   静默覆盖用户正在编辑的内容或偷偷挪动 dirty 基线。基线在 enterEditing() 那一刻 snapshot,
+//   保存成功后 saveEdit 显式重置基线并切回 ReadOnly。
+// 用 watch 而不是 onSuccess:v-model 需要响应式源,watch 简单直接。
+// 注意:Vue Query 默认开 structural sharing,第二次 refetch 返回相同内容时 data 引用不变 →
+// watch 不触发 → 编辑器停在空串;所以 openSource() 也会用当前 cache 立即填充兜底。
 watch(factorCode, (v) => {
-  if (!v || !sourceOpen.value) return
+  if (!v || !sourceOpen.value || editing.value) return
   originalCode.value = v.code
-  if (!editing.value) {
-    editCode.value = v.code
-  }
+  editCode.value = v.code
 })
 
 function openSource() {
@@ -129,6 +128,9 @@ function handleSourceOpenChange(next: boolean) {
     sourceOpen.value = true
     return
   }
+  // 保存中禁止关闭,与 mask-closable / close-on-esc 保持一致,
+  // 避免"放弃修改并关闭"之后 PUT 仍然成功导致状态与提示互相矛盾。
+  if (savePending.value) return
   const dirty = editing.value && editCode.value !== originalCode.value
   if (!dirty) {
     sourceOpen.value = false
