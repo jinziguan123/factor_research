@@ -3,8 +3,11 @@
 // 读：list / detail / source code
 // 写：PUT 覆写源码 / DELETE 删因子 / POST 空白模板新建（不经 LLM）
 //
-// 后端写接口只接受位于 backend/factors/llm_generated/ 的因子；手写的业务目录
-// （momentum / reversal / ...）由 editable 字段告知前端不给编辑入口。
+// 查看范围：所有因子均可读取源码。
+// 编辑范围：所有因子均可 PUT 覆写源码（业务因子覆写会修改 git working tree，
+// 前端按 factor.editable 字段分级显示黄色/红色警示）。后端覆写前自动备份到
+// backend/factors/.backup/，响应里 backup_path 字段告知前端展示。
+// 删除范围：仍仅限 backend/factors/llm_generated/ 下的因子，业务因子 DELETE 返回 403。
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { client } from './client'
 import type { Ref } from 'vue'
@@ -34,6 +37,11 @@ export interface FactorMutationResult {
   category: string
   description: string
   version: number
+  /**
+   * PUT /api/factors/{id}/code 成功时，返回覆写前的备份路径（相对 repo 根）。
+   * 新因子首次 PUT（文件原本不存在）为 null。POST 新建因子不返回此字段。
+   */
+  backup_path?: string | null
 }
 
 /** 获取全部因子列表 */
