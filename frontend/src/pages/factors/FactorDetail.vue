@@ -3,9 +3,9 @@
  * 因子详情页
  * 展示因子信息 + 历史评估列表 + 操作按钮
  *
- * 编辑 / 删除按钮仅当 factor.editable === true 时渲染——即因子源码位于
- * backend/factors/llm_generated/ 下；手写业务目录（momentum / reversal / …）
- * 永远不给前端入口，后端还会在 PUT/DELETE 时再做一次 403 兜底。
+ * 「源码」按钮对所有因子无条件可见,弹窗默认 ReadOnly 态;点「编辑」才切到 Editing。
+ * Editing 态按 factor.editable 分级警示:llm_generated 黄色 alert,业务因子红色 alert。
+ * 「删除」按钮仍仅当 factor.editable === true 时渲染(后端 DELETE 对业务因子仍返回 403)。
  */
 import { computed, h, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -57,28 +57,63 @@ const evalColumns: DataTableColumns<EvalRun> = [
   },
 ]
 
-// ---------------- 编辑源码对话框 ----------------
-const editOpen = ref(false)
+// ---------------- 源码查看/编辑对话框 ----------------
+// 打开后默认 ReadOnly 态;点"编辑"切到 Editing 态;保存成功后自动回到 ReadOnly。
+// 业务因子（editable=false）进入 Editing 态时显示红色强警示;llm_generated 黄色。
+const sourceOpen = ref(false)
+const editing = ref(false)      // false=ReadOnly, true=Editing
 const editCode = ref('')
 const editError = ref('')
+const originalCode = ref('')    // 进 Editing 态时的快照,用于"放弃修改"对比
+
 const { data: factorCode, isFetching: codeLoading } = useFactorCode(
   factorId,
-  editOpen,
+  sourceOpen,
 )
 
-// 打开弹窗 / 后端返回新源码时把数据塞到文本域里。
-// 用 watch 而不是 onSuccess：NInput v-model 需要响应式源，watch 简单直接。
+// 后端返回新源码时同步到文本域;同时重置 originalCode 快照。
+// 用 watch 而不是 onSuccess：v-model 需要响应式源,watch 简单直接。
+// 注意：Vue Query 默认开 structural sharing,第二次 refetch 返回相同内容时 data 引用不变 →
+// watch 不触发 → 编辑器停在空串;所以 openSource() 也会用当前 cache 立即填充。
 watch(factorCode, (v) => {
-  if (v && editOpen.value) editCode.value = v.code
+  if (v && sourceOpen.value) {
+    editCode.value = v.code
+    originalCode.value = v.code
+  }
 })
 
-function openEdit() {
+function openSource() {
   editError.value = ''
-  // 用缓存里的 code 立即填充，避免空窗期。
-  // 不能只靠下面的 watch(factorCode) 塞值：Vue Query 默认开 structural sharing，
-  // 第二次 refetch 返回相同内容时 data 引用不变 → watch 不触发 → 编辑器停在空串。
+  editing.value = false  // 默认只读
+  // 用缓存立即填充;watch(factorCode) 刷新后再覆盖
   editCode.value = factorCode.value?.code ?? ''
-  editOpen.value = true
+  originalCode.value = factorCode.value?.code ?? ''
+  sourceOpen.value = true
+}
+
+function enterEditing() {
+  editError.value = ''
+  // 进 Editing 态时把当前 code 存为快照,供"放弃修改"对比
+  originalCode.value = editCode.value
+  editing.value = true
+}
+
+function cancelEditing() {
+  const dirty = editCode.value !== originalCode.value
+  if (!dirty) {
+    editing.value = false
+    return
+  }
+  dialog.warning({
+    title: '放弃未保存的修改？',
+    content: '编辑器里有未保存的改动,切回查看态会丢失。',
+    positiveText: '放弃修改',
+    negativeText: '继续编辑',
+    onPositiveClick: () => {
+      editCode.value = originalCode.value  // 回滚
+      editing.value = false
+    },
+  })
 }
 
 const { mutateAsync: updateCode, isPending: savePending } = useUpdateFactorCode()
@@ -87,13 +122,18 @@ async function saveEdit() {
   editError.value = ''
   const code = editCode.value
   if (code.trim().length < 10) {
-    editError.value = '源码过短（至少 10 字符），请检查是否清空了编辑器'
+    editError.value = '源码过短（至少 10 字符）,请检查是否清空了编辑器'
     return
   }
   try {
     const res = await updateCode({ factor_id: factorId.value, code })
-    message.success(`保存成功：${res.display_name}（v${res.version}）`)
-    editOpen.value = false
+    const msg = res.backup_path
+      ? `保存成功:${res.display_name}（v${res.version}）\n已备份至 ${res.backup_path}`
+      : `保存成功:${res.display_name}（v${res.version}）`
+    message.success(msg)
+    // 保存成功后:刷新本地 code 快照,切回 ReadOnly 态
+    originalCode.value = code
+    editing.value = false
   } catch (e: any) {
     editError.value =
       e?.response?.data?.message ??
@@ -156,9 +196,8 @@ function confirmDelete() {
           >
             新回测
           </n-button>
-          <n-button v-if="factor?.editable" secondary @click="openEdit">
-            编辑源码
-          </n-button>
+          <!-- 源码按钮:所有因子可见,弹窗内部默认只读,用户点"编辑"才切到可写态 -->
+          <n-button secondary @click="openSource">源码</n-button>
           <n-button v-if="factor?.editable" type="error" secondary @click="confirmDelete">
             删除
           </n-button>
@@ -197,25 +236,46 @@ function confirmDelete() {
       :row-key="(row: any) => row.run_id"
     />
 
-    <!-- 编辑源码弹窗 -->
+    <!-- 源码查看/编辑弹窗 -->
     <n-modal
-      v-model:show="editOpen"
+      v-model:show="sourceOpen"
       preset="card"
-      :title="`编辑源码：${factor?.display_name ?? factorId}`"
+      :title="editing ? `编辑源码:${factor?.display_name ?? factorId}` : `查看源码:${factor?.display_name ?? factorId}`"
       style="width: 960px; max-width: 95vw"
       :mask-closable="!savePending"
       :close-on-esc="!savePending"
     >
-      <n-alert type="warning" :show-icon="false" style="margin-bottom: 12px">
+      <!-- Editing 态警示:按 factor.editable 分级 -->
+      <n-alert
+        v-if="editing && factor?.editable"
+        type="warning"
+        :show-icon="false"
+        style="margin-bottom: 12px"
+      >
         直接覆写 <code>backend/factors/llm_generated/{{ factorId }}.py</code>。
-        保存前后端会做 AST 白名单校验 + 类属性 <code>factor_id</code> 必须等于
-        <code>{{ factorId }}</code>；保存成功后触发热加载 + 进程池重置，
-        下一次评估 / 回测使用新代码。
+        保存前后端做 AST 白名单校验 + 类属性 <code>factor_id</code> 必须等于
+        <code>{{ factorId }}</code>;保存成功后自动备份旧版本到
+        <code>.backup/</code>（保留最近 5 份）、热加载生效。
+      </n-alert>
+
+      <n-alert
+        v-else-if="editing && factor && !factor.editable"
+        type="error"
+        :show-icon="false"
+        style="margin-bottom: 12px"
+      >
+        ⚠️ 这是业务因子（位于 <code>backend/factors/{{ factor.category }}/{{ factorId }}.py</code>）,
+        保存会直接覆写 git working tree 里的源码文件。
+        <br />
+        建议先 <code>git commit</code> 当前状态再修改,以便出错时能用
+        <code>git checkout</code> 回滚。后端会在覆写前自动备份到
+        <code>.backup/</code>（保留最近 5 份）,但这只是手滑兜底,不是正式版本管理手段。
       </n-alert>
 
       <n-spin :show="codeLoading">
         <py-code-editor
           v-model="editCode"
+          :readonly="!editing"
           :disabled="savePending"
           height="520px"
           placeholder="加载中..."
@@ -228,15 +288,27 @@ function confirmDelete() {
 
       <template #action>
         <n-space justify="end">
-          <n-button :disabled="savePending" @click="editOpen = false">取消</n-button>
-          <n-button
-            type="primary"
-            :loading="savePending"
-            :disabled="codeLoading"
-            @click="saveEdit"
-          >
-            {{ savePending ? '保存中…' : '保存' }}
-          </n-button>
+          <!-- ReadOnly 态:[关闭] [编辑] -->
+          <template v-if="!editing">
+            <n-button @click="sourceOpen = false">关闭</n-button>
+            <n-button type="primary" :disabled="codeLoading" @click="enterEditing">
+              编辑
+            </n-button>
+          </template>
+          <!-- Editing 态:[取消编辑] [保存] -->
+          <template v-else>
+            <n-button :disabled="savePending" @click="cancelEditing">
+              取消编辑
+            </n-button>
+            <n-button
+              type="primary"
+              :loading="savePending"
+              :disabled="codeLoading"
+              @click="saveEdit"
+            >
+              {{ savePending ? '保存中…' : '保存' }}
+            </n-button>
+          </template>
         </n-space>
       </template>
     </n-modal>
