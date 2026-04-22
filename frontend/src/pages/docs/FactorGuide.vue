@@ -10,6 +10,7 @@ import {
   NDataTable,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
+import IcDecayInterpretationSection from '@/components/docs/IcDecayInterpretationSection.vue'
 
 interface GlossaryRow {
   term: string
@@ -236,6 +237,16 @@ const pitfallsCols: DataTableColumns<PitfallRow> = [
           :single-line="false"
           size="small"
         />
+      </n-card>
+
+      <!-- 4. 图表解读（交互 Mock） -->
+      <n-card title="四、图表解读（交互 Mock）" size="small">
+        <n-space vertical :size="12">
+          <n-alert type="info" :show-icon="false">
+            以下图表为教学用 mock 数据，仅用于说明“什么样算好、什么样算坏”，不代表真实评估结果。
+          </n-alert>
+          <ic-decay-interpretation-section />
+        </n-space>
       </n-card>
 
       <n-alert type="warning" :show-icon="false">
