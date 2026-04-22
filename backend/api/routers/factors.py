@@ -41,6 +41,11 @@ router = APIRouter(prefix="/api/factors", tags=["factors"])
 # （后者在 services/，本文件在 api/routers/，两者都 parent.parent 到 backend/ 再往下）。
 _LLM_DIR = (Path(__file__).resolve().parent.parent.parent / "factors" / "llm_generated").resolve()
 
+# backend/factors/ 的绝对路径。用于放开业务目录（momentum/reversal/oscillator/...）
+# 的 PUT 编辑权限：路径校验改成"必须在 _FACTORS_ROOT 下的 .py"，不再限死 llm_generated。
+# DELETE 仍用 _LLM_DIR + _require_llm_file，保持原有的沙盒删除语义。
+_FACTORS_ROOT = (Path(__file__).resolve().parent.parent.parent / "factors").resolve()
+
 
 # ---------------------------- 辅助 ----------------------------
 
@@ -78,6 +83,30 @@ def _require_llm_file(factor_id: str, reg: FactorRegistry) -> Path:
         raise HTTPException(
             status_code=403,
             detail=f"该因子位于 {p.parent.name}/，不是 llm_generated/，禁止通过 API 修改或删除",
+        )
+    return p
+
+
+def _require_factor_file(factor_id: str, reg: FactorRegistry) -> Path:
+    """拿到源码文件路径并强制要求位于 backend/factors/ 下的 .py 文件；否则 4xx。
+
+    与 ``_require_llm_file`` 的区别：允许业务目录（momentum/reversal/oscillator/...）下的
+    因子通过校验。用于 PUT /api/factors/{id}/code 的放开路径；DELETE 不走这条，仍用
+    ``_require_llm_file`` 保持沙盒删除语义。
+
+    只用 ``is_relative_to(_FACTORS_ROOT)`` 做路径白名单，防止 ``inspect.getsourcefile``
+    返回一个位于 site-packages / 系统路径 / 符号链接到外面的文件被接受。
+    """
+    p = _factor_source_file(factor_id, reg)
+    if not p.is_relative_to(_FACTORS_ROOT):
+        raise HTTPException(
+            status_code=403,
+            detail=f"源码文件必须位于 backend/factors/ 下，实际 {p}",
+        )
+    if p.suffix != ".py":
+        raise HTTPException(
+            status_code=400,
+            detail=f"源码文件必须是 .py，实际后缀 {p.suffix!r}",
         )
     return p
 

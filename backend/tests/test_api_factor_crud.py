@@ -51,6 +51,105 @@ def test_is_under_llm_dir_rejects_parent_traversal(tmp_path, monkeypatch):
     assert factors_router._is_under_llm_dir(sneaky) is False
 
 
+# ---------------------------- _require_factor_file ----------------------------
+
+
+def test_require_factor_file_accepts_llm_generated(tmp_path, monkeypatch):
+    """llm_generated 下的因子应通过校验。"""
+    llm = tmp_path / "llm_generated"
+    llm.mkdir()
+    f = llm / "my_factor.py"
+    f.write_text("# x\n")
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+
+    import inspect as _inspect
+    from backend.runtime.factor_registry import FactorRegistry
+    reg = FactorRegistry()
+    # 塞一个假类进 registry,让 _factor_source_file 能定位到 f
+    class _Fake:
+        factor_id = "my_factor"
+    monkeypatch.setattr(
+        _inspect, "getsourcefile",
+        lambda cls: str(f) if cls is _Fake else None,
+    )
+    monkeypatch.setattr(reg, "get", lambda fid: _Fake() if fid == "my_factor" else None)
+
+    got = factors_router._require_factor_file("my_factor", reg)
+    assert got.resolve() == f.resolve()
+
+
+def test_require_factor_file_accepts_business_category(tmp_path, monkeypatch):
+    """业务目录（momentum/reversal/oscillator 等）下的因子也应通过。"""
+    momentum = tmp_path / "momentum"
+    momentum.mkdir()
+    f = momentum / "biz_factor.py"
+    f.write_text("# x\n")
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+
+    import inspect as _inspect
+    from backend.runtime.factor_registry import FactorRegistry
+    reg = FactorRegistry()
+    class _Fake:
+        factor_id = "biz_factor"
+    monkeypatch.setattr(
+        _inspect, "getsourcefile",
+        lambda cls: str(f) if cls is _Fake else None,
+    )
+    monkeypatch.setattr(reg, "get", lambda fid: _Fake() if fid == "biz_factor" else None)
+
+    got = factors_router._require_factor_file("biz_factor", reg)
+    assert got.resolve() == f.resolve()
+
+
+def test_require_factor_file_rejects_outside_factors_root(tmp_path, monkeypatch):
+    """源码路径逃出 backend/factors/ → 403。"""
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", (tmp_path / "factors").resolve())
+    outside = tmp_path / "elsewhere" / "sneak.py"
+    outside.parent.mkdir()
+    outside.write_text("# x\n")
+
+    import inspect as _inspect
+    from backend.runtime.factor_registry import FactorRegistry
+    reg = FactorRegistry()
+    class _Fake:
+        factor_id = "sneak"
+    monkeypatch.setattr(
+        _inspect, "getsourcefile",
+        lambda cls: str(outside) if cls is _Fake else None,
+    )
+    monkeypatch.setattr(reg, "get", lambda fid: _Fake() if fid == "sneak" else None)
+
+    with pytest.raises(HTTPException) as excinfo:
+        factors_router._require_factor_file("sneak", reg)
+    assert excinfo.value.status_code == 403
+    assert "backend/factors" in str(excinfo.value.detail)
+
+
+def test_require_factor_file_rejects_non_py_suffix(tmp_path, monkeypatch):
+    """源码文件不是 .py（理论上 inspect.getsourcefile 不会给这种，防御性）→ 400。"""
+    momentum = tmp_path / "momentum"
+    momentum.mkdir()
+    f = momentum / "weird.txt"
+    f.write_text("# x\n")
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
+
+    import inspect as _inspect
+    from backend.runtime.factor_registry import FactorRegistry
+    reg = FactorRegistry()
+    class _Fake:
+        factor_id = "weird"
+    monkeypatch.setattr(
+        _inspect, "getsourcefile",
+        lambda cls: str(f) if cls is _Fake else None,
+    )
+    monkeypatch.setattr(reg, "get", lambda fid: _Fake() if fid == "weird" else None)
+
+    with pytest.raises(HTTPException) as excinfo:
+        factors_router._require_factor_file("weird", reg)
+    assert excinfo.value.status_code == 400
+    assert ".py" in str(excinfo.value.detail)
+
+
 # ---------------------------- _verify_class_factor_id ----------------------------
 
 
