@@ -100,6 +100,9 @@ def _require_factor_file(factor_id: str, reg: FactorRegistry) -> Path:
     返回一个位于 site-packages / 系统路径 / 符号链接到外面的文件被接受。
     """
     p = _factor_source_file(factor_id, reg)
+    # 显式 resolve 一次,避免依赖 _factor_source_file 内部的 resolve 语义（是幂等操作,
+    # 已解析的路径再 resolve 仍是自身）。独立调用时可读性更高、后续重构更安全。
+    p = p.resolve()
     if not p.is_relative_to(_FACTORS_ROOT):
         raise HTTPException(
             status_code=403,
@@ -122,6 +125,9 @@ def _save_backup(p: Path, factor_id: str) -> Path | None:
     - copy2 保留 mtime,便于外部工具按修改时间排序
 
     备份范围:对所有 PUT 的因子都做（含 llm_generated）,保守一致。
+
+    返回:新建备份的绝对 Path(供调用者返回给 API 响应做用户提示);
+         源不存在时返回 None,调用者应把 None 原样传给前端(backup_path = null)。
     """
     if not p.exists():
         return None
@@ -132,8 +138,14 @@ def _save_backup(p: Path, factor_id: str) -> Path | None:
     shutil.copy2(p, dest)
     # 只保留最近 5 份,旧的按字典序删除
     olds = sorted(backup_dir.glob(f"{factor_id}.*.py"))
-    for stale in olds[:-5]:
+    pruned = olds[:-5]
+    for stale in pruned:
         stale.unlink(missing_ok=True)
+    if pruned:
+        logger.debug(
+            "_save_backup pruned %d stale backup(s) for %s: %s",
+            len(pruned), factor_id, [s.name for s in pruned],
+        )
     return dest
 
 
@@ -264,14 +276,19 @@ def get_factor_code(factor_id: str) -> dict:
 
 @router.put("/{factor_id}/code")
 def update_factor_code(factor_id: str, body: UpdateFactorCodeIn) -> dict:
-    """覆写 ``llm_generated/<factor_id>.py`` 的源码。
+    """覆写因子源码。
 
-    流程：locate 文件 → 权限 check（必须 llm_generated）→ AST 白名单校验 →
-    类属性一致性校验 → 落盘 → reload_module + reset_pool → 回读元数据。
+    放开的权限边界:允许 backend/factors/ 下所有 .py 被 PUT 覆写（含业务目录
+    momentum/reversal/oscillator/... 以及 llm_generated/）。DELETE 仍仅限
+    llm_generated,保持沙盒删除语义。
+
+    流程:locate 文件 → 路径白名单校验（_require_factor_file）→ AST 白名单校验 →
+    类属性一致性校验 → 备份旧文件到 .backup/ → 落盘 → reload_module + reset_pool
+    → 回读元数据 + 附带 backup_path 返回。
     """
     reg = FactorRegistry()
     reg.scan_and_register()
-    p = _require_llm_file(factor_id, reg)
+    p = _require_factor_file(factor_id, reg)
 
     try:
         fa._validate_code_ast(body.code)
@@ -279,16 +296,20 @@ def update_factor_code(factor_id: str, body: UpdateFactorCodeIn) -> dict:
         raise HTTPException(status_code=400, detail=str(e)) from e
     _verify_class_factor_id(body.code, factor_id)
 
+    # AST / 一致性校验都通过,此时才备份 → 避免坏代码触发一次无意义的备份
+    backup_path = _save_backup(p, factor_id)
+
     body_text = body.code if body.code.endswith("\n") else body.code + "\n"
     p.write_text(body_text, encoding="utf-8")
-    # watchdog 的 write 事件也会触发 reload，但 API 层用户等返回；主动 reload 拿到
-    # 新 version 再返回，避免"保存成功但前端刷新一次才看到新属性"的闪屏。
     mod = inspect.getmodule(reg.get(factor_id).__class__)
     if mod is not None:
         reg.reload_module(mod.__name__)
     reset_pool()
     inst = reg.get(factor_id)
-    logger.info("update_factor_code: factor_id=%s path=%s", factor_id, p)
+    logger.info(
+        "update_factor_code: factor_id=%s path=%s backup=%s",
+        factor_id, p, backup_path,
+    )
     return ok(
         {
             "factor_id": inst.factor_id,
@@ -296,6 +317,8 @@ def update_factor_code(factor_id: str, body: UpdateFactorCodeIn) -> dict:
             "category": inst.category,
             "description": inst.description,
             "version": reg.current_version(factor_id),
+            # 新增字段:给前端展示"已备份至 ..." toast;新因子首次 PUT 为 null
+            "backup_path": str(backup_path) if backup_path else None,
         }
     )
 

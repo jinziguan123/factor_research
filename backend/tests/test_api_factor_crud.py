@@ -313,6 +313,9 @@ def isolated_llm_dir(tmp_path, monkeypatch):
     target = tmp_path / "llm_generated"
     target.mkdir()
     monkeypatch.setattr(factors_router, "_LLM_DIR", target.resolve())
+    # PUT 路径现已改调 _require_factor_file(路径白名单是 _FACTORS_ROOT),
+    # 把 _FACTORS_ROOT 也切到 tmp_path,保证 llm_generated 下的 tmp 文件也能通过校验。
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", tmp_path.resolve())
     monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target)
 
     monkeypatch.setattr(
@@ -326,41 +329,58 @@ def isolated_llm_dir(tmp_path, monkeypatch):
         bytecode 缓存，同一秒内两次写盘时 mtime 不变，会复用 **老字节码**，
         导致热加载路径上的 ``display_name`` 根本没更新——这正是 PUT 测试
         曾经偶发失败的根因。直接 ``compile(bytes, path, 'exec')`` 把缓存绕开。
+
+        扫描范围：``target``（llm_generated）+ ``tmp_path`` 下的所有业务子目录
+        (momentum/reversal/oscillator/...)，便于 PUT 覆写业务因子后 reload 真实生效。
+        ``.backup/`` 目录跳过，避免备份文件被当成因子加载。
         """
         import types as _types
 
+        # 扫描目录列表：llm_generated + tmp_path 下的一级子目录（业务目录）
+        # tmp_path 的其他子目录没 .py 也不会出什么事,空遍历
+        scan_dirs: list[Path] = [target]
+        for sub in sorted(tmp_path.iterdir()):
+            if not sub.is_dir():
+                continue
+            if sub.name in ("llm_generated", ".backup") or sub.name.startswith("."):
+                continue
+            scan_dirs.append(sub)
+
         updated: list[str] = []
-        for idx, py in enumerate(sorted(target.glob("*.py"))):
-            if py.name == "__init__.py":
-                continue
-            mod_name = f"_test_llm_{py.stem}_{idx}"
-            source = py.read_bytes()
-            module = _types.ModuleType(mod_name)
-            module.__file__ = str(py)
-            try:
-                code_obj = compile(source, str(py), "exec")
-                exec(code_obj, module.__dict__)
-            except Exception:  # noqa: BLE001
-                _sys.modules.pop(mod_name, None)
-                continue
-            _sys.modules[mod_name] = module
-            code_hash = hashlib.sha1(source).hexdigest()
-            for _, obj in _inspect.getmembers(module, _inspect.isclass):
-                if obj is BaseFactor or not issubclass(obj, BaseFactor):
+        global_idx = 0
+        for scan_dir in scan_dirs:
+            for py in sorted(scan_dir.glob("*.py")):
+                if py.name == "__init__.py":
                     continue
-                if obj.__module__ != module.__name__:
+                mod_name = f"_test_scan_{scan_dir.name}_{py.stem}_{global_idx}"
+                global_idx += 1
+                source = py.read_bytes()
+                module = _types.ModuleType(mod_name)
+                module.__file__ = str(py)
+                try:
+                    code_obj = compile(source, str(py), "exec")
+                    exec(code_obj, module.__dict__)
+                except Exception:  # noqa: BLE001
+                    _sys.modules.pop(mod_name, None)
                     continue
-                fid = getattr(obj, "factor_id", None)
-                if not fid:
-                    continue
-                with self._lock:
-                    if self._code_hash.get(fid) == code_hash:
-                        self._classes[fid] = obj
+                _sys.modules[mod_name] = module
+                code_hash = hashlib.sha1(source).hexdigest()
+                for _, obj in _inspect.getmembers(module, _inspect.isclass):
+                    if obj is BaseFactor or not issubclass(obj, BaseFactor):
                         continue
-                    self._classes[fid] = obj
-                    self._code_hash[fid] = code_hash
-                    self._version[fid] = self._version.get(fid, 0) + 1
-                updated.append(fid)
+                    if obj.__module__ != module.__name__:
+                        continue
+                    fid = getattr(obj, "factor_id", None)
+                    if not fid:
+                        continue
+                    with self._lock:
+                        if self._code_hash.get(fid) == code_hash:
+                            self._classes[fid] = obj
+                            continue
+                        self._classes[fid] = obj
+                        self._code_hash[fid] = code_hash
+                        self._version[fid] = self._version.get(fid, 0) + 1
+                    updated.append(fid)
         return updated
 
     monkeypatch.setattr(fr.FactorRegistry, "scan_and_register", _stub_scan)
@@ -548,14 +568,16 @@ def test_delete_factor_removes_file_and_registry(isolated_llm_dir):
     assert "kill_me" not in reg._classes
 
 
-def test_put_and_delete_reject_non_llm_generated(isolated_llm_dir, monkeypatch):
-    """构造一个注册了、但文件不在 llm_generated 下的因子 → PUT / DELETE 都应 403。"""
-    from fastapi.testclient import TestClient
+def test_delete_rejects_non_llm_generated(isolated_llm_dir, monkeypatch):
+    """构造一个注册了、但文件不在 llm_generated 下的因子 → DELETE 仍应 403。
 
+    PUT 对业务因子现已放开,覆盖验证见 test_put_business_factor_succeeds_with_backup。
+    本测试继续保留 DELETE 的 403 边界,防止删除权限意外放开。
+    """
+    from fastapi.testclient import TestClient
     from backend.api.main import app
     from backend.runtime.factor_registry import FactorRegistry
 
-    # 把类注入 registry 但文件放在 llm_generated 外面
     outside_dir = isolated_llm_dir.parent / "outside"
     outside_dir.mkdir()
     outside_file = outside_dir / "external_factor.py"
@@ -570,7 +592,6 @@ def test_put_and_delete_reject_non_llm_generated(isolated_llm_dir, monkeypatch):
     )
     mod = importlib.util.module_from_spec(spec)
     import sys as _sys
-
     _sys.modules["_test_external_factor"] = mod
     spec.loader.exec_module(mod)
     cls = next(
@@ -587,14 +608,157 @@ def test_put_and_delete_reject_non_llm_generated(isolated_llm_dir, monkeypatch):
         reg._version["external_factor"] = 1
 
     with TestClient(app) as c:
-        r_put = c.put(
-            "/api/factors/external_factor/code",
-            json={"code": _CODE_TMPL.format(fid="external_factor")},
-        )
         r_del = c.delete("/api/factors/external_factor")
 
-    assert r_put.status_code == 403
     assert r_del.status_code == 403
-    # 文件 & 注册都没被动过
     assert outside_file.exists()
     assert "external_factor" in reg._classes
+
+
+# ---------------------------- isolated_factors_root fixture ----------------------------
+
+
+@pytest.fixture
+def isolated_factors_root(isolated_llm_dir, monkeypatch):
+    """在 isolated_llm_dir 基础上,把 _FACTORS_ROOT 也 monkeypatch 到 tmp。
+
+    结构:
+      tmp_path/                        ← _FACTORS_ROOT
+      ├── llm_generated/              ← _LLM_DIR (由 isolated_llm_dir 已设置)
+      ├── momentum/                   ← 本 fixture 的调用方按需创建放业务因子
+      └── .backup/                    ← _save_backup 写入
+
+    注意:_stub_scan 仍只扫 llm_generated/,业务因子需要用 _register_business_factor
+    helper（下面）手工注入 registry。
+    """
+    factors_root = isolated_llm_dir.parent
+    monkeypatch.setattr(factors_router, "_FACTORS_ROOT", factors_root.resolve())
+    return factors_root
+
+
+def _register_business_factor(factors_root: Path, category: str, factor_id: str) -> Path:
+    """在 factors_root/<category>/<factor_id>.py 落盘一个 BaseFactor 子类,并手工注册到 registry。
+
+    返回源码文件路径。测试方后续可以 PUT /api/factors/{factor_id}/code 触发覆写。
+    """
+    import hashlib
+    import importlib.util
+    import inspect as _inspect
+    import sys as _sys
+
+    from backend.runtime.factor_registry import FactorRegistry
+
+    target = factors_root / category
+    target.mkdir(exist_ok=True)
+    f = target / f"{factor_id}.py"
+    f.write_text(_CODE_TMPL.format(fid=factor_id).replace('category = "momentum"', f'category = "{category}"'))
+
+    mod_name = f"_test_biz_{category}_{factor_id}"
+    spec = importlib.util.spec_from_file_location(mod_name, f)
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    cls = next(
+        obj
+        for _, obj in _inspect.getmembers(mod, _inspect.isclass)
+        if getattr(obj, "factor_id", None) == factor_id
+    )
+    reg = FactorRegistry()
+    with reg._lock:
+        reg._classes[factor_id] = cls
+        reg._code_hash[factor_id] = hashlib.sha1(
+            _inspect.getsource(cls).encode()
+        ).hexdigest()
+        reg._version[factor_id] = 1
+    return f
+
+
+# ---------------------------- PUT 业务因子（放开 llm_generated 边界后） ----------------------------
+
+
+def test_put_business_factor_succeeds_with_backup(isolated_factors_root):
+    """业务因子（momentum/）现在可通过 PUT 覆写,响应 backup_path 非 null。"""
+    from fastapi.testclient import TestClient
+    from backend.api.main import app
+
+    src = _register_business_factor(isolated_factors_root, "momentum", "biz_momo")
+    new_code = _CODE_TMPL.format(fid="biz_momo").replace('"Foo"', '"Changed"')
+
+    with TestClient(app) as c:
+        r = c.put("/api/factors/biz_momo/code", json={"code": new_code})
+
+    assert r.status_code == 200, r.text
+    body = r.json()["data"]
+    assert body["display_name"] == "Changed"
+    assert body["backup_path"] is not None
+    assert ".backup" in body["backup_path"]
+    # 文件真被覆写
+    assert '"Changed"' in src.read_text()
+
+
+def test_put_business_factor_creates_backup_on_disk(isolated_factors_root):
+    """备份文件真实落在 .backup/<factor_id>.<ts>.py,内容是旧版本。"""
+    from fastapi.testclient import TestClient
+    from backend.api.main import app
+
+    src = _register_business_factor(isolated_factors_root, "reversal", "biz_rev")
+    original = src.read_text()
+    new_code = _CODE_TMPL.format(fid="biz_rev").replace('"Foo"', '"Updated"')
+
+    with TestClient(app) as c:
+        r = c.put("/api/factors/biz_rev/code", json={"code": new_code})
+
+    assert r.status_code == 200
+    backup_dir = isolated_factors_root / ".backup"
+    backups = list(backup_dir.glob("biz_rev.*.py"))
+    assert len(backups) == 1
+    assert backups[0].read_text() == original  # 备份内容是旧版本,不是新版
+
+
+def test_put_llm_factor_also_creates_backup(isolated_factors_root):
+    """备份对所有 PUT 生效,不只业务因子:llm_generated 再次 PUT 也有备份。"""
+    from fastapi.testclient import TestClient
+    from backend.api.main import app
+
+    with TestClient(app) as c:
+        assert _create_via_api(c, "llm_backup_test").status_code == 200
+        new_code = _CODE_TMPL.format(fid="llm_backup_test").replace('"Foo"', '"V2"')
+        r = c.put("/api/factors/llm_backup_test/code", json={"code": new_code})
+
+    assert r.status_code == 200
+    assert r.json()["data"]["backup_path"] is not None
+
+
+def test_put_business_factor_keeps_only_5_backups(isolated_factors_root):
+    """连续 PUT 同一业务因子 6 次,.backup/ 下只剩 5 份。"""
+    import time
+
+    from fastapi.testclient import TestClient
+    from backend.api.main import app
+
+    _register_business_factor(isolated_factors_root, "momentum", "biz_5cap")
+
+    with TestClient(app) as c:
+        for i in range(6):
+            new_code = _CODE_TMPL.format(fid="biz_5cap").replace(
+                '"Foo"', f'"V{i + 1}"'
+            )
+            r = c.put("/api/factors/biz_5cap/code", json={"code": new_code})
+            assert r.status_code == 200
+            time.sleep(1.01)  # 确保时间戳递增
+
+    backup_dir = isolated_factors_root / ".backup"
+    assert len(list(backup_dir.glob("biz_5cap.*.py"))) == 5
+
+
+def test_delete_business_factor_still_403(isolated_factors_root):
+    """删除边界不变:业务因子 DELETE 仍 403。"""
+    from fastapi.testclient import TestClient
+    from backend.api.main import app
+
+    _register_business_factor(isolated_factors_root, "momentum", "biz_del")
+
+    with TestClient(app) as c:
+        r = c.delete("/api/factors/biz_del")
+
+    assert r.status_code == 403
