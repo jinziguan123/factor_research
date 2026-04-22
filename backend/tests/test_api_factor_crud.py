@@ -549,6 +549,10 @@ def test_update_factor_code_rejects_factor_id_rename(isolated_llm_dir):
         r = c.put("/api/factors/stable_id/code", json={"code": renamed})
     assert r.status_code == 400
     assert "不一致" in r.json()["message"]
+    # AST / 一致性校验失败时,不应产生备份（"覆写前一瞬间才备份"的契约）
+    backup_dir = isolated_llm_dir.parent / ".backup"
+    if backup_dir.exists():
+        assert not list(backup_dir.glob("stable_id.*.py"))
 
 
 def test_delete_factor_removes_file_and_registry(isolated_llm_dir):

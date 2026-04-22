@@ -7,16 +7,19 @@
   ``editable: bool``——源码位于 ``backend/factors/llm_generated/`` 下为 True，
   前端据此决定是否展示"编辑源码 / 删除"按钮。
 - ``GET /api/factors/{factor_id}/code``：返回源码文本（所有因子可读）。
-- ``PUT /api/factors/{factor_id}/code``：覆写源码；**只允许 llm_generated 下的因子**，
-  过 AST 白名单 + 类 factor_id 一致性校验，落盘后强制 reload + 重置 worker 进程池。
-- ``DELETE /api/factors/{factor_id}``：删源码文件 + 注册表摘除；同样只允许 llm_generated。
+- ``PUT /api/factors/{factor_id}/code``：覆写源码；允许 ``backend/factors/`` 下所有因子
+  （含业务目录 momentum / reversal / oscillator / ... 以及 llm_generated/）。
+  过 AST 白名单 + 类 factor_id 一致性校验，覆写前自动备份旧文件到 ``.backup/``
+  （每个 factor_id 保留最近 5 份），落盘后强制 reload + 重置 worker 进程池。
+- ``DELETE /api/factors/{factor_id}``：删源码文件 + 注册表摘除；**仍仅允许 llm_generated**。
 - ``POST /api/factors``：从源码创建新因子，落盘到 ``llm_generated/<factor_id>.py``。
   与 ``factor_assistant`` 复用 AST 校验 / 落盘逻辑，区别是源码由用户直接提供（不走 LLM）。
 - ``POST /api/factors/reload``：重扫因子目录 + 重置 worker 进程池。
 
-**安全边界**：写操作（PUT / DELETE / POST）只能落在 ``backend/factors/llm_generated/``
-下；手写的业务目录（momentum / reversal / ...）永远不让前端动，避免误删用户的代码资产。
-路径校验通过 ``Path.resolve().relative_to()`` 完成，不信任任何用户输入的路径片段。
+**安全边界**：PUT 允许 ``backend/factors/`` 下所有 .py 被覆写（业务因子前端会显示红色
+警示，提醒这是手写资产），写前自动备份；DELETE / POST 仍仅限 ``llm_generated/``，
+避免误删 / 误建业务代码资产。路径校验通过 ``Path.resolve().relative_to()`` 完成，
+不信任任何用户输入的路径片段。
 """
 from __future__ import annotations
 
