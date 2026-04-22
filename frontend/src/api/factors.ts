@@ -74,7 +74,7 @@ export function useFactorCode(factorId: Ref<string>, enabled: Ref<boolean>) {
   })
 }
 
-/** PUT /api/factors/{id}/code：覆写源码（仅限 llm_generated/）。 */
+/** PUT /api/factors/{id}/code：覆写源码（允许 backend/factors/ 下所有因子，覆写前自动备份）。 */
 export function useUpdateFactorCode() {
   const qc = useQueryClient()
   return useMutation<FactorMutationResult, any, { factor_id: string; code: string }>({
