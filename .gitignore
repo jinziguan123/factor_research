@@ -33,3 +33,6 @@ backend/.env
 
 # 本地调试脚本
 test.py
+
+# 因子源码前端编辑时 PUT 覆写前的自动备份,保留最近 5 份/因子
+backend/factors/.backup/
