@@ -75,10 +75,14 @@ const { data: factorCode, isFetching: codeLoading } = useFactorCode(
 // 用 watch 而不是 onSuccess：v-model 需要响应式源,watch 简单直接。
 // 注意：Vue Query 默认开 structural sharing,第二次 refetch 返回相同内容时 data 引用不变 →
 // watch 不触发 → 编辑器停在空串;所以 openSource() 也会用当前 cache 立即填充。
+// Editing 态保护:窗口焦点切换 / 保存后 invalidate 都会触发 refetch,不能让后端 code
+// 静默覆盖用户正在编辑的 editCode。只在 ReadOnly 态同步 editCode;originalCode 始终
+// 同步以保持 dirty 基线对齐(用户再次进入 Editing 态时 snapshot 才是新鲜的)。
 watch(factorCode, (v) => {
-  if (v && sourceOpen.value) {
+  if (!v || !sourceOpen.value) return
+  originalCode.value = v.code
+  if (!editing.value) {
     editCode.value = v.code
-    originalCode.value = v.code
   }
 })
 
@@ -112,6 +116,33 @@ function cancelEditing() {
     onPositiveClick: () => {
       editCode.value = originalCode.value  // 回滚
       editing.value = false
+    },
+  })
+}
+
+// 统一关闭路径:v-model:show 会让右上角 × 绕过 dirty 检测,这里改用
+// :show + @update:show 手动拦截。Editing 态 dirty 时弹二次确认,否则直接关。
+// 文案与 cancelEditing 区分:这里是"直接关闭会丢失"(意图关弹窗),cancelEditing 是
+// "切回查看态会丢失"(意图切 ReadOnly、弹窗仍开)。
+function handleSourceOpenChange(next: boolean) {
+  if (next) {
+    sourceOpen.value = true
+    return
+  }
+  const dirty = editing.value && editCode.value !== originalCode.value
+  if (!dirty) {
+    sourceOpen.value = false
+    return
+  }
+  dialog.warning({
+    title: '放弃未保存的修改？',
+    content: '编辑器里有未保存的改动,直接关闭会丢失。',
+    positiveText: '放弃修改并关闭',
+    negativeText: '继续编辑',
+    onPositiveClick: () => {
+      editCode.value = originalCode.value
+      editing.value = false
+      sourceOpen.value = false
     },
   })
 }
@@ -238,7 +269,8 @@ function confirmDelete() {
 
     <!-- 源码查看/编辑弹窗 -->
     <n-modal
-      v-model:show="sourceOpen"
+      :show="sourceOpen"
+      @update:show="handleSourceOpenChange"
       preset="card"
       :title="editing ? `编辑源码:${factor?.display_name ?? factorId}` : `查看源码:${factor?.display_name ?? factorId}`"
       style="width: 960px; max-width: 95vw"
@@ -290,7 +322,7 @@ function confirmDelete() {
         <n-space justify="end">
           <!-- ReadOnly 态:[关闭] [编辑] -->
           <template v-if="!editing">
-            <n-button @click="sourceOpen = false">关闭</n-button>
+            <n-button @click="handleSourceOpenChange(false)">关闭</n-button>
             <n-button type="primary" :disabled="codeLoading" @click="enterEditing">
               编辑
             </n-button>
