@@ -17,6 +17,9 @@ const menuOptions = [
   { label: '多因子合成', key: '/compositions' },
   { label: 'K 线查看', key: '/klines' },
   { label: '数据维护', key: '/admin' },
+  { label: '数据健康度', key: '/data/health' },
+  { label: '指数成分', key: '/data/indices' },
+  { label: '财报探查', key: '/data/fundamentals/profit' },
   { label: '因子手册', key: '/docs/factor-guide' },
 ]
 

@@ -4,10 +4,10 @@
  * 三节：术语速查 / 理想因子指标红线表 / 常见失败模式。
  * 纯静态页面，不请求后端。数字来源是 A 股日频研究的常见经验阈值。
  */
-import { h } from 'vue'
+import { h, ref } from 'vue'
 import {
   NPageHeader, NCard, NSpace, NTag, NAlert, NDivider,
-  NDataTable,
+  NDataTable, NTabs, NTabPane,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import IcDecayInterpretationSection from '@/components/docs/IcDecayInterpretationSection.vue'
@@ -174,6 +174,9 @@ const pitfallsCols: DataTableColumns<PitfallRow> = [
   { title: '最常见根因', key: 'cause' },
   { title: '对策', key: 'fix', width: 340 },
 ]
+
+const activeTab = ref<'glossary' | 'metrics' | 'pitfalls' | 'charts'>('glossary')
+const chartsSubTab = ref<'ic-decay' | 'group-returns'>('ic-decay')
 </script>
 
 <template>
@@ -189,83 +192,77 @@ const pitfallsCols: DataTableColumns<PitfallRow> = [
       到这里查"理想值 / 红线"一栏即可。所有数字是 A 股日频研究的常见经验阈值，周频 / 月频请相应放宽。
     </n-alert>
 
-    <n-space vertical :size="20">
-      <!-- 1. 术语速查 -->
-      <n-card title="一、术语速查" size="small">
-        <n-data-table
-          :columns="glossaryCols"
-          :data="glossary"
-          :bordered="false"
-          :single-line="false"
-          size="small"
-        />
-      </n-card>
+    <n-card size="small" :bordered="false" style="margin-bottom: 16px">
+      <n-tabs v-model:value="activeTab" type="line" animated size="large">
+        <n-tab-pane name="glossary" tab="一、术语速查">
+          <n-data-table
+            :columns="glossaryCols"
+            :data="glossary"
+            :bordered="false"
+            :single-line="false"
+            size="small"
+          />
+        </n-tab-pane>
 
-      <!-- 2. 理想指标红线表 -->
-      <n-card title="二、理想因子评估指标 · 理想值 vs 红线" size="small">
-        <template #header-extra>
-          <n-space :size="4">
-            <n-tag size="small" type="success">✅ 理想</n-tag>
-            <n-tag size="small" type="error">🚫 红线</n-tag>
+        <n-tab-pane name="metrics" tab="二、指标红线表">
+          <n-space vertical :size="12">
+            <n-space :size="4">
+              <n-tag size="small" type="success">✅ 理想</n-tag>
+              <n-tag size="small" type="error">🚫 红线（触即 pass）</n-tag>
+            </n-space>
+            <n-data-table
+              :columns="metricsCols"
+              :data="metrics"
+              :bordered="false"
+              :single-line="false"
+              size="small"
+            />
+            <n-divider style="margin: 4px 0" />
+            <div>
+              <n-tag type="warning" size="small" style="margin-right: 8px">及格线</n-tag>
+              <span>IC 0.02 · ICIR 0.3 · 多空 Sharpe 0.5 · 换手 &lt; 50% · 半衰期 3 日 · 年度胜率 60%</span>
+            </div>
+            <div>
+              <n-tag type="success" size="small" style="margin-right: 8px">优秀线</n-tag>
+              <span>IC 0.04+ · ICIR 0.8+ · 多空 Sharpe 1.2+ · 换手 &lt; 30% · 半衰期 5+ 日 · 年度胜率 75%</span>
+            </div>
           </n-space>
-        </template>
-        <n-data-table
-          :columns="metricsCols"
-          :data="metrics"
-          :bordered="false"
-          :single-line="false"
-          size="small"
-        />
-        <n-divider />
-        <n-space vertical :size="8">
-          <div>
-            <n-tag type="warning" size="small" style="margin-right: 8px">及格线</n-tag>
-            <span>IC 0.02 · ICIR 0.3 · 多空 Sharpe 0.5 · 换手 &lt; 50% · 半衰期 3 日 · 年度胜率 60%</span>
-          </div>
-          <div>
-            <n-tag type="success" size="small" style="margin-right: 8px">优秀线</n-tag>
-            <span>IC 0.04+ · ICIR 0.8+ · 多空 Sharpe 1.2+ · 换手 &lt; 30% · 半衰期 5+ 日 · 年度胜率 75%</span>
-          </div>
-        </n-space>
-      </n-card>
+        </n-tab-pane>
 
-      <!-- 3. 常见失败模式 -->
-      <n-card title="三、常见失败模式（症状 → 根因 → 对策）" size="small">
-        <n-data-table
-          :columns="pitfallsCols"
-          :data="pitfalls"
-          :bordered="false"
-          :single-line="false"
-          size="small"
-        />
-      </n-card>
+        <n-tab-pane name="pitfalls" tab="三、失败模式">
+          <n-data-table
+            :columns="pitfallsCols"
+            :data="pitfalls"
+            :bordered="false"
+            :single-line="false"
+            size="small"
+          />
+        </n-tab-pane>
 
-      <!-- 4. 图表解读（交互 Mock） -->
-      <n-card title="四、图表解读（交互 Mock）" size="small">
-        <n-space vertical :size="12">
-          <n-alert type="info" :show-icon="false">
-            以下图表为教学用 mock 数据，仅用于说明“什么样算好、什么样算坏”，不代表真实评估结果。
-          </n-alert>
-          <ic-decay-interpretation-section />
-        </n-space>
-      </n-card>
+        <n-tab-pane name="charts" tab="四、图表解读（交互 Mock）">
+          <n-space vertical :size="12">
+            <n-alert type="info" :show-icon="false">
+              以下图表均为教学用 mock 数据，仅用于说明“什么样算好、什么样算坏”，不代表任何真实评估结果。
+            </n-alert>
 
-      <!-- 5. 图表解读（交互 Mock）· 分组累计净值 -->
-      <n-card title="五、图表解读（交互 Mock）· 分组累计净值" size="small">
-        <n-space vertical :size="12">
-          <n-alert type="info" :show-icon="false">
-            以下图表为教学用 mock 数据，仅用于说明“分组净值什么样算分层清晰”，不代表真实评估结果。
-          </n-alert>
-          <group-returns-interpretation-section />
-        </n-space>
-      </n-card>
+            <n-tabs v-model:value="chartsSubTab" type="segment" size="medium">
+              <n-tab-pane name="ic-decay" tab="4.1 IC 衰减曲线">
+                <ic-decay-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="group-returns" tab="4.2 分组累计净值">
+                <group-returns-interpretation-section />
+              </n-tab-pane>
+            </n-tabs>
+          </n-space>
+        </n-tab-pane>
+      </n-tabs>
+    </n-card>
 
-      <n-alert type="warning" :show-icon="false">
-        <b>使用顺序建议：</b>
-        新写一个因子 → 跑一次评估 → 先看<b>分组单调性</b>和<b>Pearson/Rank IC 是否同号</b>（定方向和信号质量）→
-        再看 <b>ICIR / 年度胜率</b>（判稳定性）→ 再看 <b>多空 Sharpe + 成本敏感性</b>（判可交易性）→
-        最后上 <b>OOS 切分 + 参数敏感性 + 中性化</b>（判是否为真 alpha）。
-      </n-alert>
-    </n-space>
+    <n-alert type="warning" :show-icon="false">
+      <b>使用顺序建议：</b>
+      新写一个因子 → 跑一次评估 → 先看<b>分组单调性</b>和<b>Pearson/Rank IC 是否同号</b>（定方向和信号质量）→
+      再看 <b>ICIR / 年度胜率</b>（判稳定性）→ 再看 <b>多空 Sharpe + 成本敏感性</b>（判可交易性）→
+      最后上 <b>OOS 切分 + 参数敏感性 + 中性化</b>（判是否为真 alpha）。
+    </n-alert>
   </div>
 </template>

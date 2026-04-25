@@ -1,5 +1,5 @@
 docker-compose-test/
-data/
+/data/
 read_for_ai/
 
 # Node / 前端

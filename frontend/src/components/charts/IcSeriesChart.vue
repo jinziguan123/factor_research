@@ -89,7 +89,7 @@ const option = computed(() => ({
   // grid.top 从 60 → 140：评估详情页 3 列 grid 下卡片 ~260px 宽，4 个 legend 项
   // （每日IC / 累计IC / 5日MA / 20日MA）会被压成 4 行（每行约 22px），需要额外
   // ~80px 空间才不会和 yAxis 刻度重叠。
-  grid: { left: 50, right: 50, bottom: 60, top: 140 },
+  grid: { left: 50, right: 50, bottom: 60, top: 60 },
   xAxis: { type: 'category', data: props.series.dates, axisLabel: { rotate: 30, fontSize: 10 } },
   yAxis: { type: 'value' },
   dataZoom: [
