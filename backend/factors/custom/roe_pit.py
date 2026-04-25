@@ -9,6 +9,9 @@
 - 财报数据稀疏（季频），ffill 在 DataService.load_fundamental_panel 内统一做。
 - 无需 warmup：``announcement_date <= start_date`` 的最近一条已被 panel 携带
   （load_fundamental_panel 内部用 union(cal_index) 保证左 seed 不丢）。
+- 返回的 ``columns`` 可能是 ``ctx.symbols`` 的真子集——若某只 symbol 在窗口
+  ``end_date`` 之前从未披露过 profit（或字段全为 NULL），它会从 panel 里彻底
+  缺席而非补 NaN 列。下游 IC 计算会自动按 columns 取交集，此处不主动 reindex。
 """
 from __future__ import annotations
 
@@ -40,4 +43,7 @@ class RoePit(BaseFactor):
         )
         if panel.empty:
             return pd.DataFrame()
+        # 防御切片：DataService.load_fundamental_panel 内部已 reindex 到
+        # cal_index（[start, end] 内的交易日），此处切片在生产路径下是 no-op；
+        # 若 ctx.start_date 是非交易日 timestamp，这步把对齐再确认一遍。
         return panel.loc[ctx.start_date :]
