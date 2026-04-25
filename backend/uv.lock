@@ -55,6 +55,18 @@ wheels = [
 ]
 
 [[package]]
+name = "baostock"
+version = "0.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pandas" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/5e/471c14eebb204ed89de0fe11740d6f4513d44454fe5e35bc13b29ef3e510/baostock-0.9.1.tar.gz", hash = "sha256:5ec3a44cbec9471872b0a4ae02c39aea29db688bb740b769167393bc6e244a39", size = 25560 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/eb/fadb92e38fbb2fefa3d9d3c14d016cf3a5920e34666aeb9950bc5311c856/baostock-0.9.1-py3-none-any.whl", hash = "sha256:a30749f095fd58ecd7ba3799dad605d355ad8e6d19310bc437039e1e526f15fe", size = 47918 },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
@@ -624,6 +636,7 @@ name = "factor-research-backend"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "baostock" },
     { name = "clickhouse-driver" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -646,6 +659,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "baostock", specifier = ">=0.8.90", index = "https://pypi.org/simple" },
     { name = "clickhouse-driver", specifier = "==0.2.9" },
     { name = "cryptography", specifier = ">=46.0.7" },
     { name = "fastapi", specifier = "==0.115.0" },

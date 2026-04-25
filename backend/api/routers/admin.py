@@ -48,6 +48,63 @@ class QfqImportIn(BaseModel):
     chunk_size: int = 500
 
 
+class BaostockInstrumentsSyncIn(BaseModel):
+    """``POST /api/admin/instruments:sync_baostock`` 请求体。
+
+    无参数版本：直接从 Baostock 拉全市场（含退市）标的列表到 ``fr_instrument``。
+    本接口幂等（upsert），重复调用是安全的。
+    """
+
+
+class BaostockCalendarSyncIn(BaseModel):
+    """``POST /api/admin/calendar:sync_baostock`` 请求体。
+
+    - start / end：日历区间，闭区间；不传默认 2015-01-01 到当日。
+    - Phase 1 只支持 CN 市场，市场参数暂不暴露。
+    """
+
+    start: date | None = None
+    end: date | None = None
+
+
+class BaostockIndustrySyncIn(BaseModel):
+    """``POST /api/admin/industry:sync_baostock`` 请求体。
+
+    无参数。Baostock 行业接口只返回当前快照（updateDate 是接口刷新日，不是行业归
+    属变更日），故本接口仅用于刷新 ``fr_industry_current``，**没有历史回溯能力**；
+    历史归属下个 phase 接 Akshare 申万解决。
+    """
+
+
+class BaostockIndexConstituentSyncIn(BaseModel):
+    """``POST /api/admin/index_constituent:sync_baostock`` 请求体。
+
+    - ``start`` / ``end``：探测窗口；不传默认 2015-01-01..今天；
+    - ``index_codes``：可选 subset，如 ``["000300.SH"]``；不传默认 HS300+ZZ500+ZZ1000。
+    """
+
+    start: date | None = None
+    end: date | None = None
+    index_codes: list[str] | None = None
+
+
+class BaostockProfitSyncIn(BaseModel):
+    """``POST /api/admin/profit:sync_baostock`` 请求体。
+
+    - ``universe``：``"hs300_history"`` / ``"all_in_db"`` / 显式 symbol 列表；默认 hs300_history。
+    - ``start_year`` / ``start_quarter``：起始季度，默认 2018Q1；
+    - ``end_date``：探测窗口右端，缺省今天。
+
+    任务为长跑（HS300 历史 ≈ 17000 次 baostock 调用，~1-3 小时），通过
+    BackgroundTasks 提交，进度看 server log。
+    """
+
+    universe: str | list[str] = "hs300_history"
+    start_year: int = 2018
+    start_quarter: int = 1
+    end_date: date | None = None
+
+
 class Bar1mImportIn(BaseModel):
     """``POST /api/admin/bar_1m:import`` 请求体。
 
@@ -83,6 +140,114 @@ def _run_qfq_import_safely(file_path: str | None, chunk_size: int) -> None:
     except Exception:  # noqa: BLE001
         log.exception(
             "admin qfq import failed: file=%s chunk=%d", file_path, chunk_size
+        )
+
+
+def _run_sync_baostock_instruments_safely() -> None:
+    """BackgroundTasks 回调：Baostock → fr_instrument 全量同步。
+
+    所有异常都吞在日志里；失败时前端感知只能通过重试 + 看 server log，暂无 job 表
+    承载进度（后续 Phase 2 可考虑复用 stock_bar_import_job 或新建 fr_admin_jobs）。
+    """
+    try:
+        from backend.adapters.baostock.client import baostock_session
+        from backend.adapters.baostock.instruments import sync_instruments
+
+        with baostock_session():
+            result = sync_instruments()
+        log.info("sync_baostock_instruments ok: %s", result)
+    except Exception:  # noqa: BLE001
+        log.exception("sync_baostock_instruments failed")
+
+
+def _run_sync_baostock_calendar_safely(
+    start: date | None, end: date | None
+) -> None:
+    """BackgroundTasks 回调：Baostock → fr_trade_calendar（CN 市场）。"""
+    try:
+        from backend.adapters.baostock.calendar import sync_calendar
+        from backend.adapters.baostock.client import baostock_session
+
+        # 默认窗口：Phase 1 敲定的 2015-01-01 到当日。
+        s = start or date(2015, 1, 1)
+        e = end or date.today()
+        if s > e:
+            log.error("sync_baostock_calendar skipped: start %s > end %s", s, e)
+            return
+        with baostock_session():
+            result = sync_calendar(s, e, market="CN")
+        log.info("sync_baostock_calendar ok: %s..%s %s", s, e, result)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "sync_baostock_calendar failed: start=%s end=%s", start, end
+        )
+
+
+def _run_sync_baostock_industry_safely() -> None:
+    """BackgroundTasks 回调：Baostock → fr_industry_current。"""
+    try:
+        from backend.adapters.baostock.client import baostock_session
+        from backend.adapters.baostock.industry import sync_industry
+
+        with baostock_session():
+            result = sync_industry()
+        log.info("sync_baostock_industry ok: %s", result)
+    except Exception:  # noqa: BLE001
+        log.exception("sync_baostock_industry failed")
+
+
+def _run_sync_baostock_index_constituent_safely(
+    start: date | None,
+    end: date | None,
+    index_codes: list[str] | None,
+) -> None:
+    """BackgroundTasks 回调：Baostock → fr_index_constituent（按 updateDate 翻篇）。"""
+    try:
+        from backend.adapters.baostock.client import baostock_session
+        from backend.adapters.baostock.index_constituent import (
+            sync_index_constituent,
+        )
+
+        with baostock_session():
+            result = sync_index_constituent(
+                index_codes=index_codes, start=start, end=end
+            )
+        log.info("sync_baostock_index_constituent ok: %s", result)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "sync_baostock_index_constituent failed: start=%s end=%s codes=%s",
+            start,
+            end,
+            index_codes,
+        )
+
+
+def _run_sync_baostock_profit_safely(
+    universe: str | list[str],
+    start_year: int,
+    start_quarter: int,
+    end_date: date | None,
+) -> None:
+    """BackgroundTasks 回调：Baostock query_profit_data → fr_fundamental_profit。"""
+    try:
+        from backend.adapters.baostock.client import baostock_session
+        from backend.adapters.baostock.profit import sync_profit
+
+        with baostock_session():
+            result = sync_profit(
+                universe=universe,
+                start_year=start_year,
+                start_quarter=start_quarter,
+                end=end_date,
+            )
+        log.info("sync_baostock_profit ok: %s", result)
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "sync_baostock_profit failed: universe=%s window=%dQ%d..%s",
+            universe,
+            start_year,
+            start_quarter,
+            end_date,
         )
 
 
@@ -171,6 +336,100 @@ def trigger_bar_1m_import(body: Bar1mImportIn, bt: BackgroundTasks) -> dict:
             "symbol": body.symbol,
             "base_dir": body.base_dir,
             "rewind_days": body.rewind_days,
+        }
+    )
+
+
+@router.post("/instruments:sync_baostock")
+def trigger_sync_baostock_instruments(
+    body: BaostockInstrumentsSyncIn, bt: BackgroundTasks
+) -> dict:
+    """从 Baostock 全量同步标的（含退市）到 ``fr_instrument``。
+
+    幂等；重复调用会 upsert。无 job 表承载进度，观察日志即可；Phase 2 再补 job 表。
+    """
+    _ = body  # 当前无参数；保留 body 以便未来扩展而不破坏前端调用
+    bt.add_task(_run_sync_baostock_instruments_safely)
+    return ok({"message": "baostock instruments sync submitted; see server logs"})
+
+
+@router.post("/calendar:sync_baostock")
+def trigger_sync_baostock_calendar(
+    body: BaostockCalendarSyncIn, bt: BackgroundTasks
+) -> dict:
+    """从 Baostock 同步 A 股交易日历到 ``fr_trade_calendar``。
+
+    默认窗口 2015-01-01 到当日；可通过 body 覆盖。
+    """
+    bt.add_task(_run_sync_baostock_calendar_safely, body.start, body.end)
+    return ok(
+        {
+            "message": "baostock calendar sync submitted; see server logs",
+            "start": body.start.isoformat() if body.start else None,
+            "end": body.end.isoformat() if body.end else None,
+        }
+    )
+
+
+@router.post("/industry:sync_baostock")
+def trigger_sync_baostock_industry(
+    body: BaostockIndustrySyncIn, bt: BackgroundTasks
+) -> dict:
+    """从 Baostock 同步当前行业归属到 ``fr_industry_current``。"""
+    _ = body
+    bt.add_task(_run_sync_baostock_industry_safely)
+    return ok({"message": "baostock industry sync submitted; see server logs"})
+
+
+@router.post("/index_constituent:sync_baostock")
+def trigger_sync_baostock_index_constituent(
+    body: BaostockIndexConstituentSyncIn, bt: BackgroundTasks
+) -> dict:
+    """按 updateDate 翻篇同步指数成分历史到 ``fr_index_constituent``。"""
+    if body.start and body.end and body.start > body.end:
+        raise HTTPException(status_code=400, detail="start must be <= end")
+    bt.add_task(
+        _run_sync_baostock_index_constituent_safely,
+        body.start,
+        body.end,
+        body.index_codes,
+    )
+    return ok(
+        {
+            "message": "baostock index_constituent sync submitted; see server logs",
+            "start": body.start.isoformat() if body.start else None,
+            "end": body.end.isoformat() if body.end else None,
+            "index_codes": body.index_codes,
+        }
+    )
+
+
+@router.post("/profit:sync_baostock")
+def trigger_sync_baostock_profit(
+    body: BaostockProfitSyncIn, bt: BackgroundTasks
+) -> dict:
+    """从 Baostock query_profit_data 同步财报数据到 ``fr_fundamental_profit``。
+
+    长跑任务（HS300 历史 ~1-3 小时）；BackgroundTasks 提交后立即返回，进度看日志。
+    """
+    if body.start_quarter < 1 or body.start_quarter > 4:
+        raise HTTPException(
+            status_code=400, detail="start_quarter must be in [1,4]"
+        )
+    bt.add_task(
+        _run_sync_baostock_profit_safely,
+        body.universe,
+        body.start_year,
+        body.start_quarter,
+        body.end_date,
+    )
+    return ok(
+        {
+            "message": "baostock profit sync submitted; long-running, see server logs",
+            "universe": body.universe,
+            "start_year": body.start_year,
+            "start_quarter": body.start_quarter,
+            "end_date": body.end_date.isoformat() if body.end_date else None,
         }
     )
 
