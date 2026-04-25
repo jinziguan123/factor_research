@@ -196,8 +196,9 @@ class DataService:
     ) -> pd.DataFrame:
         """PIT 财报值按 announcement_date ffill 到日频交易日，返回 (date × symbol) 宽表。
 
-        语义：``announcement_date`` 当天起、到下个 announcement 之前，因子值保持不变。
-        非交易日不进 index；披露之前的交易日为 NaN。
+        语义（T+0 口径）：``announcement_date`` 当天即视为可用 —— 当日因子值就是该期财报，
+        与基于当日 close 的量价因子的信号粒度对齐。后续若需保守，可在因子出口加 ``shift(1)``。
+        到下一次 announcement 之前因子值保持不变；非交易日不进 index；披露之前的交易日为 NaN。
 
         Args:
             symbols: 标准 symbol 列表（如 ``["000001.SZ"]``）。
@@ -258,6 +259,8 @@ class DataService:
             )
             .sort_index()
         )
+        # 用 union 防止披露日早于窗口起点（左 seed）的财报值被丢掉：
+        # reindex(cal_index) 单独做的话，所有窗口起点之前已披露的值会变 NaN。
         full_idx = wide.index.union(cal_index).sort_values()
         out = wide.reindex(full_idx).ffill().reindex(cal_index)
         out.columns.name = None

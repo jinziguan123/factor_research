@@ -94,3 +94,53 @@ def test_load_fundamental_panel_empty_when_no_disclosures(monkeypatch):
         symbols=["000001.SZ"], start=dt.date(2026, 1, 5), end=dt.date(2026, 1, 5),
     )
     assert panel.empty
+
+
+def test_load_fundamental_panel_rejects_non_whitelisted_field():
+    """非白名单字段必须直接抛 ValueError，不进 SQL。"""
+    with pytest.raises(ValueError, match="白名单"):
+        DataService().load_fundamental_panel(
+            symbols=["000001.SZ"],
+            start=dt.date(2026, 1, 5),
+            end=dt.date(2026, 1, 5),
+            field="report_date",
+        )
+
+
+def test_load_fundamental_panel_rejects_non_profit_table():
+    """目前只支持 fr_fundamental_profit；其它表必须抛 NotImplementedError。"""
+    with pytest.raises(NotImplementedError):
+        DataService().load_fundamental_panel(
+            symbols=["000001.SZ"],
+            start=dt.date(2026, 1, 5),
+            end=dt.date(2026, 1, 5),
+            table="fr_fundamental_balance",
+        )
+
+
+def test_load_fundamental_panel_left_seed_propagates_into_window(monkeypatch):
+    """披露日早于窗口起点（左 seed）的财报值必须 ffill 进窗口第一天。
+
+    没有这条断言，把 union(cal_index) 重构成只 reindex(cal_index) 时测试还会绿，
+    但生产里所有"窗口起点前已披露"的股票第一天会变 NaN，影响所有 PIT 因子的评估。
+    """
+    cal_rows = [{"trade_date": dt.date(2026, 1, d)} for d in (8, 9, 12)]
+    profit_rows = [
+        # 披露日 1-06 早于窗口起点 1-08
+        {"symbol": "000001.SZ", "announcement_date": dt.date(2026, 1, 6), "v": 0.1},
+    ]
+    monkeypatch.setattr(
+        "backend.storage.data_service.mysql_conn",
+        lambda: _fake_mysql_conn([cal_rows, profit_rows]),
+    )
+
+    panel = DataService().load_fundamental_panel(
+        symbols=["000001.SZ"],
+        start=dt.date(2026, 1, 8),
+        end=dt.date(2026, 1, 12),
+        field="roe_avg",
+    )
+
+    # 窗口第一天就该拿到左 seed 的值，不是 NaN
+    assert panel["000001.SZ"].loc["2026-01-08"] == pytest.approx(0.1)
+    assert panel["000001.SZ"].loc["2026-01-12"] == pytest.approx(0.1)
