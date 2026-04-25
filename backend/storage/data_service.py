@@ -50,6 +50,12 @@ _DAILY_FIELDS: tuple[str, ...] = (
 # qfq 因子需要作用的价格列（volume/amount_k 不受因子影响）。
 _PRICE_COLS: tuple[str, ...] = ("open", "high", "low", "close")
 
+# 财报 profit 表里允许暴露给因子的数值字段；防 SQL 注入兜底
+_FUND_FIELDS_PROFIT: frozenset[str] = frozenset({
+    "roe_avg", "np_margin", "gp_margin",
+    "net_profit", "eps_ttm", "mb_revenue",
+})
+
 
 class DataService:
     """因子研究平台对外统一的行情 / 股票池访问入口。"""
@@ -179,6 +185,83 @@ class DataService:
         ).sort_index()
         panel.columns.name = None
         return panel
+
+    def load_fundamental_panel(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+        field: str = "roe_avg",
+        table: str = "fr_fundamental_profit",
+    ) -> pd.DataFrame:
+        """PIT 财报值按 announcement_date ffill 到日频交易日，返回 (date × symbol) 宽表。
+
+        语义：``announcement_date`` 当天起、到下个 announcement 之前，因子值保持不变。
+        非交易日不进 index；披露之前的交易日为 NaN。
+
+        Args:
+            symbols: 标准 symbol 列表（如 ``["000001.SZ"]``）。
+            start / end: 评估窗口（闭区间）。
+            field: 要拉的财报字段，必须是 ``_FUND_FIELDS_PROFIT`` 白名单内之一。
+            table: 当前只支持 ``fr_fundamental_profit``；预留扩展位（balance / growth）。
+
+        Returns:
+            ``index=DatetimeIndex(交易日, 升序)``, ``columns=symbol``, 值为 float。
+            没有任何披露时返回空 DataFrame。
+        """
+        if table != "fr_fundamental_profit":
+            raise NotImplementedError(
+                f"load_fundamental_panel: 当前仅支持 fr_fundamental_profit，收到 {table!r}"
+            )
+        if field not in _FUND_FIELDS_PROFIT:
+            raise ValueError(
+                f"field {field!r} 不在白名单 {sorted(_FUND_FIELDS_PROFIT)} 内"
+            )
+        if not symbols:
+            return pd.DataFrame()
+
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT trade_date FROM fr_trade_calendar "
+                    "WHERE trade_date BETWEEN %s AND %s ORDER BY trade_date",
+                    (start, end),
+                )
+                cal_rows = cur.fetchall()
+                if not cal_rows:
+                    return pd.DataFrame()
+                cal_index = pd.DatetimeIndex(
+                    [pd.Timestamp(r["trade_date"]) for r in cal_rows]
+                )
+
+                placeholders = ",".join(["%s"] * len(symbols))
+                cur.execute(
+                    f"SELECT symbol, announcement_date, {field} AS v "
+                    f"FROM fr_fundamental_profit "
+                    f"WHERE symbol IN ({placeholders}) "
+                    f"  AND announcement_date <= %s "
+                    f"  AND {field} IS NOT NULL "
+                    f"ORDER BY symbol, announcement_date",
+                    (*symbols, end),
+                )
+                profit_rows = cur.fetchall()
+
+        if not profit_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(profit_rows)
+        df["announcement_date"] = pd.to_datetime(df["announcement_date"])
+        df["v"] = df["v"].astype("float64")
+        wide = (
+            df.pivot_table(
+                index="announcement_date", columns="symbol", values="v", aggfunc="last"
+            )
+            .sort_index()
+        )
+        full_idx = wide.index.union(cal_index).sort_values()
+        out = wide.reindex(full_idx).ffill().reindex(cal_index)
+        out.columns.name = None
+        return out
 
     def save_factor_values(
         self,
