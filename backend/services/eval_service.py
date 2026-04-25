@@ -142,6 +142,93 @@ def _df_to_obj(df: pd.DataFrame) -> dict:
     return obj
 
 
+def _build_alphalens_extras(
+    F: pd.DataFrame,
+    close: pd.DataFrame,
+    *,
+    fwd_periods: list[int],
+    n_groups: int,
+) -> dict:
+    """调用 Alphalens 计算增量指标，返回 dict 供 payload["alphalens"] ��用。
+
+    三项增量：rank_autocorrelation / group_cumulative_returns / alpha_beta。
+    任何一项失败只跳过该项；整体失败返回空 dict。前端按 key 存在与否决定渲染。
+    """
+    try:
+        import alphalens
+    except ImportError:
+        log.debug("alphalens 未安装，跳过增强指标")
+        return {}
+
+    if F.empty or close.empty:
+        return {}
+
+    import warnings
+
+    try:
+        factor_long = F.stack()
+        factor_long.index.names = ["date", "asset"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            factor_data = alphalens.utils.get_clean_factor_and_forward_returns(
+                factor_long, close,
+                periods=tuple(fwd_periods),
+                quantiles=n_groups,
+                max_loss=1.0,
+            )
+    except Exception:
+        log.warning("alphalens get_clean_factor 失败，跳过增强指标", exc_info=True)
+        return {}
+
+    base_period_col = factor_data.columns[0]
+    extras: dict = {}
+
+    # A. 因子排名自相关（自行实现，规避 Alphalens 的 asfreq(None) 兼容问题）
+    try:
+        ranks_wide = (
+            factor_data.groupby(level="date")["factor"]
+            .rank()
+            .reset_index()
+            .pivot(index="date", columns="asset", values="factor")
+        )
+        autocorr = ranks_wide.corrwith(ranks_wide.shift(1), axis=1).dropna()
+        extras["rank_autocorrelation"] = _series_to_obj(autocorr)
+    except Exception:
+        log.warning("alphalens rank_autocorrelation 失败", exc_info=True)
+
+    # B. 分组累积净值（去均值口径，和现有原始口径互补）
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mr, _ = alphalens.performance.mean_return_by_quantile(
+                factor_data, by_date=True, demeaned=True,
+            )
+        daily = mr[base_period_col].unstack(level="date").T.sort_index()
+        daily.columns = range(len(daily.columns))
+        cum = (1 + daily).cumprod()
+        extras["group_cumulative_returns"] = _df_to_obj(cum)
+    except Exception:
+        log.warning("alphalens group_cumulative_returns 失败", exc_info=True)
+
+    # C. Factor Alpha/Beta（基准 = 截面等权均值收益）
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ab = alphalens.performance.factor_alpha_beta(factor_data)
+        ann_alpha = float(ab.loc["Ann. alpha", base_period_col])
+        beta = float(ab.loc["beta", base_period_col])
+        daily_alpha = (1 + ann_alpha) ** (1 / 252) - 1
+        extras["alpha_beta"] = {
+            "alpha": _nan_to_none(daily_alpha),
+            "beta": _nan_to_none(beta),
+            "annualized_alpha": _nan_to_none(ann_alpha),
+        }
+    except Exception:
+        log.warning("alphalens alpha_beta 失败", exc_info=True)
+
+    return extras
+
+
 def _build_health(
     *,
     factor_panel: pd.DataFrame,
@@ -382,6 +469,12 @@ def evaluate_factor_panel(
         payload["ic_summary_test"] = _nan_dict(ic_sum_test)
         payload["rank_ic_summary_train"] = _nan_dict(rank_ic_sum_train)
         payload["rank_ic_summary_test"] = _nan_dict(rank_ic_sum_test)
+
+    al_extras = _build_alphalens_extras(
+        F, close, fwd_periods=fwd_periods, n_groups=n_groups,
+    )
+    if al_extras:
+        payload["alphalens"] = al_extras
 
     structured = {
         "ic_mean": _nan_to_none(ic_sum["ic_mean"]),

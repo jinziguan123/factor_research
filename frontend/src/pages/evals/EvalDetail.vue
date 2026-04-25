@@ -20,6 +20,7 @@ import GroupReturnsChart from '@/components/charts/GroupReturnsChart.vue'
 import ValueHistogram from '@/components/charts/ValueHistogram.vue'
 import EquityCurveChart from '@/components/charts/EquityCurveChart.vue'
 import IcDecayChart from '@/components/charts/IcDecayChart.vue'
+import RankAutocorrChart from '@/components/charts/RankAutocorrChart.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -306,6 +307,52 @@ const rankIcMeanDiverged = computed(() =>
           style="margin-bottom: 24px"
         >
           <ic-decay-chart :ic="payload.ic" :rank-ic="payload.rank_ic" />
+        </n-card>
+
+        <!-- Alphalens 增强视角：排名自相关 / 分组累积净值(去均值) / Alpha-Beta -->
+        <n-card
+          v-if="payload.alphalens"
+          title="Alphalens 增强视角"
+          size="small"
+          style="margin-bottom: 24px"
+        >
+          <n-grid :cols="3" :x-gap="16" :y-gap="16">
+            <n-grid-item>
+              <chart-card title="因子排名自相关">
+                <rank-autocorr-chart
+                  v-if="payload.alphalens.rank_autocorrelation"
+                  :series="payload.alphalens.rank_autocorrelation"
+                />
+                <n-empty v-else description="无数据" />
+              </chart-card>
+            </n-grid-item>
+
+            <n-grid-item>
+              <chart-card title="分组累积净值（去均值）">
+                <group-returns-chart
+                  v-if="payload.alphalens.group_cumulative_returns"
+                  :data="payload.alphalens.group_cumulative_returns"
+                />
+                <n-empty v-else description="无数据" />
+              </chart-card>
+            </n-grid-item>
+
+            <n-grid-item v-if="payload.alphalens.alpha_beta">
+              <n-card size="small" title="Factor Alpha / Beta">
+                <n-descriptions bordered :column="1" label-placement="left">
+                  <n-descriptions-item label="年化 Alpha">
+                    {{ fmtPct(payload.alphalens.alpha_beta.annualized_alpha) }}
+                  </n-descriptions-item>
+                  <n-descriptions-item label="日 Alpha">
+                    {{ fmtNum(payload.alphalens.alpha_beta.alpha, 6) }}
+                  </n-descriptions-item>
+                  <n-descriptions-item label="Beta">
+                    {{ fmtNum(payload.alphalens.alpha_beta.beta) }}
+                  </n-descriptions-item>
+                </n-descriptions>
+              </n-card>
+            </n-grid-item>
+          </n-grid>
         </n-card>
       </template>
 

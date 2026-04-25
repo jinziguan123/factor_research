@@ -236,13 +236,19 @@ class DataService:
                 )
 
                 placeholders = ",".join(["%s"] * len(symbols))
+                # tie-breaker：主键 (symbol, report_date) 允许同 (symbol, announcement_date)
+                # 多行 —— A 股复牌/退市重整/合规整改公司一次性补公告多期财报是真实场景。
+                # 不加 report_date 排序时，MySQL 不保证等价键之间顺序，下游
+                # pivot_table aggfunc='last' 结果就成了非确定性的（同一份数据两次查询
+                # 可能拿到不同 v 值）。按 report_date 升序作为第三排序键 + 'last' 即取
+                # 该披露日最新报告期值，语义与 PIT "披露日 X 时能看到的最新一期财报" 对齐。
                 cur.execute(
                     f"SELECT symbol, announcement_date, {field} AS v "
                     f"FROM fr_fundamental_profit "
                     f"WHERE symbol IN ({placeholders}) "
                     f"  AND announcement_date <= %s "
                     f"  AND {field} IS NOT NULL "
-                    f"ORDER BY symbol, announcement_date",
+                    f"ORDER BY symbol, announcement_date, report_date",
                     (*symbols, end),
                 )
                 profit_rows = cur.fetchall()

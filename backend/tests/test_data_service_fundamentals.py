@@ -118,6 +118,40 @@ def test_load_fundamental_panel_rejects_non_profit_table():
         )
 
 
+def test_load_fundamental_panel_dedup_same_announcement_picks_latest_report_date(
+    monkeypatch,
+):
+    """同 (symbol, announcement_date) 多行（同日补公告多期财报）时取 report_date 最大者。
+
+    主键 (symbol, report_date) 允许这种场景（A 股复牌 / 退市重整公司一次性补几期财报）。
+    SQL 端 ORDER BY (symbol, announcement_date, report_date ASC) + 下游
+    pivot_table aggfunc='last' 联合保证：同披露日多行时取报告期最新的那条。
+    任何一端被改动，结果都可能从 deterministic 退化为依赖底层排序稳定性，本测试守住这条契约。
+
+    mock 行已按 SQL ORDER BY 后的顺序排好（Q1 在前、Q2 在后），断言 'last' 拿到 Q2 的值。
+    """
+    cal_rows = [{"trade_date": dt.date(2026, 1, 8)}]
+    profit_rows = [
+        # 同披露日 1-08：先一条 Q1 (旧 report_date)，再一条 Q2 (新 report_date)
+        {"symbol": "000001.SZ", "announcement_date": dt.date(2026, 1, 8), "v": 0.10},
+        {"symbol": "000001.SZ", "announcement_date": dt.date(2026, 1, 8), "v": 0.25},
+    ]
+    monkeypatch.setattr(
+        "backend.storage.data_service.mysql_conn",
+        lambda: _fake_mysql_conn([cal_rows, profit_rows]),
+    )
+
+    panel = DataService().load_fundamental_panel(
+        symbols=["000001.SZ"],
+        start=dt.date(2026, 1, 8),
+        end=dt.date(2026, 1, 8),
+        field="roe_avg",
+    )
+
+    # 必须取最新报告期那条（0.25），而不是 0.10；任意调用都返回同一值
+    assert panel["000001.SZ"].loc["2026-01-08"] == pytest.approx(0.25)
+
+
 def test_load_fundamental_panel_left_seed_propagates_into_window(monkeypatch):
     """披露日早于窗口起点（左 seed）的财报值必须 ffill 进窗口第一天。
 

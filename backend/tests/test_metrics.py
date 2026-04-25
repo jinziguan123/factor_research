@@ -489,3 +489,356 @@ def test_build_health_red_when_ic_sign_flips():
     by_key = {it["key"]: it for it in out["items"]}
     assert by_key["ic_annual_stability"]["level"] == "red"
     assert out["overall"] == "red"
+
+
+# --------------- evaluate_factor_panel 端到端 sanity check ---------------
+
+
+def _mk_close(n_dates: int = 252, n_syms: int = 30, seed: int = 42) -> pd.DataFrame:
+    """构造仿真 close 宽表：GBM 随机游走，跳过周末以模拟交易日。"""
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2023-01-02", periods=n_dates, freq="B")
+    cols = [f"S{i:02d}" for i in range(n_syms)]
+    log_ret = rng.normal(0.0003, 0.02, (n_dates, n_syms))
+    prices = 10.0 * np.exp(np.cumsum(log_ret, axis=0))
+    return pd.DataFrame(prices, index=idx, columns=cols)
+
+
+class TestEvaluateFactorPanelSanity:
+    """用"完美因子"和"纯噪音因子"做端到端 sanity check。
+
+    完美因子 = 未来 1 日收益本身，预期 IC ≈ 1、分组收益严格单调。
+    纯噪音因子 = 与收益独立的随机数，预期 IC ≈ 0、多空 Sharpe ≈ 0。
+    任何指标大幅偏离上述预期 → 数据对齐 / shift 方向 / 复权 / 分组逻辑可能有 bug。
+    """
+
+    @pytest.fixture()
+    def close(self) -> pd.DataFrame:
+        return _mk_close()
+
+    @pytest.fixture()
+    def perfect_factor(self, close: pd.DataFrame) -> pd.DataFrame:
+        return close.shift(-1) / close - 1
+
+    @pytest.fixture()
+    def noise_factor(self, close: pd.DataFrame) -> pd.DataFrame:
+        rng = np.random.default_rng(99)
+        return pd.DataFrame(
+            rng.standard_normal(close.shape), index=close.index, columns=close.columns,
+        )
+
+    def test_perfect_factor_ic_near_one(self, perfect_factor, close):
+        from backend.services.eval_service import evaluate_factor_panel
+
+        _, structured = evaluate_factor_panel(
+            perfect_factor, close, forward_periods=[1], n_groups=5,
+        )
+        assert structured["ic_mean"] > 0.99, f"完美因子 IC 应 ≈1，实际 {structured['ic_mean']}"
+        assert structured["rank_ic_mean"] > 0.99
+        assert structured["ic_win_rate"] > 0.99
+
+    def test_perfect_factor_group_returns_monotonic(self, perfect_factor, close):
+        from backend.services.eval_service import evaluate_factor_panel
+
+        payload, _ = evaluate_factor_panel(
+            perfect_factor, close, forward_periods=[1], n_groups=5,
+        )
+        g = payload["group_returns"]
+        group_keys = [k for k in sorted(g.keys()) if k.startswith("g")]
+        for i in range(len(group_keys) - 1):
+            lo = np.nanmean(g[group_keys[i]])
+            hi = np.nanmean(g[group_keys[i + 1]])
+            assert lo < hi, f"{group_keys[i]} 均值 {lo} 应 < {group_keys[i+1]} 均值 {hi}"
+
+    def test_perfect_factor_long_short_sharpe_positive(self, perfect_factor, close):
+        from backend.services.eval_service import evaluate_factor_panel
+
+        _, structured = evaluate_factor_panel(
+            perfect_factor, close, forward_periods=[1], n_groups=5,
+        )
+        assert structured["long_short_sharpe"] > 3.0, (
+            f"完美因子多空 Sharpe 应极高，实际 {structured['long_short_sharpe']}"
+        )
+
+    def test_payload_contains_alphalens_extras(self, noise_factor, close):
+        from backend.services.eval_service import evaluate_factor_panel
+
+        payload, _ = evaluate_factor_panel(
+            noise_factor, close, forward_periods=[1], n_groups=5,
+        )
+        assert "alphalens" in payload
+        al = payload["alphalens"]
+        assert "rank_autocorrelation" in al
+        assert "group_cumulative_returns" in al
+        assert "alpha_beta" in al
+
+    def test_noise_factor_ic_near_zero(self, noise_factor, close):
+        from backend.services.eval_service import evaluate_factor_panel
+
+        _, structured = evaluate_factor_panel(
+            noise_factor, close, forward_periods=[1], n_groups=5,
+        )
+        assert abs(structured["ic_mean"]) < 0.1, (
+            f"噪音因子 IC 应 ≈0，实际 {structured['ic_mean']}"
+        )
+        assert abs(structured["rank_ic_mean"]) < 0.1
+
+    def test_noise_factor_long_short_sharpe_near_zero(self, noise_factor, close):
+        from backend.services.eval_service import evaluate_factor_panel
+
+        _, structured = evaluate_factor_panel(
+            noise_factor, close, forward_periods=[1], n_groups=5,
+        )
+        assert abs(structured["long_short_sharpe"]) < 1.5, (
+            f"噪音因子多空 Sharpe 应 ≈0，实际 {structured['long_short_sharpe']}"
+        )
+
+
+class TestSingleDayCrossSectionManualVerify:
+    """挑一天手算 IC / Rank IC / 分组均值，和 metrics.py 逐项对比。
+
+    独立于 metrics.py 的实现——用 numpy/scipy 直接算，验证 metrics 函数
+    没有对齐错位、NaN 过滤遗漏或公式错误。
+    """
+
+    @pytest.fixture()
+    def data(self):
+        close = _mk_close(n_dates=60, n_syms=20, seed=7)
+        rng = np.random.default_rng(8)
+        factor = pd.DataFrame(
+            rng.standard_normal(close.shape), index=close.index, columns=close.columns,
+        )
+        fwd_ret = close.shift(-1) / close - 1
+        return factor, fwd_ret, close
+
+    def test_pearson_ic_matches_manual(self, data):
+        factor, fwd_ret, _ = data
+        ic_series = metrics.cross_sectional_ic(factor, fwd_ret)
+
+        target_date = ic_series.index[10]
+        f_row = factor.loc[target_date].values
+        r_row = fwd_ret.loc[target_date].values
+        mask = np.isfinite(f_row) & np.isfinite(r_row)
+        manual_ic = float(np.corrcoef(f_row[mask], r_row[mask])[0, 1])
+
+        assert ic_series.loc[target_date] == pytest.approx(manual_ic, abs=1e-10)
+
+    def test_rank_ic_matches_manual(self, data):
+        from scipy.stats import spearmanr
+
+        factor, fwd_ret, _ = data
+        rank_ic_series = metrics.cross_sectional_rank_ic(factor, fwd_ret)
+
+        target_date = rank_ic_series.index[10]
+        f_row = factor.loc[target_date].values
+        r_row = fwd_ret.loc[target_date].values
+        mask = np.isfinite(f_row) & np.isfinite(r_row)
+        manual_rho, _ = spearmanr(f_row[mask], r_row[mask])
+
+        assert rank_ic_series.loc[target_date] == pytest.approx(float(manual_rho), abs=1e-10)
+
+    def test_group_returns_matches_manual(self, data):
+        factor, fwd_ret, _ = data
+        n_groups = 5
+        g_rets = metrics.group_returns(factor, fwd_ret, n_groups=n_groups)
+
+        target_date = g_rets.index[10]
+        f_row = factor.loc[target_date]
+        r_row = fwd_ret.loc[target_date]
+        mask = f_row.notna() & r_row.notna()
+        f_valid, r_valid = f_row[mask], r_row[mask]
+        labels = pd.qcut(f_valid, n_groups, labels=False, duplicates="drop")
+        manual_means = pd.DataFrame({"q": labels.values, "r": r_valid.values}).groupby("q")["r"].mean()
+
+        for grp in manual_means.index:
+            assert g_rets.loc[target_date, grp] == pytest.approx(manual_means[grp], abs=1e-12)
+
+    def test_ic_summary_matches_manual(self, data):
+        factor, fwd_ret, _ = data
+        ic_series = metrics.cross_sectional_ic(factor, fwd_ret)
+        summary = metrics.ic_summary(ic_series)
+
+        n = len(ic_series)
+        manual_mean = float(ic_series.mean())
+        manual_std = float(ic_series.std(ddof=1))
+        manual_ir = manual_mean / manual_std
+        manual_wr = float((ic_series > 0).mean())
+        manual_t = manual_mean / (manual_std / np.sqrt(n))
+
+        assert summary["ic_mean"] == pytest.approx(manual_mean, abs=1e-12)
+        assert summary["ic_std"] == pytest.approx(manual_std, abs=1e-12)
+        assert summary["ic_ir"] == pytest.approx(manual_ir, abs=1e-12)
+        assert summary["ic_win_rate"] == pytest.approx(manual_wr, abs=1e-12)
+        assert summary["ic_t_stat"] == pytest.approx(manual_t, abs=1e-10)
+
+
+# --------------- 方案 3：Alphalens 交叉验证 ---------------
+
+alphalens = pytest.importorskip("alphalens")
+
+
+class TestAlphalensCrossValidation:
+    """用 Alphalens 作为独立参考实现，交叉验证 metrics.py 的 Rank IC 和分组收益。
+
+    差异来源（不影响结论）：
+    - Alphalens 默认 IC 是 Spearman → 对应我们的 cross_sectional_rank_ic
+    - Alphalens 分组编号 1-based → 我们 0-based
+    - Alphalens 的数据清洗会丢弃尾部 1 天（无前瞻收益），两侧取交集对比
+    """
+
+    @pytest.fixture()
+    def shared_data(self):
+        import warnings
+
+        rng = np.random.default_rng(42)
+        idx = pd.date_range("2023-01-02", periods=120, freq="B")
+        cols = [f"S{i:02d}" for i in range(20)]
+        log_ret = rng.normal(0.0003, 0.02, (120, 20))
+        close = pd.DataFrame(
+            10.0 * np.exp(np.cumsum(log_ret, axis=0)), index=idx, columns=cols,
+        )
+        factor_wide = pd.DataFrame(
+            rng.standard_normal(close.shape), index=idx, columns=cols,
+        )
+
+        # --- Alphalens 侧 ---
+        factor_long = factor_wide.stack()
+        factor_long.index.names = ["date", "asset"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            al_data = alphalens.utils.get_clean_factor_and_forward_returns(
+                factor_long, close, periods=(1,), quantiles=5, max_loss=1.0,
+            )
+        al_ic = alphalens.performance.factor_information_coefficient(al_data)
+        al_mean_ret, _ = alphalens.performance.mean_return_by_quantile(al_data)
+
+        # --- 我们的 metrics 侧 ---
+        fwd_ret_1d = close.shift(-1) / close - 1
+        our_rank_ic = metrics.cross_sectional_rank_ic(factor_wide, fwd_ret_1d)
+        our_g_rets = metrics.group_returns(factor_wide, fwd_ret_1d, n_groups=5)
+
+        return {
+            "al_ic": al_ic, "al_mean_ret": al_mean_ret,
+            "our_rank_ic": our_rank_ic, "our_g_rets": our_g_rets,
+        }
+
+    def test_rank_ic_series_close_to_alphalens(self, shared_data):
+        al_ic = shared_data["al_ic"]["1D"]
+        our_ic = shared_data["our_rank_ic"]
+
+        common = al_ic.index.intersection(our_ic.index)
+        assert len(common) > 100, f"公共日期过少: {len(common)}"
+
+        diff = (al_ic.loc[common] - our_ic.loc[common]).abs()
+        assert diff.max() < 0.05, f"单日最大差异 {diff.max():.4f} 超过容差 0.05"
+        assert diff.mean() < 0.01, f"日均差异 {diff.mean():.6f} 超过容差 0.01"
+
+    def test_rank_ic_mean_close_to_alphalens(self, shared_data):
+        al_mean = shared_data["al_ic"]["1D"].mean()
+        our_mean = shared_data["our_rank_ic"].mean()
+        assert abs(al_mean - our_mean) < 0.02, (
+            f"IC 均值差异过大: alphalens={al_mean:.4f} vs ours={our_mean:.4f}"
+        )
+
+    def test_group_return_rank_order_matches_alphalens(self, shared_data):
+        al_ret = shared_data["al_mean_ret"]["1D"]
+        our_ret = shared_data["our_g_rets"].mean()
+
+        # Alphalens 1-based (1..5) → 我们 0-based (0..4)，按 rank 比较
+        al_order = al_ret.sort_values().index.tolist()
+        our_order = our_ret.sort_values().index.tolist()
+        # 排名前后位置最多偏移 1 位（qcut 边界差异）
+        mismatches = sum(1 for a, o in zip(al_order, our_order) if abs(a - 1 - o) > 1)
+        assert mismatches <= 1, (
+            f"分组收益排名差异过大: alphalens={al_order} vs ours={our_order}"
+        )
+
+    def test_long_short_spread_same_sign(self, shared_data):
+        al_ret = shared_data["al_mean_ret"]["1D"]
+        al_spread = al_ret.iloc[-1] - al_ret.iloc[0]
+
+        our_ret = shared_data["our_g_rets"].mean()
+        our_spread = our_ret.iloc[-1] - our_ret.iloc[0]
+
+        # 多空方向（正/负/零）应一致
+        assert np.sign(al_spread) == np.sign(our_spread) or abs(al_spread) < 1e-4, (
+            f"多空方向不一致: alphalens={al_spread:.6f} vs ours={our_spread:.6f}"
+        )
+
+
+# --------------- Alphalens 增强视角 ---------------
+
+
+class TestAlphalensExtras:
+    """_build_alphalens_extras 端到端测试。"""
+
+    @pytest.fixture()
+    def close(self):
+        return _mk_close(n_dates=120, n_syms=20, seed=42)
+
+    @pytest.fixture()
+    def factor(self, close):
+        rng = np.random.default_rng(99)
+        return pd.DataFrame(
+            rng.standard_normal(close.shape), index=close.index, columns=close.columns,
+        )
+
+    def test_returns_dict_with_three_keys(self, factor, close):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        result = _build_alphalens_extras(factor, close, fwd_periods=[1], n_groups=5)
+        assert "rank_autocorrelation" in result
+        assert "group_cumulative_returns" in result
+        assert "alpha_beta" in result
+
+    def test_rank_autocorrelation_format(self, factor, close):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        result = _build_alphalens_extras(factor, close, fwd_periods=[1], n_groups=5)
+        ra = result["rank_autocorrelation"]
+        assert "dates" in ra and "values" in ra
+        assert len(ra["dates"]) == len(ra["values"])
+        assert len(ra["dates"]) > 50
+
+    def test_group_cumulative_returns_format(self, factor, close):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        result = _build_alphalens_extras(factor, close, fwd_periods=[1], n_groups=5)
+        gcr = result["group_cumulative_returns"]
+        assert "dates" in gcr
+        group_keys = [k for k in gcr if k.startswith("g")]
+        assert len(group_keys) == 5
+        assert all(len(gcr[k]) == len(gcr["dates"]) for k in group_keys)
+
+    def test_group_cumulative_returns_is_demeaned(self, factor, close):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        result = _build_alphalens_extras(factor, close, fwd_periods=[1], n_groups=5)
+        gcr = result["group_cumulative_returns"]
+        group_keys = sorted(k for k in gcr if k.startswith("g"))
+        final_sum = sum(gcr[k][-1] for k in group_keys if gcr[k][-1] is not None)
+        assert abs(final_sum - 5.0) < 1.0, f"去均值后各组终值之和应 ≈5，实际 {final_sum}"
+
+    def test_alpha_beta_format(self, factor, close):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        result = _build_alphalens_extras(factor, close, fwd_periods=[1], n_groups=5)
+        ab = result["alpha_beta"]
+        assert "alpha" in ab and "beta" in ab and "annualized_alpha" in ab
+        assert isinstance(ab["alpha"], float)
+        assert isinstance(ab["beta"], float)
+
+    def test_perfect_factor_has_positive_alpha(self, close):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        perfect = close.shift(-1) / close - 1
+        result = _build_alphalens_extras(perfect, close, fwd_periods=[1], n_groups=5)
+        assert result["alpha_beta"]["annualized_alpha"] > 0.5
+
+    def test_graceful_on_empty_factor(self):
+        from backend.services.eval_service import _build_alphalens_extras
+
+        result = _build_alphalens_extras(
+            pd.DataFrame(), pd.DataFrame(), fwd_periods=[1], n_groups=5,
+        )
+        assert result == {}
