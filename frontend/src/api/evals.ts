@@ -78,6 +78,16 @@ export function useDeleteEval() {
   })
 }
 
+/** 批量删除评估记录 */
+export function useBatchDeleteEvals() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runIds: string[]) =>
+      client.post('/evals/batch-delete', { run_ids: runIds }).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['evals'] }),
+  })
+}
+
 /** 请求中断一个运行中的评估任务（POST /api/evals/{id}/abort）。
  *
  * 后端只改 status='aborting'；worker 在阶段边界检测到后抛 AbortedError 退出，

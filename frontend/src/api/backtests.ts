@@ -72,6 +72,16 @@ export function useDeleteBacktest() {
   })
 }
 
+/** 批量删除回测记录 */
+export function useBatchDeleteBacktests() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runIds: string[]) =>
+      client.post('/backtests/batch-delete', { run_ids: runIds }).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests'] }),
+  })
+}
+
 /** 中断一个运行中的回测任务。协作式，语义与 useAbortEval 一致。 */
 export function useAbortBacktest() {
   const qc = useQueryClient()

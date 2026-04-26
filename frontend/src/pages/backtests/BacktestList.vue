@@ -10,7 +10,7 @@ import {
   NSelect, NInputNumber, NTag, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { useBacktests, useDeleteBacktest, useAbortBacktest } from '@/api/backtests'
+import { useBacktests, useDeleteBacktest, useAbortBacktest, useBatchDeleteBacktests } from '@/api/backtests'
 import type { BacktestRun } from '@/api/backtests'
 import { useFactors } from '@/api/factors'
 import { usePoolNameMap } from '@/api/pools'
@@ -35,6 +35,20 @@ const listQuery = useBacktests(listParams)
 const { data: backtests, isLoading, refetch } = listQuery
 const deleteMut = useDeleteBacktest()
 const abortMut = useAbortBacktest()
+const batchDeleteMut = useBatchDeleteBacktests()
+
+const checkedKeys = ref<string[]>([])
+
+function handleBatchDelete() {
+  if (checkedKeys.value.length === 0) return
+  batchDeleteMut.mutate(checkedKeys.value, {
+    onSuccess: (res: any) => {
+      message.success(`已删除 ${res.deleted_count} 条记录`)
+      checkedKeys.value = []
+    },
+    onError: (e: any) => message.error(e?.message || '批量删除失败'),
+  })
+}
 
 let pollTimer: number | null = null
 function maybeStartPolling() {
@@ -71,6 +85,7 @@ const statusOptions = [
 const { lookup: lookupPoolName } = usePoolNameMap()
 
 const columns: DataTableColumns<BacktestRun> = [
+  { type: 'selection' },
   {
     title: 'Run ID',
     key: 'run_id',
@@ -188,9 +203,21 @@ const columns: DataTableColumns<BacktestRun> = [
       >
         <template #prefix>条数</template>
       </n-input-number>
+      <n-popconfirm
+        v-if="checkedKeys.length > 0"
+        @positive-click="handleBatchDelete"
+      >
+        <template #trigger>
+          <n-button type="error" :loading="batchDeleteMut.isPending.value">
+            批量删除 ({{ checkedKeys.length }})
+          </n-button>
+        </template>
+        确认删除选中的 {{ checkedKeys.length }} 条记录？
+      </n-popconfirm>
     </n-space>
 
     <n-data-table
+      v-model:checked-row-keys="checkedKeys"
       :columns="columns"
       :data="backtests ?? []"
       :loading="isLoading"

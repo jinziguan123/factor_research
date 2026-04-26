@@ -201,6 +201,12 @@ class CreateCompositionIn(BaseModel):
         return self
 
 
+class BatchDeleteIn(BaseModel):
+    """批量删除请求体。``run_ids`` 最多 100 条，防止单次请求删太多。"""
+
+    run_ids: list[str] = Field(..., min_length=1, max_length=100)
+
+
 class PoolIn(BaseModel):
     """``POST /api/pools`` / ``PUT /api/pools/{pid}`` 请求体。
 

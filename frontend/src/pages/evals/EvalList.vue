@@ -10,7 +10,7 @@ import {
   NSelect, NInputNumber, NTag, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { useEvals, useDeleteEval, useAbortEval } from '@/api/evals'
+import { useEvals, useDeleteEval, useAbortEval, useBatchDeleteEvals } from '@/api/evals'
 import type { EvalRun } from '@/api/evals'
 import { useFactors } from '@/api/factors'
 import { usePoolNameMap } from '@/api/pools'
@@ -37,6 +37,20 @@ const listQuery = useEvals(listParams)
 const { data: evals, isLoading, refetch } = listQuery
 const deleteMut = useDeleteEval()
 const abortMut = useAbortEval()
+const batchDeleteMut = useBatchDeleteEvals()
+
+const checkedKeys = ref<string[]>([])
+
+function handleBatchDelete() {
+  if (checkedKeys.value.length === 0) return
+  batchDeleteMut.mutate(checkedKeys.value, {
+    onSuccess: (res: any) => {
+      message.success(`已删除 ${res.deleted_count} 条记录`)
+      checkedKeys.value = []
+    },
+    onError: (e: any) => message.error(e?.message || '批量删除失败'),
+  })
+}
 
 // 简单的 1.5s 轮询：有运行中 / 中断中的任务时启动定时器，全终态时停。
 // 用 setInterval 而不是 useQuery refetchInterval，因为 useEvals 的 queryKey 含响应式
@@ -78,6 +92,7 @@ const { lookup: lookupPoolName } = usePoolNameMap()
 
 // ---- 表格 ----
 const columns: DataTableColumns<EvalRun> = [
+  { type: 'selection' },
   {
     title: 'Run ID',
     key: 'run_id',
@@ -198,9 +213,21 @@ const columns: DataTableColumns<EvalRun> = [
       >
         <template #prefix>条数</template>
       </n-input-number>
+      <n-popconfirm
+        v-if="checkedKeys.length > 0"
+        @positive-click="handleBatchDelete"
+      >
+        <template #trigger>
+          <n-button type="error" :loading="batchDeleteMut.isPending.value">
+            批量删除 ({{ checkedKeys.length }})
+          </n-button>
+        </template>
+        确认删除选中的 {{ checkedKeys.length }} 条记录？
+      </n-popconfirm>
     </n-space>
 
     <n-data-table
+      v-model:checked-row-keys="checkedKeys"
       :columns="columns"
       :data="evals ?? []"
       :loading="isLoading"

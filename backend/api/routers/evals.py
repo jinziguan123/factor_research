@@ -18,7 +18,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
-from backend.api.schemas import CreateEvalIn, ok
+from backend.api.schemas import BatchDeleteIn, CreateEvalIn, ok
 from backend.runtime.entries import eval_entry
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import submit
@@ -222,3 +222,21 @@ def delete_eval(run_id: str) -> dict:
     if deleted == 0:
         raise HTTPException(status_code=404, detail="eval run not found")
     return ok({"run_id": run_id, "deleted": True})
+
+
+@router.post("/batch-delete")
+def batch_delete_evals(body: BatchDeleteIn) -> dict:
+    """批量硬删多条评估记录（run + metrics）。"""
+    deleted = 0
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            for rid in body.run_ids:
+                cur.execute(
+                    "DELETE FROM fr_factor_eval_metrics WHERE run_id=%s", (rid,)
+                )
+                cur.execute(
+                    "DELETE FROM fr_factor_eval_runs WHERE run_id=%s", (rid,)
+                )
+                deleted += cur.rowcount
+        c.commit()
+    return ok({"deleted_count": deleted})

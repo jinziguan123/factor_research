@@ -21,7 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 
-from backend.api.schemas import CreateBacktestIn, ok
+from backend.api.schemas import BatchDeleteIn, CreateBacktestIn, ok
 from backend.config import settings
 from backend.runtime.entries import backtest_entry
 from backend.runtime.factor_registry import FactorRegistry
@@ -221,6 +221,27 @@ def delete_backtest(run_id: str) -> dict:
     if deleted == 0:
         raise HTTPException(status_code=404, detail="backtest run not found")
     return ok({"run_id": run_id, "deleted": True})
+
+
+@router.post("/batch-delete")
+def batch_delete_backtests(body: BatchDeleteIn) -> dict:
+    """批量硬删多条回测记录（run + metrics + artifacts）。不清磁盘 parquet 文件。"""
+    deleted = 0
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            for rid in body.run_ids:
+                cur.execute(
+                    "DELETE FROM fr_backtest_metrics WHERE run_id=%s", (rid,)
+                )
+                cur.execute(
+                    "DELETE FROM fr_backtest_artifacts WHERE run_id=%s", (rid,)
+                )
+                cur.execute(
+                    "DELETE FROM fr_backtest_runs WHERE run_id=%s", (rid,)
+                )
+                deleted += cur.rowcount
+        c.commit()
+    return ok({"deleted_count": deleted})
 
 
 # ---------------------------- 产物下载 ----------------------------
