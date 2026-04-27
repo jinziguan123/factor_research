@@ -56,3 +56,10 @@ def param_sensitivity_entry(run_id: str, body: dict) -> None:
     from backend.services.param_sensitivity_service import run_param_sensitivity
 
     run_param_sensitivity(run_id, body)
+
+
+def signal_entry(run_id: str, body: dict) -> None:
+    """实盘信号任务入口：在 worker 进程内调用 ``run_signal``。"""
+    from backend.services.signal_service import run_signal
+
+    run_signal(run_id, body)

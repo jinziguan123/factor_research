@@ -12,7 +12,7 @@ router 内部返回 ``ok(...)``，异常由 ``api/main.py`` 里的全局 handler
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
@@ -203,6 +203,42 @@ class CreateCompositionIn(BaseModel):
         ids = [it.factor_id for it in self.factor_items]
         if len(set(ids)) != len(ids):
             raise ValueError(f"factor_items 里存在重复的 factor_id: {ids}")
+        return self
+
+
+class CreateSignalIn(BaseModel):
+    """``POST /api/signals`` 请求体。
+
+    实盘信号触发：用一组因子（单或多）按当下市场快照算选股排名。
+    与 composition 的差异：
+    - 没有 start_date / end_date：信号只看"当下"，历史窗口由 service 内部决定；
+    - 没有 forward_periods：不评估 IC，只看末行 qcut；
+    - 多了 ``as_of_time``（默认 NOW()）/ ``use_realtime`` / ``filter_price_limit``；
+    - ``method`` 多一个 ``"single"`` 表示单因子（factor_items 必须正好 1 个）。
+    """
+
+    factor_items: list[CompositionFactorItem] = Field(..., min_length=1, max_length=8)
+    method: str = "equal"
+    pool_id: int
+    n_groups: int = Field(default=5, ge=2, le=20)
+    ic_lookback_days: int = Field(default=60, ge=10, le=500)
+    as_of_time: datetime | None = None  # None → service 内部用 NOW()
+    use_realtime: bool = True
+    filter_price_limit: bool = True
+
+    @model_validator(mode="after")
+    def _check_fields(self) -> "CreateSignalIn":
+        if self.method not in ("equal", "ic_weighted", "orthogonal_equal", "single"):
+            raise ValueError(
+                f"method={self.method!r} 不支持，"
+                "仅接受 equal/ic_weighted/orthogonal_equal/single"
+            )
+        if self.method == "single" and len(self.factor_items) != 1:
+            raise ValueError("method='single' 时 factor_items 必须正好 1 个")
+        if self.method != "single":
+            ids = [it.factor_id for it in self.factor_items]
+            if len(set(ids)) != len(ids):
+                raise ValueError(f"factor_items 里存在重复 factor_id: {ids}")
         return self
 
 
