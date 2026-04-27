@@ -57,9 +57,44 @@ def _make_ctx(panels: dict, *, start_offset: int) -> FactorContext:
     )
 
 
-def test_required_warmup_constant() -> None:
-    """无超参，warmup = int(24*1.5)+10 = 46。"""
+def test_required_warmup_default() -> None:
+    """默认参数 (3,6,12,24)：warmup = int(24*1.5)+10 = 46。"""
     assert BBIC().required_warmup({}) == 46
+
+
+def test_required_warmup_scales_with_n4() -> None:
+    """warmup 由最长窗口决定：n4=60 → int(60*1.5)+10 = 100。"""
+    assert BBIC().required_warmup({"n1": 3, "n2": 6, "n3": 12, "n4": 60}) == 100
+
+
+def test_custom_windows_match_manual() -> None:
+    """传 (5, 10, 20, 60) 应当用这 4 个窗口算 BBI，与手算一致。"""
+    rng = np.random.default_rng(123)
+    n = 100
+    idx = _biz_index(n)
+    close = pd.DataFrame(
+        {"A": 10 + rng.normal(0, 0.5, n).cumsum()},
+        index=idx,
+    )
+    panels = {"close": close}
+    ctx = _make_ctx(panels, start_offset=70)
+
+    custom = {"n1": 5, "n2": 10, "n3": 20, "n4": 60}
+    factor = BBIC().compute(ctx, custom)
+
+    bbi_manual = (
+        close.rolling(5).mean()
+        + close.rolling(10).mean()
+        + close.rolling(20).mean()
+        + close.rolling(60).mean()
+    ) / 4
+    expected = bbi_manual / close
+
+    pd.testing.assert_frame_equal(
+        factor.sort_index(axis=1),
+        expected.loc[ctx.start_date :].sort_index(axis=1),
+        check_freq=False,
+    )
 
 
 def test_monotonic_up_gives_factor_below_one() -> None:

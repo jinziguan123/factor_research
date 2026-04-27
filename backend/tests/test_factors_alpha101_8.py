@@ -56,9 +56,45 @@ def _make_ctx(panels: dict, *, start_offset: int, n: int) -> FactorContext:
     )
 
 
-def test_required_warmup_constant() -> None:
-    """无超参，warmup = int(16*1.5)+5 = 29。"""
+def test_required_warmup_default() -> None:
+    """默认参数 (sum_window=5, delay_periods=10)：warmup = int((5+10+1)*1.5)+5 = 29。"""
     assert Alpha101_8().required_warmup({}) == 29
+
+
+def test_required_warmup_scales_with_params() -> None:
+    """warmup 随 sum_window + delay_periods 增长。"""
+    # (10, 20) → int(31*1.5)+5 = 51
+    assert Alpha101_8().required_warmup({"sum_window": 10, "delay_periods": 20}) == 51
+
+
+def test_custom_params_match_manual_compute() -> None:
+    """传 (sum_window=10, delay_periods=20) 应当用这两个参数算，与手算一致。"""
+    rng = np.random.default_rng(456)
+    n = 80
+    idx = _biz_index(n)
+    symbols = ["A", "B", "C", "D", "E"]
+    open_data = {s: 10 + rng.normal(0, 0.5, n).cumsum() for s in symbols}
+    close_data = {s: open_data[s] + rng.normal(0, 0.2, n) for s in symbols}
+    open_df = pd.DataFrame(open_data, index=idx)
+    close_df = pd.DataFrame(close_data, index=idx)
+
+    custom = {"sum_window": 10, "delay_periods": 20}
+    panels = {"open": open_df, "close": close_df}
+    ctx = _make_ctx(panels, start_offset=50, n=n)
+    factor = Alpha101_8().compute(ctx, custom)
+
+    # 手算同口径
+    returns = close_df.pct_change(fill_method=None)
+    compound = open_df.rolling(10).sum() * returns.rolling(10).sum()
+    diff = compound - compound.shift(20)
+    expected = -diff.rank(axis=1, method="average", pct=True)
+
+    target_date = factor.index[10]
+    pd.testing.assert_series_equal(
+        factor.loc[target_date].sort_index(),
+        expected.loc[target_date].sort_index(),
+        check_names=False,
+    )
 
 
 def test_factor_value_range_in_minus_one_to_zero() -> None:
