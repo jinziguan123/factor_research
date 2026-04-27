@@ -74,7 +74,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup() -> None:
-    """启动钩子：扫描因子 + 可选开启热加载。
+    """启动钩子：扫描因子 + 可选开启热加载 + 可选启动 live_market worker。
 
     FastAPI 在 3.10 下仍然支持 ``@app.on_event``（lifespan 是更新做法，但 on_event
     足够表达且兼容 TestClient 的 ``with`` 语义）。
@@ -91,10 +91,48 @@ def _startup() -> None:
                 settings.factors_dir,
             )
 
+    # live_market worker（嵌入式 daemon thread）——订阅驱动的实盘行情采集
+    if settings.live_market_worker_enabled:
+        try:
+            from backend.workers.live_market import (
+                LiveMarketConfig,
+                start_in_thread,
+            )
+
+            cfg = LiveMarketConfig(
+                archive_1m_enabled=settings.live_market_archive_1m,
+            )
+            thread, stop_event = start_in_thread(cfg)
+            app.state.live_market_thread = thread
+            app.state.live_market_stop_event = stop_event
+            log.info(
+                "live_market worker started in background thread (archive_1m=%s)",
+                settings.live_market_archive_1m,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "live_market worker startup failed; "
+                "set FR_LIVE_MARKET_WORKER=0 to disable"
+            )
+
 
 @app.on_event("shutdown")
 def _shutdown() -> None:
-    """关闭钩子：停 watchdog + 优雅释放 ProcessPool。"""
+    """关闭钩子：停 worker + watchdog + 优雅释放 ProcessPool。"""
+    # live_market worker：set stop_event 让主循环 1s 内退出，再 join
+    stop_event = getattr(app.state, "live_market_stop_event", None)
+    thread = getattr(app.state, "live_market_thread", None)
+    if stop_event is not None and thread is not None:
+        try:
+            stop_event.set()
+            thread.join(timeout=10)
+            if thread.is_alive():
+                log.warning("live_market worker did not stop in 10s")
+            else:
+                log.info("live_market worker stopped cleanly")
+        except Exception:  # noqa: BLE001
+            log.exception("stop live_market worker failed")
+
     obs = getattr(app.state, "observer", None)
     if obs is not None:
         try:
@@ -103,7 +141,6 @@ def _shutdown() -> None:
         except Exception:  # noqa: BLE001
             log.exception("stop watchdog failed")
     # ProcessPool 单例只有在被用过时 _pool 非空；shutdown(wait=False) 不阻塞关闭流程。
-    # 从内部 import 而不是模块顶 import：test 环境可能 monkeypatch 这个模块。
     try:
         from backend.runtime import task_pool as tp
 

@@ -198,6 +198,74 @@ def _expand_row(row: dict) -> dict:
     return out
 
 
+def process_due_subscription(sub: dict) -> str:
+    """对一个 due 订阅触发一次完整的 signal 计算。
+
+    流程：
+    1. 生成新 ``run_id``；
+    2. INSERT ``fr_signal_runs`` 一行 pending（带 ``subscription_id`` 反向关联）；
+    3. 同步调 ``signal_service.run_signal(run_id, body)``——service 内部把
+       status 从 pending 转成 running → success/failed，并写 payload；
+    4. 无论成功失败，``mark_refreshed`` 回写订阅 ``last_refresh_at + last_run_id``，
+       避免下一轮立即重试拖垮 worker。
+
+    Returns:
+        新 run_id（前端订阅详情页据此查刷新历史）。
+    """
+    # Lazy import：subscription_service 自身在 worker / router 导入时不应拉起
+    # signal_service 的全部依赖（pandas / numpy / 因子注册表等）。
+    from backend.services.signal_service import run_signal
+
+    run_id = uuid.uuid4().hex
+    body = subscription_to_signal_body(sub)
+    now = datetime.now()
+    items_json = json.dumps(body["factor_items"], ensure_ascii=False)
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_signal_runs
+                (run_id, factor_items_json, method, pool_id, n_groups,
+                 ic_lookback_days, as_of_time, as_of_date,
+                 use_realtime, filter_price_limit, top_n,
+                 subscription_id,
+                 status, progress, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,'pending',0,%s)
+                """,
+                (
+                    run_id,
+                    items_json,
+                    body["method"],
+                    body["pool_id"],
+                    body["n_groups"],
+                    body["ic_lookback_days"],
+                    now,
+                    now.date(),
+                    1 if body["filter_price_limit"] else 0,
+                    body["top_n"],
+                    sub["subscription_id"],
+                    now,
+                ),
+            )
+        c.commit()
+
+    # service 期望 as_of_time 是 ISO 字符串（pickle 友好）
+    body["as_of_time"] = now.isoformat()
+
+    try:
+        run_signal(run_id, body)
+    except Exception:
+        log.exception(
+            "process_due_subscription: run_signal failed for sub=%s run=%s",
+            sub["subscription_id"], run_id,
+        )
+
+    # 失败也要 mark：避免下一 tick 立即重试雪崩。
+    mark_refreshed(sub["subscription_id"], run_id, now)
+    return run_id
+
+
 def subscription_to_signal_body(sub: dict) -> dict[str, Any]:
     """把订阅 dict 转成 ``signal_service.run_signal`` 的 body。
 

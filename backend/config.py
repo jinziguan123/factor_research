@@ -63,6 +63,17 @@ class Settings(BaseSettings):
         alias="FR_FACTORS_DIR",
     )
 
+    # ---------- live_market worker（嵌入主进程的实盘行情常驻 thread） ----------
+    # 默认开启：app startup 时 spawn daemon thread 跑 worker，shutdown 时干净退出。
+    # 关闭后可改用 `python -m backend.workers.live_market` 独立进程模式。
+    live_market_worker_enabled: bool = Field(
+        default=True, alias="FR_LIVE_MARKET_WORKER",
+    )
+    # archive_1m 默认关闭，避免每个 dev 环境都被强制每天拉 ~120 万行 1m K。
+    live_market_archive_1m: bool = Field(
+        default=False, alias="FR_LIVE_MARKET_ARCHIVE_1M",
+    )
+
     # ---------- LLM（因子助手用；走 OpenAI 兼容协议，中转 / 官方都行） ----------
     # 为空串时 factor_assistant API 会直接报 503，提醒用户先在 .env 里配好 key。
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")

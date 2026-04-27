@@ -1,33 +1,36 @@
-"""实盘行情常驻 worker：盘中拉 spot 快照 + 盘后归档 1m K。
+"""实盘行情常驻 worker：订阅驱动拉 spot 快照 + 盘后归档 1m K。
 
-启动：
-    python -m backend.workers.live_market                    # 默认配置（archive 关闭）
-    python -m backend.workers.live_market --archive-1m       # 开启 1m K 归档
-    python -m backend.workers.live_market --once             # 单次跑（调试用）
-    python -m backend.workers.live_market --spot-interval 300
+【v2 升级语义】 — 从"无脑 5min 拉全市场"改为"订阅驱动按需拉"：
 
-主循环结构（每 ~60s 醒一次）：
-1. 查 ``is_trading_day(today)`` → 判定是否需要做事；
-2. ``determine_phase(now, today_is_trading)`` 决定 idle / spot / eod_archive；
-3. spot：每 ``spot_interval_sec``（默认 300s）拉一次全市场快照写库，失败仅 log
-   不退出；
-4. eod_archive：当日尚未归档过 + 配置开启 → 调用 ``archive_today``（多线程拉
-   全 A 1m K 写库），无论成功与否都标记当日"已归档"避免重复触发；
-5. idle：sleep 60s + 每 30 分钟 INFO 心跳。
+主循环每 ~60s 醒一次，在 spot 时段：
+1. 查 fr_signal_subscriptions 中 is_active=1 且到期需刷新的订阅；
+2. **没有 due 订阅 → 不拉 spot（节省 IP 配额 / 服务器开销）**；
+3. 有 due 订阅 → ``ensure_spot_fresh()``（spot age > 60s 时拉一次新快照），
+   然后对每个 due 订阅调 ``process_due_subscription()`` 触发 run_signal。
+
+用户在前端开启 / 关闭某个订阅 → 主循环下次 tick 自然响应（无需重启 worker）。
+
+启动方式：
+1. 嵌入 FastAPI 主进程（推荐）：app lifespan 调 ``start_in_thread()``，shutdown
+   时 ``stop_event.set()``，worker 与主进程同生共死。
+2. 独立进程（备用）：``python -m backend.workers.live_market``。
+
+CLI 选项（独立模式）：
+    --once             单次跑（调试用）
+    --archive-1m       启用盘后 15:00-15:30 自动 1m K 归档（默认关闭）
+    --spot-stale-sec N spot 数据"陈旧"阈值秒数（默认 60，<= 此值直接复用旧 spot）
 
 关闭：
 - KeyboardInterrupt（Ctrl+C / launchd SIGTERM）→ 干净退出；
+- stop_event.set()（嵌入模式 lifespan）→ 干净退出；
 - 其它异常被主循环 try/except 兜住，等 60s 继续。
-
-依赖：
-- akshare（盘中环境必装）；adapter 内部 lazy import，单测和未启用 worker 时无副作用。
-- ClickHouse / MySQL：DAO / 日历查询要求两者可达。
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import sys
+import threading
 import time as time_mod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -43,18 +46,18 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class LiveMarketConfig:
-    """worker 运行配置；可由 CLI 参数覆盖。"""
+    """worker 运行配置；可由 CLI 参数 / 嵌入模式构造覆盖。"""
 
-    # spot 拉取
+    # spot 拉取（按订阅驱动；spot_stale_sec 决定何时拉新快照）
     spot_enabled: bool = True
-    spot_interval_sec: int = 300  # 5min；缩短会更接近实时但 IP 风险高
+    spot_stale_sec: int = 60  # 库里最新 spot 距 NOW > 此值才拉新；省 HTTP 调用
     # 1m K 归档（默认关闭，与设计文档一致）
     archive_1m_enabled: bool = False
     archive_max_workers: int = 20
     # 主循环节奏
     main_loop_sleep_sec: int = 60
     idle_heartbeat_sec: int = 1800  # idle 阶段 30min 一次心跳日志
-    # CLI 选项
+    # CLI 选项（独立模式专用）
     once: bool = False
     log_level: str = "INFO"
 
@@ -62,7 +65,7 @@ class LiveMarketConfig:
     def from_args(cls, args: argparse.Namespace) -> "LiveMarketConfig":
         return cls(
             spot_enabled=not args.no_spot,
-            spot_interval_sec=args.spot_interval,
+            spot_stale_sec=args.spot_stale_sec,
             archive_1m_enabled=args.archive_1m,
             archive_max_workers=args.archive_workers,
             once=args.once,
@@ -91,23 +94,73 @@ def run_archive_once(max_workers: int = 20) -> dict:
     return archive_today(pool_id=None, max_workers=max_workers)
 
 
+def ensure_spot_fresh(stale_sec: int = 60) -> bool:
+    """确保 stock_spot_realtime 中最新 spot age <= stale_sec；陈旧 / 缺失则拉新。
+
+    Returns:
+        True = 调用了 run_spot_once（拉了新数据）；False = 旧数据仍新鲜，复用。
+    """
+    from backend.storage.realtime_dao import latest_spot_age_sec
+
+    age = latest_spot_age_sec()
+    if age is not None and age <= stale_sec:
+        log.debug("spot age=%.1fs <= %ds; reuse existing", age, stale_sec)
+        return False
+    log.info("spot age=%s; fetching fresh snapshot", age)
+    run_spot_once()
+    return True
+
+
+def process_due_subscriptions_once() -> int:
+    """对当前所有 due 订阅各跑一次 signal 计算；返回处理订阅数。
+
+    抽出为顶层函数便于测试 / 复用。worker 主循环和"立即触发"按钮（如有）都走它。
+    """
+    # Lazy import：避免在加载本模块时拉起 service / DAO 全部依赖
+    from backend.services import subscription_service
+
+    now = datetime.now()
+    due = subscription_service.find_due_subscriptions(now)
+    if not due:
+        return 0
+    log.info("[sub] %d due subscriptions to process", len(due))
+    for sub in due:
+        sid = sub["subscription_id"]
+        try:
+            run_id = subscription_service.process_due_subscription(sub)
+            log.info("[sub] %s refreshed → run_id=%s", sid[:8], run_id[:8])
+        except Exception:
+            log.exception("[sub] failed sub=%s", sid)
+    return len(due)
+
+
 # ---------------------------- 主循环 ----------------------------
 
 
-def main_loop(cfg: LiveMarketConfig) -> int:
-    """worker 主循环（被 CLI 入口调用）。
+def main_loop(
+    cfg: LiveMarketConfig, stop_event: threading.Event | None = None,
+) -> int:
+    """worker 主循环。
 
-    返回退出码：0 = 正常 / SIGTERM；其它 = 致命错误。
+    Args:
+        cfg: 运行配置。
+        stop_event: 嵌入模式下由 lifespan 传入；set() 时主循环退出。
+            CLI 独立模式 None，依赖 KeyboardInterrupt 退出。
+
+    Returns:
+        退出码：0 = 正常退出 / SIGTERM / stop_event.set()；其它 = 致命错误。
     """
     from backend.workers.trading_calendar import determine_phase, is_trading_day
 
-    last_spot_at: datetime | None = None
     archived_dates: set[date] = set()
     last_idle_heartbeat: datetime | None = None
 
     log.info("live_market worker started: %s", cfg)
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            log.info("stop_event set，正常退出")
+            return 0
         try:
             now = datetime.now()
             today = now.date()
@@ -115,21 +168,33 @@ def main_loop(cfg: LiveMarketConfig) -> int:
             phase = determine_phase(now, today_is_trading)
 
             if phase == "spot" and cfg.spot_enabled:
-                # 控制 spot 拉取频率：到下一个 interval 边界才发请求
-                should_fetch = (
-                    last_spot_at is None
-                    or (now - last_spot_at).total_seconds()
-                    >= cfg.spot_interval_sec
-                )
-                if should_fetch:
+                # 订阅驱动：先查 due 订阅，没有就跳过整个 spot 流程
+                from backend.services import subscription_service
+
+                due_subs = subscription_service.find_due_subscriptions(now)
+                if not due_subs:
+                    log.debug("[spot] no due subscriptions; skip spot fetch")
+                else:
+                    log.info("[spot] %d due subscriptions need refresh", len(due_subs))
+                    # 共享 spot 拉取：本 tick 内多个订阅复用一次 spot 数据
                     try:
-                        n = run_spot_once()
-                        log.info("[spot] wrote %d rows at %s", n, now.strftime("%H:%M:%S"))
-                        last_spot_at = now
+                        ensure_spot_fresh(cfg.spot_stale_sec)
                     except Exception:
                         log.exception(
-                            "[spot] fetch/write failed; will retry next loop"
+                            "[spot] ensure_spot_fresh failed; subscriptions will "
+                            "downgrade to yesterday close"
                         )
+                    # 串行处理 due 订阅（worker 单线程；多并发会和 ProcessPool 抢锁）
+                    for sub in due_subs:
+                        sid = sub["subscription_id"]
+                        try:
+                            rid = subscription_service.process_due_subscription(sub)
+                            log.info(
+                                "[sub] %s refreshed → run_id=%s",
+                                sid[:8], rid[:8],
+                            )
+                        except Exception:
+                            log.exception("[sub] failed sub=%s", sid)
 
             elif phase == "eod_archive":
                 if not cfg.archive_1m_enabled:
@@ -154,7 +219,7 @@ def main_loop(cfg: LiveMarketConfig) -> int:
                     archived_dates.add(today)
 
             else:
-                # idle：每 30 分钟一次心跳日志，证明 worker 还活着
+                # idle：每 30 分钟一次心跳日志
                 if (
                     last_idle_heartbeat is None
                     or (now - last_idle_heartbeat).total_seconds()
@@ -162,13 +227,12 @@ def main_loop(cfg: LiveMarketConfig) -> int:
                 ):
                     log.info(
                         "[idle] phase=%s trading_day=%s now=%s",
-                        phase,
-                        today_is_trading,
+                        phase, today_is_trading,
                         now.strftime("%Y-%m-%d %H:%M:%S"),
                     )
                     last_idle_heartbeat = now
 
-            # 清理跨日的 archived_dates 记录（保留最近 7 天即可）
+            # 清理跨日 archived_dates（保留最近 7 天）
             if len(archived_dates) > 30:
                 cutoff = today - timedelta(days=7)
                 archived_dates = {d for d in archived_dates if d >= cutoff}
@@ -176,13 +240,47 @@ def main_loop(cfg: LiveMarketConfig) -> int:
             if cfg.once:
                 log.info("--once 标志已置，单次执行后退出")
                 return 0
-            time_mod.sleep(cfg.main_loop_sleep_sec)
+            # 用可中断的分段 sleep 替代 time.sleep(60)，让 stop_event 能在 1s 内响应
+            for _ in range(cfg.main_loop_sleep_sec):
+                if stop_event is not None and stop_event.is_set():
+                    return 0
+                time_mod.sleep(1)
         except KeyboardInterrupt:
             log.info("收到 KeyboardInterrupt，正常退出")
             return 0
         except Exception:
             log.exception("主循环异常；sleep 60s 后继续")
             time_mod.sleep(60)
+
+
+# ---------------------------- 嵌入模式入口 ----------------------------
+
+
+def start_in_thread(
+    cfg: LiveMarketConfig | None = None,
+) -> tuple[threading.Thread, threading.Event]:
+    """在 daemon thread 中启动 worker；返回 (Thread, stop_event)。
+
+    供 FastAPI lifespan 使用：
+        thread, stop_event = start_in_thread()
+        # ... yield（应用运行中）
+        stop_event.set()
+        thread.join(timeout=10)
+
+    daemon=True 保证主进程退出时 worker thread 也会被强制终止（兜底，正常路径
+    应通过 stop_event 干净退出）。
+    """
+    if cfg is None:
+        cfg = LiveMarketConfig()
+    stop_event = threading.Event()
+    t = threading.Thread(
+        target=main_loop,
+        args=(cfg, stop_event),
+        daemon=True,
+        name="live-market-worker",
+    )
+    t.start()
+    return t, stop_event
 
 
 # ---------------------------- CLI ----------------------------
@@ -197,8 +295,8 @@ def _parse_args() -> argparse.Namespace:
         help="禁用 spot 拉取（debug 用，正常勿启用）",
     )
     p.add_argument(
-        "--spot-interval", type=int, default=300,
-        help="spot 拉取间隔秒数；默认 300（5min），过短易触发 IP 限流",
+        "--spot-stale-sec", type=int, default=60,
+        help="spot 数据陈旧阈值秒数；库内最新 spot age <= 此值时复用，默认 60s",
     )
     p.add_argument(
         "--archive-1m", action="store_true",

@@ -1,7 +1,7 @@
 """live_market worker 主循环 smoke 测：
 
-通过 monkeypatch 替换 trading_calendar / run_spot_once / run_archive_once，
-用 once=True 跑一次主循环，断言对应阶段调对应函数。
+通过 monkeypatch 替换 trading_calendar / subscription_service / run_archive_once
+等依赖，用 once=True 跑一次主循环，断言对应阶段调对应函数。
 
 不连真实数据库 / 网络。
 """
@@ -32,27 +32,80 @@ def _mock_calendar(monkeypatch, *, trading: bool, phase: str) -> None:
     )
 
 
-def test_spot_phase_triggers_run_spot_once(monkeypatch):
-    """phase='spot' 且 spot_enabled=True → run_spot_once 被调。"""
+def _mock_subscriptions(monkeypatch, due_subs: list[dict]) -> list[str]:
+    """把 subscription_service 的 due 查询 + 处理函数都 mock 掉。
+
+    Returns:
+        list[str]：由 process_due_subscription 触发产生的 fake run_id 列表。
+    """
+    processed_ids: list[str] = []
+
+    def _find_due(_now):
+        return due_subs
+
+    def _process(sub):
+        rid = f"fake_run_{sub['subscription_id']}"
+        processed_ids.append(rid)
+        return rid
+
+    import backend.services.subscription_service as ss
+    monkeypatch.setattr(ss, "find_due_subscriptions", _find_due)
+    monkeypatch.setattr(ss, "process_due_subscription", _process)
+    # 让 ensure_spot_fresh 也 no-op，避免触碰 DAO
+    monkeypatch.setattr(lm, "ensure_spot_fresh", lambda *_a, **_kw: True)
+    return processed_ids
+
+
+def test_spot_phase_with_due_subscriptions_triggers_each(monkeypatch):
+    """phase='spot' 且有 due 订阅 → 每个订阅各调一次 process_due_subscription。"""
     _mock_calendar(monkeypatch, trading=True, phase="spot")
-    calls: list[Any] = []
-    monkeypatch.setattr(lm, "run_spot_once", lambda: (calls.append("spot"), 100)[1])
+    due = [
+        {"subscription_id": "sub_a", "is_active": 1},
+        {"subscription_id": "sub_b", "is_active": 1},
+    ]
+    processed = _mock_subscriptions(monkeypatch, due_subs=due)
 
     rv = main_loop(LiveMarketConfig(once=True, spot_enabled=True))
 
     assert rv == 0
-    assert calls == ["spot"]
+    assert processed == ["fake_run_sub_a", "fake_run_sub_b"]
+
+
+def test_spot_phase_no_due_subs_skips_spot_fetch(monkeypatch):
+    """没有 due 订阅 → ensure_spot_fresh 不被调（节省 IP 配额）。"""
+    _mock_calendar(monkeypatch, trading=True, phase="spot")
+    spot_calls: list[Any] = []
+
+    def _find_due(_now):
+        return []
+
+    import backend.services.subscription_service as ss
+    monkeypatch.setattr(ss, "find_due_subscriptions", _find_due)
+    monkeypatch.setattr(
+        lm, "ensure_spot_fresh", lambda *_a, **_kw: spot_calls.append("called"),
+    )
+
+    main_loop(LiveMarketConfig(once=True, spot_enabled=True))
+
+    assert spot_calls == []  # 没拉 spot
 
 
 def test_spot_phase_disabled_does_not_fetch(monkeypatch):
-    """spot_enabled=False → 即使在 spot phase 也不拉。"""
+    """spot_enabled=False → 即使在 spot phase 也不查订阅 / 不拉。"""
     _mock_calendar(monkeypatch, trading=True, phase="spot")
-    calls: list[Any] = []
-    monkeypatch.setattr(lm, "run_spot_once", lambda: (calls.append("spot"), 100)[1])
+    spot_calls: list[Any] = []
+    sub_calls: list[Any] = []
+
+    monkeypatch.setattr(lm, "ensure_spot_fresh", lambda *_a, **_kw: spot_calls.append(1))
+    import backend.services.subscription_service as ss
+    monkeypatch.setattr(
+        ss, "find_due_subscriptions",
+        lambda _now: (sub_calls.append(1), [])[1],
+    )
 
     main_loop(LiveMarketConfig(once=True, spot_enabled=False))
 
-    assert calls == []
+    assert spot_calls == [] and sub_calls == []
 
 
 def test_eod_archive_phase_triggers_archive_when_enabled(monkeypatch):
@@ -96,16 +149,52 @@ def test_idle_phase_no_action(monkeypatch):
 
 
 def test_spot_failure_does_not_crash(monkeypatch):
-    """run_spot_once 抛异常 → 主循环只 log，不退出。"""
+    """ensure_spot_fresh 抛异常 → 主循环只 log，不退出（订阅会自然降级）。"""
     _mock_calendar(monkeypatch, trading=True, phase="spot")
 
-    def _boom():
+    due = [{"subscription_id": "sub_a", "is_active": 1}]
+    processed: list[str] = []
+
+    import backend.services.subscription_service as ss
+    monkeypatch.setattr(ss, "find_due_subscriptions", lambda _n: due)
+    monkeypatch.setattr(
+        ss, "process_due_subscription",
+        lambda s: (processed.append(s["subscription_id"]), "rid")[1],
+    )
+
+    def _spot_boom(*_a, **_kw):
         raise RuntimeError("akshare timeout")
 
-    monkeypatch.setattr(lm, "run_spot_once", _boom)
+    monkeypatch.setattr(lm, "ensure_spot_fresh", _spot_boom)
 
     rv = main_loop(LiveMarketConfig(once=True, spot_enabled=True))
-    assert rv == 0  # 异常被吞，正常退出
+    assert rv == 0
+    # spot 拉取失败但订阅仍会被处理（service 内会自动降级到昨日 close）
+    assert processed == ["sub_a"]
+
+
+def test_main_loop_stops_on_stop_event(monkeypatch):
+    """stop_event.set() 后主循环干净退出。"""
+    import threading
+
+    _mock_calendar(monkeypatch, trading=False, phase="idle")
+    stop_event = threading.Event()
+    stop_event.set()  # 立刻 set，循环开头就会退出
+
+    rv = main_loop(LiveMarketConfig(spot_enabled=True), stop_event=stop_event)
+    assert rv == 0
+
+
+def test_start_in_thread_returns_alive_thread_then_stops(monkeypatch):
+    """start_in_thread 返回 (Thread, stop_event)，stop_event.set() 后 thread 退出。"""
+    _mock_calendar(monkeypatch, trading=False, phase="idle")
+
+    cfg = LiveMarketConfig(spot_enabled=True, main_loop_sleep_sec=1)
+    thread, stop_event = lm.start_in_thread(cfg)
+    assert thread.is_alive()
+    stop_event.set()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
 
 
 def test_archive_failure_marks_date_done(monkeypatch):
