@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /**
  * 多因子合成创建页。
- * - 多个因子项（NSelect + 可选参数 JSON 字符串编辑）；
+ * - 多个因子项（NSelect + 嵌入式参数表单 ParamsFormRenderer）；
  * - method 下拉：equal / ic_weighted / orthogonal_equal；
  * - 其它通用字段对齐 EvalCreate（pool / 日期 / n_groups / forward_periods）。
  *
  * 因子项：每行可增 / 删，最少 2 最多 8（schema 层会再挡一次）。
- * params：以字符串 JSON 表单存储，默认空 → 用因子 default_params。
+ * params：选中因子时自动用其 default_params 初始化，用户可在表单上调整；
+ * 切换因子时 params 重置为新因子的 default_params。
  */
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
@@ -15,8 +16,10 @@ import {
   NButton, NSpace, NInput, NDynamicInput, useMessage,
 } from 'naive-ui'
 import { useFactors } from '@/api/factors'
+import type { Factor } from '@/api/factors'
 import { useCreateComposition } from '@/api/compositions'
 import PoolSelector from '@/components/forms/PoolSelector.vue'
+import ParamsFormRenderer from '@/components/forms/ParamsFormRenderer.vue'
 
 const router = useRouter()
 const message = useMessage()
@@ -38,15 +41,38 @@ const factorOptions = computed(() => {
   }))
 })
 
-// 每一行：{factor_id, paramsText}（paramsText 是 JSON 字符串，提交时解析）
+// 每一行：{factor_id, params}。params 在选择因子时自动用 default_params 初始化。
 interface FactorRow {
   factor_id: string
-  paramsText: string
+  params: Record<string, any>
 }
 const factorItems = ref<FactorRow[]>([
-  { factor_id: '', paramsText: '' },
-  { factor_id: '', paramsText: '' },
+  { factor_id: '', params: {} },
+  { factor_id: '', params: {} },
 ])
+
+// factor_id → Factor 查找表，用于读 params_schema / default_params。
+const factorById = computed<Record<string, Factor>>(() => {
+  const m: Record<string, Factor> = {}
+  for (const f of factors.value ?? []) m[f.factor_id] = f
+  return m
+})
+
+/** 切换因子时：用新因子的 default_params 重置 params（避免把旧因子的参数串到新因子上）。 */
+function onFactorChange(item: FactorRow, newId: string) {
+  const f = factorById.value[newId]
+  item.factor_id = newId
+  item.params = f?.default_params ? { ...f.default_params } : {}
+}
+
+/** 取该因子的 params_schema；空 schema → null（前端模板用此判断"该因子无参数"）。 */
+function getFactorSchema(fid: string): Record<string, any> | null {
+  if (!fid) return null
+  const f = factorById.value[fid]
+  if (!f?.params_schema) return null
+  if (Object.keys(f.params_schema).length === 0) return null
+  return f.params_schema
+}
 
 const method = ref<'equal' | 'ic_weighted' | 'orthogonal_equal'>('equal')
 const methodOptions = [
@@ -96,20 +122,12 @@ async function handleSubmit() {
     return
   }
 
-  // params 字符串 → dict；空字符串 → null，由后端用 default_params 填。
-  const factor_items: any[] = []
-  for (const r of validRows) {
-    let params: Record<string, any> | null = null
-    if (r.paramsText.trim()) {
-      try {
-        params = JSON.parse(r.paramsText)
-      } catch (e) {
-        message.error(`因子 ${r.factor_id} 的参数不是合法 JSON`)
-        return
-      }
-    }
-    factor_items.push({ factor_id: r.factor_id, params })
-  }
+  // 空 params dict → null，让后端用 default_params 填（与原协议兼容）；
+  // 非空则原样下发。
+  const factor_items = validRows.map((r) => ({
+    factor_id: r.factor_id,
+    params: r.params && Object.keys(r.params).length > 0 ? r.params : null,
+  }))
 
   const forwardPeriods = parseForwardPeriods(forwardPeriodsText.value)
   if (forwardPeriods.length === 0) {
@@ -164,23 +182,31 @@ async function handleSubmit() {
           v-model:value="factorItems"
           :min="2"
           :max="8"
-          :on-create="() => ({ factor_id: '', paramsText: '' })"
+          :on-create="() => ({ factor_id: '', params: {} })"
         >
           <template #default="{ value }">
-            <n-space style="width: 100%" :wrap="false">
+            <n-space vertical :size="8" style="width: 100%">
               <n-select
-                v-model:value="value.factor_id"
+                :value="value.factor_id"
                 :options="factorOptions"
                 :loading="factorsLoading"
                 placeholder="选择因子"
                 filterable
-                style="width: 260px"
+                style="width: 100%; max-width: 420px"
+                @update:value="(v: string) => onFactorChange(value, v)"
               />
-              <n-input
-                v-model:value="value.paramsText"
-                placeholder='可选：因子参数 JSON（如 {"n": 20}），空则用默认参数'
-                style="width: 400px"
+              <params-form-renderer
+                v-if="getFactorSchema(value.factor_id)"
+                :schema="getFactorSchema(value.factor_id)!"
+                :model-value="value.params"
+                @update:model-value="(p: Record<string, any>) => (value.params = p)"
               />
+              <span
+                v-else-if="value.factor_id"
+                style="color: #999; font-size: 12px"
+              >
+                该因子无可调参数
+              </span>
             </n-space>
           </template>
         </n-dynamic-input>
