@@ -329,9 +329,11 @@ const rankIcMeanDiverged = computed(() =>
 
             <n-grid-item>
               <chart-card title="分组累积净值（去均值）">
+                <!-- alphalens 在后端已经 (1+r).cumprod() 过，前端再 cumprod 会重复累积。 -->
                 <group-returns-chart
                   v-if="payload.alphalens.group_cumulative_returns"
                   :data="payload.alphalens.group_cumulative_returns"
+                  :cumulative="false"
                 />
                 <n-empty v-else description="无数据" />
               </chart-card>

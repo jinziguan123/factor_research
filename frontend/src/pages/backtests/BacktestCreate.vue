@@ -7,7 +7,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NSelect, NInputNumber,
-  NDatePicker, NButton, useMessage,
+  NDatePicker, NButton, NSwitch, NTooltip, useMessage,
 } from 'naive-ui'
 import { useFactors, useFactor } from '@/api/factors'
 import { useCreateBacktest } from '@/api/backtests'
@@ -47,6 +47,7 @@ const rebalancePeriod = ref(1)
 const position = ref('top')
 const costBps = ref(3)
 const initCash = ref(1e7)
+const filterPriceLimit = ref(false)
 
 const positionOptions = [
   { label: '做多头部 (top)', value: 'top' },
@@ -90,6 +91,7 @@ async function handleSubmit() {
     position: position.value,
     cost_bps: costBps.value,
     init_cash: initCash.value,
+    filter_price_limit: filterPriceLimit.value,
   }
 
   const result = await createBacktest.mutateAsync(body)
@@ -165,6 +167,27 @@ async function handleSubmit() {
       <!-- 初始资金 -->
       <n-form-item label="初始资金">
         <n-input-number v-model:value="initCash" :min="10000" :step="1000000" style="width: 200px" />
+      </n-form-item>
+
+      <!-- 涨跌停过滤 -->
+      <n-form-item>
+        <template #label>
+          <n-tooltip>
+            <template #trigger>
+              <span style="cursor: help; border-bottom: 1px dashed #999">
+                涨跌停过滤
+              </span>
+            </template>
+            开启后按 |pct_change| ≥ 0.097 的近似口径剔除当日触板票（多空两侧都剔），
+            以更接近"明日不可成交"的真实约束。<br/>
+            注意：未区分主板 / 创业板（20% 板）/ ST（5% 板），口径偏保守，
+            可能"误剔"少量科创板 / 创业板的合法 10% 涨幅交易。
+          </n-tooltip>
+        </template>
+        <n-switch v-model:value="filterPriceLimit" />
+        <span style="margin-left: 12px; color: #999; font-size: 12px">
+          {{ filterPriceLimit ? '已开启（更接近实盘）' : '已关闭（与历史回测可对比）' }}
+        </span>
       </n-form-item>
 
       <!-- 提交按钮 -->

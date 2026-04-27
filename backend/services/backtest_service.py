@@ -134,11 +134,47 @@ def _stats_to_payload(stats: pd.Series) -> dict:
     return out
 
 
+def _compute_price_limit_mask(
+    close: pd.DataFrame,
+    threshold: float = 0.097,
+) -> pd.DataFrame:
+    """近似计算"当日是否触及涨跌停板"的 bool 宽表（True = 触板，应剔除）。
+
+    口径：``|pct_change| ≥ threshold`` → 触板。``threshold=0.097`` 兜住 10% 板的
+    浮点误差（A 股涨跌停价对前收按 4 舍 5 入到 0.01 取整，pct 落在 9.7%~10.05%
+    都可能命中）。
+
+    简化与已知误差方向：
+    - **未分板块**：科创板 / 创业板（2020-08-24 后）板幅是 20%，按本口径
+      pct=10% 时会被误判为触板。这是"误剔合法交易"，方向保守（不会保留无法
+      成交的票）；要做精确版需要按 symbol 前缀 + 历史日期分情况判断。
+    - **未区分 ST**：ST/*ST 板幅 5%，本口径 10% 会漏判（pct=5% 触板没识别）。
+      暂时接受漏判——绝对量影响小，YAGNI。
+    - **代理时间错配**：使用"今日触板"作为"明日不可成交"的代理（连板假设），
+      未来可改为用"次日触板"（``shift(-1)``）做更严格判断。
+
+    Args:
+        close: qfq close 宽表，index=trade_date，columns=symbol。
+        threshold: 触板阈值，默认 0.097。
+
+    Returns:
+        bool 宽表，shape 同 close，第一行（无 prev_close）整行 False。
+        非数值（NaN pct_change）也按 False 处理（停牌日不视为触板）。
+    """
+    # fill_method=None：停牌日不向前填充，pct=NaN → 不视为触板。pandas 2.x 的
+    # 默认（pad）会把停牌日按上一非空价计算 pct，反而对停牌后复牌的票产出
+    # 错误的"暴涨"判定。
+    pct = close.pct_change(fill_method=None)
+    # NaN（停牌、首行）→ False；用 ge 直接走 numpy 不会传播 NaN 到 bool。
+    return pct.abs().ge(threshold).fillna(False)
+
+
 def _build_weights(
     F: pd.DataFrame,
     n_groups: int,
     rebalance: int,
     position: str,
+    excluded_mask: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """由因子宽表构造权重宽表（与 F 同 shape）。
 
@@ -155,6 +191,9 @@ def _build_weights(
         n_groups: 分组数（建议 5 / 10），必须 ≥ 2。
         rebalance: 调仓周期（单位 = 行数 = 交易日数），≥ 1。
         position: "top" 或 "long_short"，其它值抛 ValueError 提前暴露拼写错误。
+        excluded_mask: 可选 bool 宽表，True 位置视为该日该 symbol 不可入选
+            （典型用途：涨跌停过滤）。逻辑上等价于把对应位置的因子值置 NaN。
+            若 ``None`` 则不过滤；``reindex`` 兜底，缺失对齐位 = False。
 
     Returns:
         权重宽表，与 F 同 index 同 columns；行和按 position 模式：top → 1，
@@ -179,6 +218,12 @@ def _build_weights(
 
     for dt in rebalance_dates:
         row = F.loc[dt]
+        # 涨跌停过滤：mask=True 的位置当作 NaN，不参与本期 qcut。
+        if excluded_mask is not None and dt in excluded_mask.index:
+            # 用 reindex 的 fill_value 一步给缺失列补 False，避开 pandas 2.x
+            # 对 object dtype fillna 触发的 FutureWarning。
+            ban = excluded_mask.loc[dt].reindex(row.index, fill_value=False).astype(bool)
+            row = row.where(~ban)
         valid = row.dropna()
         # qcut 至少需要 n_groups 个不同值；样本过少时本期退回空仓。
         if len(valid) < n_groups:
@@ -368,7 +413,15 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
     position = str(body.get("position", "top"))
     init_cash = float(body.get("init_cash", 1e7))
 
-    W = _build_weights(F, n_groups=n_groups, rebalance=rebalance, position=position)
+    # 涨跌停过滤：默认关闭以保留与历史回测的可对比性；用户主动 opt-in 时按
+    # _compute_price_limit_mask 的近似口径剔除当日触板票。
+    filter_pl = bool(body.get("filter_price_limit", False))
+    excluded_mask = _compute_price_limit_mask(close) if filter_pl else None
+
+    W = _build_weights(
+        F, n_groups=n_groups, rebalance=rebalance, position=position,
+        excluded_mask=excluded_mask,
+    )
     size = W * init_cash / close
     size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
 

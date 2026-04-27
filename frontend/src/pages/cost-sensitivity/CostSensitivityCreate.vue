@@ -8,7 +8,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NSelect, NInputNumber,
-  NDatePicker, NDynamicTags, NButton, useMessage,
+  NDatePicker, NDynamicTags, NButton, NSwitch, NTooltip, useMessage,
 } from 'naive-ui'
 import { useFactors, useFactor } from '@/api/factors'
 import { useCreateCostSensitivity } from '@/api/cost_sensitivity'
@@ -46,6 +46,7 @@ const nGroups = ref(5)
 const rebalancePeriod = ref(1)
 const position = ref('top')
 const initCash = ref(1e7)
+const filterPriceLimit = ref(false)
 
 // cost_bps_list：NDynamicTags 操作字符串数组，提交时再转 number。
 // 默认 5 个点覆盖"无 / 典型 / 中 / 偏高 / 极端"四档，用户可任意增删。
@@ -112,6 +113,7 @@ async function handleSubmit() {
     position: position.value,
     init_cash: initCash.value,
     cost_bps_list: unique,
+    filter_price_limit: filterPriceLimit.value,
   }
 
   const result = await createRun.mutateAsync(body)
@@ -178,6 +180,25 @@ async function handleSubmit() {
 
       <n-form-item label="成本点 (bps)">
         <n-dynamic-tags v-model:value="costBpsList" />
+      </n-form-item>
+
+      <n-form-item>
+        <template #label>
+          <n-tooltip>
+            <template #trigger>
+              <span style="cursor: help; border-bottom: 1px dashed #999">
+                涨跌停过滤
+              </span>
+            </template>
+            按 |pct_change| ≥ 0.097 剔除当日触板票（多空两侧都剔），
+            更接近"明日不可成交"的真实约束。<br/>
+            注意：未区分主板 / 创业板（20%）/ ST（5%），口径偏保守。
+          </n-tooltip>
+        </template>
+        <n-switch v-model:value="filterPriceLimit" />
+        <span style="margin-left: 12px; color: #999; font-size: 12px">
+          {{ filterPriceLimit ? '已开启' : '已关闭' }}
+        </span>
       </n-form-item>
 
       <n-form-item>

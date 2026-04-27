@@ -61,7 +61,10 @@ class CreateBacktestIn(BaseModel):
     """``POST /api/backtests`` 请求体。
 
     - ``position`` 只能是 ``"top"`` 或 ``"long_short"``（_build_weights 会再校验一次）；
-    - ``cost_bps`` 默认 3bp = 万 3；``init_cash`` 默认 1000 万。
+    - ``cost_bps`` 默认 3bp = 万 3；``init_cash`` 默认 1000 万；
+    - ``filter_price_limit`` 默认 False（保留与历史回测的可对比性）。
+      开启后按 ``|pct_change| ≥ 0.097`` 的近似口径剔除当日触板票，详见
+      ``backtest_service._compute_price_limit_mask`` docstring 的误差方向说明。
     """
 
     factor_id: str
@@ -77,6 +80,7 @@ class CreateBacktestIn(BaseModel):
     position: str = "top"
     cost_bps: float = 3.0
     init_cash: float = 1e7
+    filter_price_limit: bool = False
 
 
 class CreateCostSensitivityIn(BaseModel):
@@ -103,6 +107,7 @@ class CreateCostSensitivityIn(BaseModel):
     position: str = "top"
     init_cash: float = 1e7
     cost_bps_list: list[float] = Field(..., min_length=2, max_length=20)
+    filter_price_limit: bool = False
 
     @model_validator(mode="after")
     def _check_cost_bps_list(self) -> "CreateCostSensitivityIn":
