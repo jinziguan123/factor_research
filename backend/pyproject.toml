@@ -36,6 +36,7 @@ dependencies = [
     "pytest-asyncio==0.24.0",
     "cryptography>=46.0.7",
     "alphalens-reloaded>=0.4.6",
+    "akshare>=1.13.0",
 ]
 
 [tool.setuptools.packages.find]
