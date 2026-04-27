@@ -1,0 +1,52 @@
+; Linux supervisord 守护配置模板（factor_research live_market worker）。
+;
+; 使用：
+;   1. 把本文件复制到 /etc/supervisor/conf.d/live_market.conf
+;   2. 把 {{PROJECT_ROOT}} / {{VENV_PYTHON}} / {{LOG_DIR}} / {{RUN_USER}} 替换为本机绝对值
+;   3. 重载：
+;        sudo supervisorctl reread
+;        sudo supervisorctl update
+;        sudo supervisorctl start live_market
+;   4. 查看：
+;        sudo supervisorctl status live_market
+;        tail -f {{LOG_DIR}}/live_market.log
+;   5. 停止：
+;        sudo supervisorctl stop live_market
+;
+; 关键参数：
+;   - autostart / autorestart：随 supervisord 启动 + 异常自动重启
+;   - startretries=3：连续失败 3 次后放弃（避免无限重启）
+;   - stopsignal=TERM：worker 内 KeyboardInterrupt → 干净退出
+;   - environment：放敏感凭据；生产建议挂 .env 文件而不是写死
+
+[program:live_market]
+command={{VENV_PYTHON}} -m backend.workers.live_market
+; 加 --archive-1m 启用盘后归档：
+; command={{VENV_PYTHON}} -m backend.workers.live_market --archive-1m
+
+directory={{PROJECT_ROOT}}
+user={{RUN_USER}}
+
+autostart=true
+autorestart=true
+startretries=3
+startsecs=10
+
+; SIGTERM 让 worker 走 KeyboardInterrupt 分支干净退出
+stopsignal=TERM
+stopwaitsecs=20
+
+stdout_logfile={{LOG_DIR}}/live_market.log
+stderr_logfile={{LOG_DIR}}/live_market.err.log
+stdout_logfile_maxbytes=50MB
+stdout_logfile_backups=10
+
+environment=
+  MYSQL_HOST="127.0.0.1",
+  MYSQL_PORT="3306",
+  MYSQL_USER="myuser",
+  MYSQL_PASSWORD="mypassword",
+  MYSQL_DATABASE="quant_data",
+  CLICKHOUSE_HOST="127.0.0.1",
+  CLICKHOUSE_PORT="9000",
+  CLICKHOUSE_DATABASE="quant_data"

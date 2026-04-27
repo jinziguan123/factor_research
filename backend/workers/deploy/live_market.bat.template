@@ -1,0 +1,36 @@
+@echo off
+REM Windows 前台启动脚本（开发态）。把 {{...}} 替换为绝对路径后双击或命令行运行。
+REM
+REM 守护进程参考 NSSM 用法（见 docs/runbook-live-market.md §3.3 Windows 章节）。
+REM
+REM 用法：
+REM   1. 把本文件复制到任意位置（如 C:\factor_research\start_live_market.bat）；
+REM   2. 替换 {{PROJECT_ROOT}} / {{VENV_PYTHON}} 为本机绝对路径；
+REM   3. 双击或在 cmd 里运行；
+REM   4. Ctrl+C 退出。
+
+setlocal
+
+REM 项目根（含 backend 目录）
+set PROJECT_ROOT={{PROJECT_ROOT}}
+
+REM venv 里的 python.exe（建议使用绝对路径，避免 PATH 干扰）
+set VENV_PYTHON={{VENV_PYTHON}}
+
+REM 数据库连接（默认本机；按需修改）
+set MYSQL_HOST=127.0.0.1
+set MYSQL_PORT=3306
+set MYSQL_USER=myuser
+set MYSQL_PASSWORD=mypassword
+set MYSQL_DATABASE=quant_data
+set CLICKHOUSE_HOST=127.0.0.1
+set CLICKHOUSE_PORT=9000
+set CLICKHOUSE_DATABASE=quant_data
+
+cd /d "%PROJECT_ROOT%"
+
+REM 默认不开 1m K 归档；要启用改成下面注释那行
+"%VENV_PYTHON%" -m backend.workers.live_market
+REM "%VENV_PYTHON%" -m backend.workers.live_market --archive-1m
+
+endlocal

@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd 守护配置模板。
+
+  使用：
+    1. 把本文件复制到 ~/Library/LaunchAgents/com.factorresearch.live_market.plist
+    2. 把下面的 {{PROJECT_ROOT}} / {{VENV_PYTHON}} / {{LOG_DIR}} 替换成本机绝对路径
+    3. 加载：
+         launchctl load ~/Library/LaunchAgents/com.factorresearch.live_market.plist
+       启动：
+         launchctl start com.factorresearch.live_market
+    4. 查看日志：
+         tail -f {{LOG_DIR}}/live_market.log
+    5. 停止：
+         launchctl stop com.factorresearch.live_market
+       卸载：
+         launchctl unload ~/Library/LaunchAgents/com.factorresearch.live_market.plist
+
+  关键参数：
+    - KeepAlive=true：进程崩溃后自动重启
+    - RunAtLoad=true：load 后立即启动
+    - WorkingDirectory：指向项目根，让 `python -m backend.workers.live_market` 能 import
+    - EnvironmentVariables：复制 .env 里 MySQL/ClickHouse 凭据；建议改用从 .env 读取
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.factorresearch.live_market</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>{{VENV_PYTHON}}</string>
+    <string>-m</string>
+    <string>backend.workers.live_market</string>
+    <!-- 默认不开 1m K 归档，需要时改成 --archive-1m -->
+    <!-- <string>- -archive-1m</string> -->
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>{{PROJECT_ROOT}}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MYSQL_HOST</key>
+    <string>127.0.0.1</string>
+    <key>MYSQL_PORT</key>
+    <string>3306</string>
+    <key>MYSQL_USER</key>
+    <string>myuser</string>
+    <key>MYSQL_PASSWORD</key>
+    <string>mypassword</string>
+    <key>MYSQL_DATABASE</key>
+    <string>quant_data</string>
+    <key>CLICKHOUSE_HOST</key>
+    <string>127.0.0.1</string>
+    <key>CLICKHOUSE_PORT</key>
+    <string>9000</string>
+    <key>CLICKHOUSE_DATABASE</key>
+    <string>quant_data</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- 失败重启间隔（秒），避免 akshare 故障时疯狂重启 -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>{{LOG_DIR}}/live_market.log</string>
+  <key>StandardErrorPath</key>
+  <string>{{LOG_DIR}}/live_market.err.log</string>
+</dict>
+</plist>
