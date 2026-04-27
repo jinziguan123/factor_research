@@ -12,6 +12,12 @@ import {
 import type { DataTableColumns } from 'naive-ui'
 import IcDecayInterpretationSection from '@/components/docs/IcDecayInterpretationSection.vue'
 import GroupReturnsInterpretationSection from '@/components/docs/GroupReturnsInterpretationSection.vue'
+import IcSeriesInterpretationSection from '@/components/docs/IcSeriesInterpretationSection.vue'
+import EquityCurveInterpretationSection from '@/components/docs/EquityCurveInterpretationSection.vue'
+import TurnoverInterpretationSection from '@/components/docs/TurnoverInterpretationSection.vue'
+import RankAutocorrInterpretationSection from '@/components/docs/RankAutocorrInterpretationSection.vue'
+import ValueHistogramInterpretationSection from '@/components/docs/ValueHistogramInterpretationSection.vue'
+import CorrHeatmapInterpretationSection from '@/components/docs/CorrHeatmapInterpretationSection.vue'
 
 interface GlossaryRow {
   term: string
@@ -176,7 +182,16 @@ const pitfallsCols: DataTableColumns<PitfallRow> = [
 ]
 
 const activeTab = ref<'glossary' | 'metrics' | 'pitfalls' | 'charts'>('glossary')
-const chartsSubTab = ref<'ic-decay' | 'group-returns'>('ic-decay')
+type ChartsSubTab =
+  | 'ic-decay'
+  | 'group-returns'
+  | 'ic-series'
+  | 'equity-curve'
+  | 'turnover'
+  | 'rank-autocorr'
+  | 'value-hist'
+  | 'corr-heatmap'
+const chartsSubTab = ref<ChartsSubTab>('ic-decay')
 </script>
 
 <template>
@@ -251,6 +266,24 @@ const chartsSubTab = ref<'ic-decay' | 'group-returns'>('ic-decay')
               </n-tab-pane>
               <n-tab-pane name="group-returns" tab="4.2 分组累计净值">
                 <group-returns-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="ic-series" tab="4.3 IC 时序">
+                <ic-series-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="equity-curve" tab="4.4 多空净值">
+                <equity-curve-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="turnover" tab="4.5 换手率">
+                <turnover-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="rank-autocorr" tab="4.6 排名自相关">
+                <rank-autocorr-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="value-hist" tab="4.7 因子值分布">
+                <value-histogram-interpretation-section />
+              </n-tab-pane>
+              <n-tab-pane name="corr-heatmap" tab="4.8 相关性热图">
+                <corr-heatmap-interpretation-section />
               </n-tab-pane>
             </n-tabs>
           </n-space>
