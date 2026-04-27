@@ -244,6 +244,51 @@ class CreateSignalIn(BaseModel):
         return self
 
 
+class CreateSubscriptionIn(BaseModel):
+    """``POST /api/signal-subscriptions`` 请求体。
+
+    实盘监控订阅：worker 按 ``refresh_interval_sec`` 周期重算这个因子组合，
+    每次产出一条新的 signal_run（关联 subscription_id），保留刷新历史。
+
+    支持两种创建方式：
+    1. 完整 body（与 CreateSignalIn 类似，但去掉 use_realtime / as_of_time）；
+    2. 从已有 signal_run 派生：路由会从 fr_signal_runs 读出 config 拼成 body。
+    """
+
+    factor_items: list[CompositionFactorItem] = Field(..., min_length=1, max_length=8)
+    method: str = "equal"
+    pool_id: int
+    n_groups: int = Field(default=5, ge=2, le=20)
+    ic_lookback_days: int = Field(default=60, ge=10, le=500)
+    filter_price_limit: bool = True
+    top_n: int | None = Field(default=None, ge=1, le=200)
+    # 调度：默认 5min；30s floor 由 service 层保护
+    refresh_interval_sec: int = Field(default=300, ge=30, le=3600)
+
+    @model_validator(mode="after")
+    def _check_method(self) -> "CreateSubscriptionIn":
+        if self.method not in ("equal", "ic_weighted", "orthogonal_equal", "single"):
+            raise ValueError(
+                f"method={self.method!r} 不支持，"
+                "仅接受 equal/ic_weighted/orthogonal_equal/single"
+            )
+        if self.method == "single" and len(self.factor_items) != 1:
+            raise ValueError("method='single' 时 factor_items 必须正好 1 个")
+        return self
+
+
+class UpdateSubscriptionIn(BaseModel):
+    """``PUT /api/signal-subscriptions/{id}`` 请求体（部分字段更新）。
+
+    主要用于 toggle is_active 或调整 refresh_interval_sec。
+    factor_items / method / pool_id 等"配置层"字段不可修改——若要改，
+    DELETE + 重建一条新订阅，避免破坏 last_run_id 链的语义连续性。
+    """
+
+    is_active: bool | None = None
+    refresh_interval_sec: int | None = Field(default=None, ge=30, le=3600)
+
+
 class BatchDeleteIn(BaseModel):
     """批量删除请求体。``run_ids`` 最多 100 条，防止单次请求删太多。"""
 

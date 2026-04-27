@@ -35,6 +35,7 @@ from backend.api.routers import (
     indices,
     param_sensitivity,
     pools,
+    signal_subscriptions,
     signals,
     symbols,
 )
@@ -180,6 +181,7 @@ app.include_router(cost_sensitivity.router)
 app.include_router(param_sensitivity.router)
 app.include_router(compositions.router)
 app.include_router(signals.router)
+app.include_router(signal_subscriptions.router)
 app.include_router(bars.router)
 app.include_router(admin.router)
 app.include_router(data_health.router)
