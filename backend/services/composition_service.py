@@ -263,6 +263,42 @@ def _combine_weighted(
     return result
 
 
+def _compute_ic_contributions(
+    per_factor_ic: dict[str, dict],
+    weights: dict[str, float] | None,
+    factor_ids: list[str],
+) -> dict[str, float | None]:
+    """每个因子对合成预测力的贡献度占比（Σ = 1）。
+
+    公式：``contribution_i = |ic_i × w_i| / Σ_j |ic_j × w_j|``
+
+    weights 语义：
+    - ``None``（equal / orthogonal_equal）：等权 1/N。
+      orthogonal_equal 下"原始 IC × 等权"是近似——正交化后的子因子独立 IC
+      没有单独算（YAGNI），但用于诊断"哪个因子主导"已经够用。
+    - 字典：``ic_weighted`` 给出的有方向权重；这里取 ``|w_i|`` 度量大小。
+
+    退化：所有 ``|ic × w| ≈ 0`` 时返回全 None（前端显示 "-"），避免除零给出
+    无意义比例。
+    """
+    n = len(factor_ids)
+    if n == 0:
+        return {}
+    if weights is None:
+        contrib_w = {fid: 1.0 / n for fid in factor_ids}
+    else:
+        contrib_w = {fid: abs(float(weights.get(fid, 0.0))) for fid in factor_ids}
+    raw = {
+        fid: abs(float(per_factor_ic.get(fid, {}).get("ic_mean") or 0.0))
+        * contrib_w[fid]
+        for fid in factor_ids
+    }
+    total = sum(raw.values())
+    if total < 1e-12:
+        return {fid: None for fid in factor_ids}
+    return {fid: raw[fid] / total for fid in factor_ids}
+
+
 def _combine_orthogonal_equal(z_frames: list[pd.DataFrame]) -> pd.DataFrame:
     """按给定顺序做横截面 Gram-Schmidt 残差正交化，再 z-score 等权。
 
@@ -503,6 +539,17 @@ def run_composition(run_id: str, body: dict) -> None:
                 "ic_ir": _nan_to_none(ic_sum["ic_ir"]),
                 "ic_win_rate": _nan_to_none(ic_sum["ic_win_rate"]),
             }
+
+        # 7.1 IC 贡献度 = |IC × weight| 归一化占比（Σ=1）。
+        #     回答"合成信号的预测力具体由谁在贡献"。weights=None 时等权（equal /
+        #     orthogonal_equal）；orthogonal_equal 用原始 IC 近似，详见函数 docstring。
+        contributions = _compute_ic_contributions(
+            per_factor_ic,
+            weights if method == "ic_weighted" else None,
+            factor_ids,
+        )
+        for fid in factor_ids:
+            per_factor_ic[fid]["ic_contribution"] = contributions[fid]
 
         _update_status(run_id, progress=90)
 

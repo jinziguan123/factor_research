@@ -62,6 +62,7 @@ interface IcRow {
   ic_mean: number | null
   ic_ir: number | null
   ic_win_rate: number | null
+  ic_contribution: number | null
 }
 const icRows = computed<IcRow[]>(() => {
   const pf = perFactorIc.value
@@ -73,16 +74,19 @@ const icRows = computed<IcRow[]>(() => {
         ic_mean: v.ic_mean,
         ic_ir: v.ic_ir,
         ic_win_rate: v.ic_win_rate,
+        ic_contribution: v.ic_contribution ?? null,
       })
     }
   }
   // 合成因子一行放最前，突出"是否比任何单因子都强"。
+  // 合成因子本身不是"贡献者"而是"结果"，contribution 留空。
   if (run.value?.status === 'success') {
     rows.unshift({
       factor_id: '📊 合成因子',
       ic_mean: run.value?.ic_mean ?? null,
       ic_ir: run.value?.ic_ir ?? null,
       ic_win_rate: run.value?.ic_win_rate ?? null,
+      ic_contribution: null,
     })
   }
   return rows
@@ -90,9 +94,20 @@ const icRows = computed<IcRow[]>(() => {
 
 const icColumns: DataTableColumns<IcRow> = [
   { title: '因子', key: 'factor_id', width: 200 },
-  { title: 'IC 均值', key: 'ic_mean', width: 130, render: (r) => fmtNum(r.ic_mean, 4) },
-  { title: 'IC_IR', key: 'ic_ir', width: 130, render: (r) => fmtNum(r.ic_ir) },
-  { title: 'IC 胜率', key: 'ic_win_rate', width: 130, render: (r) => fmtPct(r.ic_win_rate) },
+  { title: 'IC 均值', key: 'ic_mean', width: 120, render: (r) => fmtNum(r.ic_mean, 4) },
+  { title: 'IC_IR', key: 'ic_ir', width: 110, render: (r) => fmtNum(r.ic_ir) },
+  { title: 'IC 胜率', key: 'ic_win_rate', width: 110, render: (r) => fmtPct(r.ic_win_rate) },
+  {
+    // 显示规则：合成因子那行 contribution=null → "-"；
+    // orthogonal_equal 方法下 tooltip 提示"基于原始 IC 近似"。
+    title: 'IC 贡献度',
+    key: 'ic_contribution',
+    width: 140,
+    render: (r) => {
+      if (r.ic_contribution == null) return '-'
+      return fmtPct(r.ic_contribution, 1)
+    },
+  },
 ]
 
 // 权重表（ic_weighted 才有）
@@ -258,6 +273,20 @@ const improveHint = computed<string | null>(() => {
       </n-grid>
 
       <n-card v-if="run?.status === 'success' && icRows.length > 0" title="合成 vs. 单因子 IC 对比" style="margin-bottom: 16px">
+        <n-alert type="default" size="small" style="margin-bottom: 12px">
+          <span style="font-size: 12px; opacity: 0.85">
+            <b>IC 贡献度</b> = |IC × 权重| 归一化后的占比，回答"合成预测力具体由谁在贡献"。
+            <span v-if="run.method === 'equal' || run.method === 'orthogonal_equal'">
+              当前方法权重均为 1/N，故贡献度正比于 |IC|。
+            </span>
+            <span v-if="run.method === 'orthogonal_equal'">
+              （正交化后子因子的独立 IC 未单独计算，此处用原始 IC 近似。）
+            </span>
+            <span v-if="run.method === 'ic_weighted'">
+              当前方法权重已由 IC 决定，故贡献度正比于 IC²，强者占比更大。
+            </span>
+          </span>
+        </n-alert>
         <n-data-table
           :columns="icColumns"
           :data="icRows"

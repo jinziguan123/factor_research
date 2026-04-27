@@ -18,11 +18,16 @@ export interface CorrMatrix {
   values: (number | null)[][]
 }
 
-/** 每个原始因子的 IC 汇总（供"合成 vs. 单因子"对比）。 */
+/** 每个原始因子的 IC 汇总（供"合成 vs. 单因子"对比）。
+ *
+ * ic_contribution: |IC × weight| 归一化后的占比（Σ = 1）。
+ * 回答"合成信号的预测力具体由谁在贡献"。全因子 IC≈0 时为 null。
+ */
 export interface PerFactorIcEntry {
   ic_mean: number | null
   ic_ir: number | null
   ic_win_rate: number | null
+  ic_contribution?: number | null
 }
 
 export interface CompositionRun {
