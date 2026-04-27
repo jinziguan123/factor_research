@@ -1,0 +1,93 @@
+// 实盘监控订阅 API 层
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
+import { toValue, type MaybeRefOrGetter, type Ref } from 'vue'
+import { client } from './client'
+import type { CompositionFactorItem } from './compositions'
+
+export interface SignalSubscription {
+  subscription_id: string
+  factor_items: CompositionFactorItem[]
+  method: 'equal' | 'ic_weighted' | 'orthogonal_equal' | 'single'
+  pool_id: number
+  n_groups: number
+  ic_lookback_days: number
+  filter_price_limit: 0 | 1
+  top_n: number | null
+  refresh_interval_sec: number
+  is_active: 0 | 1
+  last_refresh_at: string | null
+  last_run_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CreateSubscriptionBody {
+  factor_items: { factor_id: string; params?: Record<string, any> | null }[]
+  method: string
+  pool_id: number
+  n_groups?: number
+  ic_lookback_days?: number
+  filter_price_limit?: boolean
+  top_n?: number | null
+  refresh_interval_sec?: number
+}
+
+/** 创建订阅；可附带 from_run_id 让后端做存在性校验。 */
+export function useCreateSubscription() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      body, fromRunId,
+    }: { body: CreateSubscriptionBody; fromRunId?: string }) => {
+      const url = fromRunId
+        ? `/signal-subscriptions?from_run_id=${encodeURIComponent(fromRunId)}`
+        : '/signal-subscriptions'
+      return client.post(url, body).then(r => r.data)
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['signal-subscriptions'] }),
+  })
+}
+
+export function useSubscriptions(
+  params?: MaybeRefOrGetter<{ active?: 0 | 1 } | undefined>,
+) {
+  return useQuery<SignalSubscription[]>({
+    queryKey: ['signal-subscriptions', params],
+    queryFn: () =>
+      client.get('/signal-subscriptions', { params: toValue(params) ?? {} }).then(r => r.data),
+    refetchInterval: 5000,  // 5s 轮询：worker 刷新订阅时 last_refresh_at 会变
+  })
+}
+
+export function useSubscription(id: Ref<string>) {
+  return useQuery<SignalSubscription>({
+    queryKey: ['signal-subscription', id],
+    queryFn: () => client.get(`/signal-subscriptions/${id.value}`).then(r => r.data),
+    enabled: () => !!id.value,
+    refetchInterval: 5000,
+  })
+}
+
+/** 切换 is_active / 改 refresh_interval_sec。 */
+export function useUpdateSubscription() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      id, body,
+    }: { id: string; body: { is_active?: boolean; refresh_interval_sec?: number } }) =>
+      client.put(`/signal-subscriptions/${id}`, body).then(r => r.data),
+    onSuccess: (_res, vars) => {
+      qc.invalidateQueries({ queryKey: ['signal-subscriptions'] })
+      qc.invalidateQueries({ queryKey: ['signal-subscription', vars.id] })
+    },
+  })
+}
+
+export function useDeleteSubscription() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      client.delete(`/signal-subscriptions/${id}`).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['signal-subscriptions'] }),
+  })
+}

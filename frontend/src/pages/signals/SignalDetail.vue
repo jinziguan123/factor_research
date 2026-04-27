@@ -15,11 +15,15 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NAlert, NDataTable, NGrid, NGridItem, NTag, NSpace,
-  NButton, NSelect, NSwitch, NIcon, useMessage,
+  NButton, NSelect, NSwitch, NIcon, NDivider, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { useSignal, useCreateSignal } from '@/api/signals'
 import type { SignalHolding } from '@/api/signals'
+import {
+  useSubscriptions, useCreateSubscription, useUpdateSubscription,
+  useDeleteSubscription,
+} from '@/api/signal_subscriptions'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
@@ -54,6 +58,111 @@ watch(run, (r) => {
 }, { immediate: true })
 
 const createSignalMut = useCreateSignal()
+
+// 订阅相关：找当前 run 配置对应的订阅（如果有），用于 toggle 状态
+const { data: allSubs } = useSubscriptions()
+const matchedSubscription = computed(() => {
+  // 匹配规则：当前 run 是否被某订阅"产出过"——last_run_id 指向当前 run
+  // 或订阅的 factor_items + pool + method 与当前 run 一致（找最新创建的）
+  const subs = allSubs.value ?? []
+  const r = run.value
+  if (!r) return null
+  // 优先：last_run_id == 当前 run
+  const exact = subs.find(s => s.last_run_id === r.run_id)
+  if (exact) return exact
+  // 次选：配置匹配（最新的一条）
+  const sameConfig = subs
+    .filter(s =>
+      s.pool_id === r.pool_id
+      && s.method === r.method
+      && s.factor_items.length === r.factor_items.length
+      && s.factor_items.every((it, i) =>
+        it.factor_id === r.factor_items[i]?.factor_id
+      )
+    )
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : -1))
+  return sameConfig[0] ?? null
+})
+
+const refreshIntervalOptions = [
+  { label: '1 分钟', value: 60 },
+  { label: '3 分钟', value: 180 },
+  { label: '5 分钟', value: 300 },
+  { label: '10 分钟', value: 600 },
+  { label: '30 分钟', value: 1800 },
+]
+
+const createSubMut = useCreateSubscription()
+const updateSubMut = useUpdateSubscription()
+const deleteSubMut = useDeleteSubscription()
+
+const subRefreshIntervalEdit = ref<number>(300)
+watch(matchedSubscription, (s) => {
+  if (s) subRefreshIntervalEdit.value = s.refresh_interval_sec
+}, { immediate: true })
+
+async function handleEnableMonitoring() {
+  if (!run.value) return
+  const r = run.value
+  const body = {
+    factor_items: r.factor_items.map((it: any) => ({
+      factor_id: it.factor_id,
+      params: it.params ?? null,
+    })),
+    method: r.method,
+    pool_id: r.pool_id,
+    n_groups: r.n_groups,
+    ic_lookback_days: r.ic_lookback_days,
+    filter_price_limit: !!r.filter_price_limit,
+    top_n: r.top_n,
+    refresh_interval_sec: subRefreshIntervalEdit.value,
+  }
+  try {
+    const res = await createSubMut.mutateAsync({ body, fromRunId: r.run_id })
+    message.success(`已开启实盘监控 (订阅 ${res.subscription_id.slice(0, 8)})`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e?.message || '开启失败')
+  }
+}
+
+async function handleToggleActive(newActive: boolean) {
+  const sub = matchedSubscription.value
+  if (!sub) return
+  try {
+    await updateSubMut.mutateAsync({
+      id: sub.subscription_id,
+      body: { is_active: newActive },
+    })
+    message.success(newActive ? '订阅已恢复' : '订阅已暂停')
+  } catch (e: any) {
+    message.error(e?.message || '切换失败')
+  }
+}
+
+async function handleUpdateInterval() {
+  const sub = matchedSubscription.value
+  if (!sub) return
+  try {
+    await updateSubMut.mutateAsync({
+      id: sub.subscription_id,
+      body: { refresh_interval_sec: subRefreshIntervalEdit.value },
+    })
+    message.success(`刷新间隔已改为 ${subRefreshIntervalEdit.value}s`)
+  } catch (e: any) {
+    message.error(e?.message || '更新失败')
+  }
+}
+
+async function handleDeleteSubscription() {
+  const sub = matchedSubscription.value
+  if (!sub) return
+  try {
+    await deleteSubMut.mutateAsync(sub.subscription_id)
+    message.success('订阅已删除（历史 run 保留）')
+  } catch (e: any) {
+    message.error(e?.message || '删除失败')
+  }
+}
 
 async function handleRerun() {
   if (!run.value) return
@@ -246,6 +355,121 @@ const icColumns: DataTableColumns<IcRow> = [
           盘后或 spot 陈旧（&gt;10min）时 service 自动降级到昨日 close。
         </span>
       </n-alert>
+
+      <!-- 实盘监控订阅卡片：决定 worker 是否周期性重算这个信号 -->
+      <n-card
+        v-if="run"
+        title="📡 实盘监控订阅"
+        size="small"
+        style="margin-bottom: 16px"
+      >
+        <!-- 情况 1：尚未订阅 -->
+        <div v-if="!matchedSubscription">
+          <n-space align="center" :size="16">
+            <span style="font-size: 13px; color: #666">
+              开启后 worker 会按设定间隔周期性重算本信号，每次产出新的 run（保留历史）。
+            </span>
+          </n-space>
+          <n-space :size="12" align="center" style="margin-top: 12px">
+            <span style="font-size: 13px">刷新间隔：</span>
+            <n-select
+              v-model:value="subRefreshIntervalEdit"
+              :options="refreshIntervalOptions"
+              style="width: 140px"
+              size="small"
+            />
+            <n-button
+              type="primary"
+              :loading="createSubMut.isPending.value"
+              @click="handleEnableMonitoring"
+            >
+              开启实盘监控
+            </n-button>
+          </n-space>
+        </div>
+
+        <!-- 情况 2：已订阅 -->
+        <div v-else>
+          <n-descriptions :column="3" size="small" bordered>
+            <n-descriptions-item label="订阅 ID">
+              <code>{{ matchedSubscription.subscription_id.slice(0, 8) }}</code>
+            </n-descriptions-item>
+            <n-descriptions-item label="状态">
+              <n-tag
+                v-if="matchedSubscription.is_active"
+                size="small" type="success" bordered
+              >
+                🟢 活跃中
+              </n-tag>
+              <n-tag v-else size="small" type="warning" bordered>
+                ⏸ 已暂停
+              </n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="刷新间隔">
+              {{ matchedSubscription.refresh_interval_sec }} 秒
+            </n-descriptions-item>
+            <n-descriptions-item label="上次刷新">
+              {{ matchedSubscription.last_refresh_at ?? '尚未刷新' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="最新 run">
+              <code v-if="matchedSubscription.last_run_id">
+                {{ matchedSubscription.last_run_id.slice(0, 8) }}
+              </code>
+              <span v-else style="color: #999">—</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="创建时间">
+              {{ matchedSubscription.created_at }}
+            </n-descriptions-item>
+          </n-descriptions>
+
+          <n-space :size="12" align="center" style="margin-top: 16px" wrap>
+            <span style="font-size: 13px">
+              <b>实盘监控开关：</b>
+            </span>
+            <n-switch
+              :value="!!matchedSubscription.is_active"
+              :loading="updateSubMut.isPending.value"
+              @update:value="handleToggleActive"
+            />
+
+            <n-divider vertical />
+
+            <span style="font-size: 13px">改间隔：</span>
+            <n-select
+              v-model:value="subRefreshIntervalEdit"
+              :options="refreshIntervalOptions"
+              style="width: 140px"
+              size="small"
+            />
+            <n-button
+              size="small"
+              :loading="updateSubMut.isPending.value"
+              :disabled="subRefreshIntervalEdit === matchedSubscription.refresh_interval_sec"
+              @click="handleUpdateInterval"
+            >
+              应用
+            </n-button>
+
+            <n-divider vertical />
+
+            <n-button
+              size="small" type="error" quaternary
+              :loading="deleteSubMut.isPending.value"
+              @click="handleDeleteSubscription"
+            >
+              删除订阅
+            </n-button>
+          </n-space>
+
+          <n-alert
+            v-if="!matchedSubscription.is_active"
+            type="warning" size="small" :show-icon="false"
+            style="margin-top: 12px"
+          >
+            订阅已暂停，worker 不再刷新；切回 🟢 即恢复。
+          </n-alert>
+        </div>
+      </n-card>
 
       <n-card v-if="run" title="基础信息" style="margin-bottom: 16px">
         <n-descriptions :column="3" bordered>
