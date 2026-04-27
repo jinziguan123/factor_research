@@ -15,6 +15,7 @@ const menuOptions = [
   { label: '成本敏感性', key: '/cost-sensitivity' },
   { label: '参数敏感性', key: '/param-sensitivity' },
   { label: '多因子合成', key: '/compositions' },
+  { label: '实盘信号', key: '/signals' },
   { label: 'K 线查看', key: '/klines' },
   { label: '数据维护', key: '/admin' },
   { label: '数据健康度', key: '/data/health' },
