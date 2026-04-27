@@ -166,8 +166,24 @@ const columns: DataTableColumns<SignalRun> = [
   {
     title: '实时',
     key: 'use_realtime',
-    width: 60,
-    render: (row) => row.use_realtime ? '✓' : '—',
+    width: 80,
+    render: (row) =>
+      row.use_realtime
+        ? h(NTag, { size: 'small', type: 'error', bordered: false }, {
+            default: () => '🔴 实盘',
+          })
+        : h('span', { style: 'color: #999' }, '—'),
+  },
+  {
+    title: 'Top',
+    key: 'top_n',
+    width: 80,
+    render: (row) =>
+      row.top_n != null
+        ? h(NTag, { size: 'small', type: 'info', bordered: false }, {
+            default: () => `Top ${row.top_n}`,
+          })
+        : h('span', { style: 'color: #999; font-size: 12px' }, '全部'),
   },
   { title: '触发时刻', key: 'as_of_time', width: 160 },
   { title: '当日', key: 'as_of_date', width: 110 },

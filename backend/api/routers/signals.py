@@ -56,9 +56,9 @@ def create_signal(body: CreateSignalIn, bt: BackgroundTasks) -> dict:
                 INSERT INTO fr_signal_runs
                 (run_id, factor_items_json, method, pool_id, n_groups,
                  ic_lookback_days, as_of_time, as_of_date,
-                 use_realtime, filter_price_limit,
+                 use_realtime, filter_price_limit, top_n,
                  status, progress, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
                 """,
                 (
                     run_id,
@@ -71,6 +71,7 @@ def create_signal(body: CreateSignalIn, bt: BackgroundTasks) -> dict:
                     as_of_time.date(),
                     1 if body.use_realtime else 0,
                     1 if body.filter_price_limit else 0,
+                    body.top_n,
                     datetime.now(),
                 ),
             )
@@ -96,7 +97,7 @@ def list_signals(
     sql = (
         "SELECT run_id, factor_items_json, method, pool_id, n_groups, "
         "ic_lookback_days, as_of_time, as_of_date, use_realtime, "
-        "filter_price_limit, status, progress, error_message, "
+        "filter_price_limit, top_n, status, progress, error_message, "
         "n_holdings_top, n_holdings_bot, "
         "created_at, started_at, finished_at "
         "FROM fr_signal_runs WHERE 1=1"

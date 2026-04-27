@@ -225,6 +225,8 @@ class CreateSignalIn(BaseModel):
     as_of_time: datetime | None = None  # None → service 内部用 NOW()
     use_realtime: bool = True
     filter_price_limit: bool = True
+    # top_n: 可选 top K 限制；None → qcut 顶组全部（兼容旧行为）
+    top_n: int | None = Field(default=None, ge=1, le=200)
 
     @model_validator(mode="after")
     def _check_fields(self) -> "CreateSignalIn":

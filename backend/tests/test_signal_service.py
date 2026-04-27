@@ -312,3 +312,49 @@ def test_build_top_bottom_top_sorted_desc_by_factor_value() -> None:
     # 关键：top 内部按因子值降序
     if len(top) >= 2:
         assert top[0]["factor_value_composite"] >= top[1]["factor_value_composite"]
+
+
+def test_build_top_bottom_top_n_truncates_to_k() -> None:
+    """top_n=2：qcut 顶组若有 3 只，最终只保留因子值最高的 2 只。"""
+    # 10 只票，n_groups=5 → 顶组 2 只；top_n=1 → 只剩 1 只（最高的）
+    syms = [f"S{i:02d}" for i in range(10)]
+    values = list(range(1, 11))
+    F = pd.DataFrame(
+        {s: [0, 0, v] for s, v in zip(syms, values)},
+        index=_idx(3),
+    )
+    top, bot, n_top, n_bot = _build_top_bottom(
+        F, pd.DataFrame(), n_groups=5, filter_price_limit=False, top_n=1,
+    )
+    assert n_top == 1
+    assert n_bot == 1
+    assert top[0]["symbol"] == "S09"  # 最高
+    assert bot[0]["symbol"] == "S00"  # 最低
+
+
+def test_build_top_bottom_top_n_none_falls_back_to_qcut_full() -> None:
+    """top_n=None：保留 qcut 顶组的全部（默认行为）。"""
+    syms = [f"S{i:02d}" for i in range(10)]
+    values = list(range(1, 11))
+    F = pd.DataFrame(
+        {s: [0, 0, v] for s, v in zip(syms, values)},
+        index=_idx(3),
+    )
+    top, _, n_top, _ = _build_top_bottom(
+        F, pd.DataFrame(), n_groups=5, filter_price_limit=False, top_n=None,
+    )
+    assert n_top == 2  # 5 组 10 票 → 每组 2 只
+
+
+def test_build_top_bottom_top_n_larger_than_group_size() -> None:
+    """top_n 大于 qcut 顶组实际容量 → 不增票，保持顶组容量。"""
+    syms = [f"S{i:02d}" for i in range(10)]
+    values = list(range(1, 11))
+    F = pd.DataFrame(
+        {s: [0, 0, v] for s, v in zip(syms, values)},
+        index=_idx(3),
+    )
+    top, _, n_top, _ = _build_top_bottom(
+        F, pd.DataFrame(), n_groups=5, filter_price_limit=False, top_n=100,
+    )
+    assert n_top == 2  # 顶组本身只有 2 只，top_n=100 不会凭空造票

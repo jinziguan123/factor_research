@@ -44,6 +44,8 @@ export interface SignalRun {
   as_of_date: string
   use_realtime: 0 | 1
   filter_price_limit: 0 | 1
+  /** 可选 top K 限制；null 表示 qcut 顶组全部。 */
+  top_n: number | null
   status: 'pending' | 'running' | 'success' | 'failed' | 'aborting' | 'aborted'
   progress: number
   error_message?: string

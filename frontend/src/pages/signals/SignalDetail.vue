@@ -3,31 +3,83 @@
  * 实盘信号详情页。
  *
  * 布局：
- * - 顶部：基础信息（method / 股票池 / as_of_time / use_realtime / spot_meta）
- * - 中部：top 组排名表（NDataTable，每只票含因子综合值 + 子因子分解）
- * - 下部：bottom 组排名表（同结构）
- * - 侧栏：spot_meta 摘要 + 多因子时显示 weights / per_factor_ic 表
+ * - 顶部：实时模式横幅（仅 use_realtime=1 时显示，红色醒目）
+ * - 基础信息（method / 股票池 / as_of_time / use_realtime / top_n / spot_meta）
+ * - 快速重跑卡片：复制原 config，可调 use_realtime / filter_price_limit / top_n / n_groups
+ * - top 组 / bottom 组排名表（含因子综合值 + 子因子分解）
  *
  * pending/running 时由 useSignal 自动 1.5s 轮询；success/failed 后停。
  */
-import { computed, h } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NAlert, NDataTable, NGrid, NGridItem, NTag, NSpace,
+  NButton, NSelect, NSwitch, NIcon, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { useSignal } from '@/api/signals'
+import { useSignal, useCreateSignal } from '@/api/signals'
 import type { SignalHolding } from '@/api/signals'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 const route = useRoute()
 const router = useRouter()
+const message = useMessage()
 
 const runId = computed(() => route.params.runId as string)
 const { data: run, isLoading } = useSignal(runId)
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+// 快速重跑：复制原 config + 4 个可调旋钮
+const rerunUseRealtime = ref(true)
+const rerunFilterPriceLimit = ref(true)
+const rerunTopN = ref<number>(20)  // 0 = sentinel "全部"
+const rerunNGroups = ref(5)
+const topNOptions = [
+  { label: 'Top 5', value: 5 },
+  { label: 'Top 10', value: 10 },
+  { label: 'Top 20', value: 20 },
+  { label: 'Top 50', value: 50 },
+  { label: 'Top 100', value: 100 },
+  { label: '全部（qcut 顶组所有）', value: 0 },
+]
+// run 加载完后初始化重跑表单为原值
+watch(run, (r) => {
+  if (!r) return
+  rerunUseRealtime.value = !!r.use_realtime
+  rerunFilterPriceLimit.value = !!r.filter_price_limit
+  rerunTopN.value = r.top_n ?? 0  // null → 0 sentinel
+  rerunNGroups.value = r.n_groups
+}, { immediate: true })
+
+const createSignalMut = useCreateSignal()
+
+async function handleRerun() {
+  if (!run.value) return
+  const r = run.value
+  // 用原 config 复制 factor_items + 调整后的开关
+  const body: Record<string, any> = {
+    factor_items: r.factor_items.map((it: any) => ({
+      factor_id: it.factor_id,
+      params: it.params ?? null,
+    })),
+    method: r.method,
+    pool_id: r.pool_id,
+    n_groups: rerunNGroups.value,
+    ic_lookback_days: r.ic_lookback_days,
+    use_realtime: rerunUseRealtime.value,
+    filter_price_limit: rerunFilterPriceLimit.value,
+    top_n: rerunTopN.value > 0 ? rerunTopN.value : null,
+  }
+  try {
+    const res = await createSignalMut.mutateAsync(body)
+    message.success('已重新触发，跳转到新 run')
+    router.push(`/signals/${res.run_id}`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e?.message || '触发失败')
+  }
+}
 
 const isRunning = computed(
   () => run.value?.status === 'pending' || run.value?.status === 'running',
@@ -176,6 +228,25 @@ const icColumns: DataTableColumns<IcRow> = [
     </n-page-header>
 
     <n-spin :show="isLoading && !run">
+      <!-- 实时模式横幅：use_realtime=1 时给出醒目提示（红底+图标） -->
+      <n-alert
+        v-if="run && run.use_realtime"
+        type="error"
+        :show-icon="true"
+        closable
+        style="margin-bottom: 16px; border-left-width: 6px"
+      >
+        <template #header>
+          <span style="font-weight: 700; font-size: 15px">
+            ⚠️ 实盘监控已开启 — 该信号基于实时 spot 快照计算
+          </span>
+        </template>
+        <span style="font-size: 13px">
+          盘中场景：因子值取自当下成交价快照，越靠近收盘越稳定；
+          盘后或 spot 陈旧（&gt;10min）时 service 自动降级到昨日 close。
+        </span>
+      </n-alert>
+
       <n-card v-if="run" title="基础信息" style="margin-bottom: 16px">
         <n-descriptions :column="3" bordered>
           <n-descriptions-item label="方法">{{ methodLabel }}</n-descriptions-item>
@@ -191,6 +262,9 @@ const icColumns: DataTableColumns<IcRow> = [
           </n-descriptions-item>
           <n-descriptions-item label="涨跌停过滤">
             {{ run.filter_price_limit ? '已开启' : '关闭' }}
+          </n-descriptions-item>
+          <n-descriptions-item label="Top 范围">
+            {{ run.top_n != null ? `Top ${run.top_n}` : '全部（qcut 顶组）' }}
           </n-descriptions-item>
           <n-descriptions-item label="持仓数">
             top {{ run.n_holdings_top ?? '-' }} / bot {{ run.n_holdings_bot ?? '-' }}
@@ -221,6 +295,53 @@ const icColumns: DataTableColumns<IcRow> = [
         <n-alert v-if="run.status === 'failed'" type="error" style="margin-top: 16px">
           <pre style="white-space: pre-wrap; font-size: 12px">{{ run.error_message }}</pre>
         </n-alert>
+      </n-card>
+
+      <!-- 快速重跑：复制原 config，仅暴露 4 个常调旋钮，触发新 run。 -->
+      <n-card
+        v-if="run && run.status !== 'pending' && run.status !== 'running'"
+        title="🔁 快速重跑（用同样因子配置 + 调整下面 4 个开关）"
+        size="small"
+        style="margin-bottom: 16px"
+      >
+        <n-space :size="24" align="center" wrap>
+          <div>
+            <div style="font-size: 12px; color: #999; margin-bottom: 4px">使用实时数据</div>
+            <n-switch v-model:value="rerunUseRealtime" />
+          </div>
+          <div>
+            <div style="font-size: 12px; color: #999; margin-bottom: 4px">涨跌停过滤</div>
+            <n-switch v-model:value="rerunFilterPriceLimit" />
+          </div>
+          <div style="min-width: 220px">
+            <div style="font-size: 12px; color: #999; margin-bottom: 4px">Top 范围</div>
+            <n-select
+              v-model:value="rerunTopN"
+              :options="topNOptions"
+              style="width: 220px"
+              size="small"
+            />
+          </div>
+          <div style="min-width: 100px">
+            <div style="font-size: 12px; color: #999; margin-bottom: 4px">分组数</div>
+            <n-select
+              v-model:value="rerunNGroups"
+              :options="[2,3,5,10,20].map(v => ({label: String(v), value: v}))"
+              style="width: 100px"
+              size="small"
+            />
+          </div>
+          <n-button
+            type="primary"
+            :loading="createSignalMut.isPending.value"
+            @click="handleRerun"
+          >
+            重新触发
+          </n-button>
+        </n-space>
+        <div style="margin-top: 8px; color: #999; font-size: 12px">
+          会创建一条新的 signal run（保留历史，便于审计）；其它配置（因子清单 / 方法 / 池）沿用本次。
+        </div>
       </n-card>
 
       <n-alert

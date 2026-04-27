@@ -205,6 +205,7 @@ def _build_top_bottom(
     n_groups: int,
     filter_price_limit: bool,
     factor_breakdown: dict[str, pd.DataFrame] | None = None,
+    top_n: int | None = None,
 ) -> tuple[list[dict], list[dict], int, int]:
     """对合成因子最后一行做 qcut，取 top / bottom 组。
 
@@ -294,6 +295,11 @@ def _build_top_bottom(
         key=lambda x: x["factor_value_composite"]
         if x["factor_value_composite"] is not None else math.inf,
     )
+    # top_n 限制：在 qcut 顶组内取因子值最高的 K 只（bottom 同理取最低 K 只）。
+    # None / <= 0 → 不限制（回退到 qcut 顶组全部）。
+    if top_n is not None and top_n > 0:
+        top = top[:top_n]
+        bot = bot[:top_n]
     return top, bot, len(top), len(bot)
 
 
@@ -344,6 +350,8 @@ def run_signal(run_id: str, body: dict) -> None:
         ic_lookback_days = int(body.get("ic_lookback_days", 60))
         use_realtime = bool(body.get("use_realtime", True))
         filter_price_limit = bool(body.get("filter_price_limit", True))
+        top_n_raw = body.get("top_n")
+        top_n: int | None = int(top_n_raw) if top_n_raw is not None else None
 
         reg = FactorRegistry()
         reg.scan_and_register()
@@ -463,6 +471,7 @@ def run_signal(run_id: str, body: dict) -> None:
             n_groups=n_groups,
             filter_price_limit=filter_price_limit,
             factor_breakdown=breakdown,
+            top_n=top_n,
         )
 
         # 子因子 IC + 贡献度（仅多因子）

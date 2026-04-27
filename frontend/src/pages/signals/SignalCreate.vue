@@ -85,6 +85,16 @@ const nGroups = ref(5)
 const icLookbackDays = ref(60)
 const useRealtime = ref(true)
 const filterPriceLimit = ref(true)
+// top_n: 0 = qcut 顶组全部（sentinel，提交时转 null）；其它 = 限制为最高 K 只
+const topN = ref<number>(20)
+const topNOptions = [
+  { label: 'Top 5', value: 5 },
+  { label: 'Top 10', value: 10 },
+  { label: 'Top 20', value: 20 },
+  { label: 'Top 50', value: 50 },
+  { label: 'Top 100', value: 100 },
+  { label: '全部（qcut 顶组所有票）', value: 0 },
+]
 
 // method 切换时调整 factorItems 最小行数
 watch(method, (m) => {
@@ -146,6 +156,8 @@ async function handleSubmit() {
     ic_lookback_days: icLookbackDays.value,
     use_realtime: useRealtime.value,
     filter_price_limit: filterPriceLimit.value,
+    // 0 是 sentinel "全部"；后端 schema 要求 None 或 ge=1
+    top_n: topN.value > 0 ? topN.value : null,
     // as_of_time 留空：后端用 NOW()
   }
 
@@ -216,6 +228,20 @@ async function handleSubmit() {
 
       <n-form-item label="分组数">
         <n-input-number v-model:value="nGroups" :min="2" :max="20" style="width: 160px" />
+        <span style="margin-left: 12px; color: #999; font-size: 12px">
+          因子值按分位 qcut，n_groups=5 即五分位
+        </span>
+      </n-form-item>
+
+      <n-form-item label="Top 范围">
+        <n-select
+          v-model:value="topN"
+          :options="topNOptions"
+          style="width: 240px"
+        />
+        <span style="margin-left: 12px; color: #999; font-size: 12px">
+          在 qcut 顶组内只保留因子值最高的 K 只
+        </span>
       </n-form-item>
 
       <n-form-item v-if="method === 'ic_weighted'" label="IC 加权回看期 (天)">
