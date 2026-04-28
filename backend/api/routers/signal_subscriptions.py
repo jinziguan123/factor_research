@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from backend.api.schemas import CreateSubscriptionIn, UpdateSubscriptionIn, ok
+from backend.runtime.entries import signal_entry
+from backend.runtime.task_pool import submit
 from backend.services import subscription_service
 from backend.storage.mysql_client import mysql_conn
 
@@ -120,3 +122,36 @@ def delete_subscription(subscription_id: str) -> dict:
     if not ok_:
         raise HTTPException(status_code=404, detail="subscription not found")
     return ok({"subscription_id": subscription_id, "deleted": True})
+
+
+@router.post("/{subscription_id}/refresh-now")
+def refresh_subscription_now(
+    subscription_id: str, bt: BackgroundTasks,
+) -> dict:
+    """立即刷新一条订阅——不等下个 tick；复用 last_run_id（同 worker 路径）。
+
+    流程：
+    1. 路由内同步调 ``prepare_subscription_refresh``：UPDATE 现有 run 或
+       INSERT 新 run（重置 pending），并 ``mark_refreshed``；
+    2. ``signal_entry`` 通过 ProcessPool 异步跑（与 ``POST /api/signals``
+       同构，避免阻塞 HTTP 几十秒）；
+    3. 返回 ``run_id``，前端跳到详情页轮询 status。
+
+    跟"快速重跑"按钮的本质区别：本端点**复用 run_id**（信号详情页 URL
+    不变、历史不会膨胀），快速重跑则始终新建 run。
+    """
+    sub = subscription_service.get_subscription(subscription_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="subscription not found")
+    if not int(sub.get("is_active", 0)):
+        raise HTTPException(
+            status_code=400, detail="订阅已暂停，请先打开实盘监控开关再立即刷新",
+        )
+
+    run_id, body = subscription_service.prepare_subscription_refresh(sub)
+    bt.add_task(submit, signal_entry, run_id, body)
+    return ok({
+        "subscription_id": subscription_id,
+        "run_id": run_id,
+        "status": "pending",
+    })

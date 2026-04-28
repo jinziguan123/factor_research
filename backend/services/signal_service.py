@@ -528,9 +528,31 @@ def run_signal(run_id: str, body: dict) -> None:
         if use_realtime:
             try:
                 age = realtime_dao.latest_spot_age_sec(trade_date=as_of_date)
+
+                # spot 陈旧 / 缺失 → 服务自己尝试拉一次新快照再决定。
+                # 走 worker 的 ensure_spot_fresh：内部先 dedupe age 再调
+                # akshare，幂等安全；多并发 signal run 同时进入这里只有第一个
+                # 真去拉，后续 spot 已新会被 skip。修复"手动触发但 worker 没在
+                # 拉 spot（盘外 / 无 due 订阅 / follower 实例）" 直接降级的问题。
                 if age is None or age > _SPOT_STALE_THRESHOLD_SEC:
                     log.info(
-                        "spot 数据陈旧或缺失（age=%s）；降级 use_realtime=False（用昨日 close）",
+                        "spot age=%s 超过阈值 %ds；尝试主动拉新快照",
+                        age, _SPOT_STALE_THRESHOLD_SEC,
+                    )
+                    try:
+                        from backend.workers.live_market import ensure_spot_fresh
+
+                        # stale_sec 沿用全局阈值：低于 600s 不重复拉
+                        ensure_spot_fresh(stale_sec=_SPOT_STALE_THRESHOLD_SEC)
+                        age = realtime_dao.latest_spot_age_sec(trade_date=as_of_date)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("主动拉 spot 失败 (%s)，将降级到昨日 close", e)
+                        log.debug("拉 spot 错误详情", exc_info=True)
+                        age = None
+
+                if age is None or age > _SPOT_STALE_THRESHOLD_SEC:
+                    log.info(
+                        "spot 数据仍陈旧或缺失（age=%s）；降级 use_realtime=False（用昨日 close）",
                         age,
                     )
                     use_realtime = False

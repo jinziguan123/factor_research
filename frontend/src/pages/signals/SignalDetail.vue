@@ -22,7 +22,7 @@ import { useSignal, useCreateSignal } from '@/api/signals'
 import type { SignalHolding } from '@/api/signals'
 import {
   useSubscriptions, useCreateSubscription, useUpdateSubscription,
-  useDeleteSubscription,
+  useDeleteSubscription, useRefreshSubscriptionNow,
 } from '@/api/signal_subscriptions'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -95,6 +95,7 @@ const refreshIntervalOptions = [
 const createSubMut = useCreateSubscription()
 const updateSubMut = useUpdateSubscription()
 const deleteSubMut = useDeleteSubscription()
+const refreshSubMut = useRefreshSubscriptionNow()
 
 const subRefreshIntervalEdit = ref<number>(300)
 watch(matchedSubscription, (s) => {
@@ -161,6 +162,22 @@ async function handleDeleteSubscription() {
     message.success('订阅已删除（历史 run 保留）')
   } catch (e: any) {
     message.error(e?.message || '删除失败')
+  }
+}
+
+/** 立即刷新订阅：复用当前 run_id（信号详情页不变），异步跑。 */
+async function handleRefreshSubNow() {
+  const sub = matchedSubscription.value
+  if (!sub) return
+  try {
+    const res = await refreshSubMut.mutateAsync(sub.subscription_id)
+    message.success(`已触发刷新（run ${res.run_id.slice(0, 8)}）；状态会自动更新`)
+    // 当前页就是 last_run_id 的详情页时，useSignal 的轮询会自动重新拉到 pending
+    if (res.run_id !== runId.value) {
+      router.push(`/signals/${res.run_id}`)
+    }
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e?.message || '触发刷新失败')
   }
 }
 
@@ -434,6 +451,18 @@ const icColumns: DataTableColumns<IcRow> = [
 
             <n-divider vertical />
 
+            <n-button
+              size="small"
+              type="primary"
+              :disabled="!matchedSubscription.is_active"
+              :loading="refreshSubMut.isPending.value"
+              @click="handleRefreshSubNow"
+            >
+              ⚡ 立即刷新
+            </n-button>
+
+            <n-divider vertical />
+
             <span style="font-size: 13px">改间隔：</span>
             <n-select
               v-model:value="subRefreshIntervalEdit"
@@ -460,6 +489,12 @@ const icColumns: DataTableColumns<IcRow> = [
               删除订阅
             </n-button>
           </n-space>
+
+          <div style="margin-top: 8px; color: #999; font-size: 12px">
+            ⚡ <b>立即刷新</b> 不等下一个间隔，立刻按当前订阅配置重算 —— 复用当前
+            run_id（信号详情页 URL 不变、历史不会膨胀）。和下方"快速重跑"按钮的
+            区别是：那里会用调整后的开关创建一条<b>新</b> run（保留历史，便于审计）。
+          </div>
 
           <n-alert
             v-if="!matchedSubscription.is_active"
@@ -524,7 +559,7 @@ const icColumns: DataTableColumns<IcRow> = [
       <!-- 快速重跑：复制原 config，仅暴露 4 个常调旋钮，触发新 run。 -->
       <n-card
         v-if="run && run.status !== 'pending' && run.status !== 'running'"
-        title="🔁 快速重跑（用同样因子配置 + 调整下面 4 个开关）"
+        title="🔁 以新参数另开一条 run（保留历史 / 用于调参对照）"
         size="small"
         style="margin-bottom: 16px"
       >

@@ -312,24 +312,26 @@ def _expand_row(row: dict) -> dict:
     return out
 
 
-def process_due_subscription(sub: dict) -> str:
-    """对一个 due 订阅触发一次完整的 signal 计算。
+def prepare_subscription_refresh(sub: dict) -> tuple[str, dict]:
+    """同步：UPDATE 现有 run 或 INSERT 新 run（重置 pending）+ mark_refreshed。
 
-    **复用语义**：一个订阅永远只对应一条 fr_signal_runs 记录——
-    - 首次刷新：INSERT 新 run，sub.last_run_id ← 新 run_id；
-    - 后续刷新：UPDATE 同一条 run（重置为 pending + 清旧 payload + 同步最新订阅参数），
-      run_signal 跑完会再次转成 success/failed；
-    - 用户在前端删了那条 run（last_run_id 失效）：fall back 到 INSERT。
+    抽出来供"立即刷新"路由使用——HTTP 端点先同步走完这一步拿到 run_id，
+    再把 run_signal 的耗时执行 enqueue 给 ProcessPool；前端立即跳转到详情
+    页轮询状态。``process_due_subscription`` 复用本函数。
 
-    这样信号列表不会被订阅刷新刷爆，订阅详情页 URL 始终不变。
+    复用语义同 ``process_due_subscription``：
+    - 首次刷新：INSERT 新 run；
+    - 后续刷新：UPDATE 同 ``last_run_id`` 一条记录（重置 pending 清 payload）；
+    - 用户删了那条 run → fall back 到 INSERT。
+
+    ``mark_refreshed`` 在本函数内立即执行（设 ``last_refresh_at = now`` +
+    ``last_run_id``）——避免在异步 run_signal 还没跑完时 worker 主循环把同
+    一订阅再判定为 due 重复触发。
 
     Returns:
-        run_id（首次为新 ID，后续与 sub.last_run_id 相同）。
+        ``(run_id, body)``：body 已含 ISO 字符串 ``as_of_time``，可直接交给
+        ``signal_service.run_signal`` / ``signal_entry``。
     """
-    # Lazy import：subscription_service 自身在 worker / router 导入时不应拉起
-    # signal_service 的全部依赖（pandas / numpy / 因子注册表等）。
-    from backend.services.signal_service import run_signal
-
     body = subscription_to_signal_body(sub)
     now = datetime.now()
     items_json = json.dumps(body["factor_items"], ensure_ascii=False)
@@ -418,16 +420,37 @@ def process_due_subscription(sub: dict) -> str:
     # service 期望 as_of_time 是 ISO 字符串（pickle 友好）
     body["as_of_time"] = now.isoformat()
 
+    # enqueue / 同步执行之前就 mark_refreshed —— 让 worker 主循环立即看到
+    # last_refresh_at=now，本订阅不再被判为 due，防止重复触发。
+    mark_refreshed(sub_id, run_id, now)
+    return run_id, body
+
+
+def process_due_subscription(sub: dict) -> str:
+    """worker 用：同步 prepare + 同步 run_signal。
+
+    **复用语义**：一个订阅永远只对应一条 fr_signal_runs 记录——
+    - 首次刷新：INSERT 新 run，sub.last_run_id ← 新 run_id；
+    - 后续刷新：UPDATE 同一条 run（重置为 pending + 清旧 payload + 同步最新订阅参数），
+      run_signal 跑完会再次转成 success/failed；
+    - 用户在前端删了那条 run（last_run_id 失效）：fall back 到 INSERT。
+
+    Returns:
+        run_id（首次为新 ID，后续与 sub.last_run_id 相同）。
+    """
+    # Lazy import：subscription_service 自身在 worker / router 导入时不应拉起
+    # signal_service 的全部依赖（pandas / numpy / 因子注册表等）。
+    from backend.services.signal_service import run_signal
+
+    run_id, body = prepare_subscription_refresh(sub)
+
     try:
         run_signal(run_id, body)
     except Exception:
         log.exception(
             "process_due_subscription: run_signal failed for sub=%s run=%s",
-            sub_id, run_id,
+            sub["subscription_id"], run_id,
         )
-
-    # 失败也要 mark：避免下一 tick 立即重试雪崩。
-    mark_refreshed(sub_id, run_id, now)
     return run_id
 
 
