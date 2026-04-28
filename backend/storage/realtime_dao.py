@@ -331,6 +331,11 @@ def latest_spot_age_sec(
     if not rows or rows[0][0] is None:
         return None
     last_ts = rows[0][0]
-    if not isinstance(last_ts, datetime):
+    # ClickHouse driver 在 use_numpy=True 模式下把 DateTime 列返回成
+    # numpy.datetime64，与 Python datetime 直接相减抛 ufunc 错；统一转 Timestamp
+    # 后用 .to_pydatetime() 拿 Python datetime。
+    try:
+        last_ts = pd.Timestamp(last_ts).to_pydatetime()
+    except Exception:  # noqa: BLE001 - 任何异常都视为"读不出"，让上层降级
         return None
     return (datetime.now() - last_ts).total_seconds()

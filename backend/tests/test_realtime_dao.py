@@ -376,6 +376,32 @@ class _ChRecordSql:
         return self._return
 
 
+def test_latest_spot_age_sec_handles_numpy_datetime64() -> None:
+    """ClickHouse driver use_numpy=True 模式下 DateTime 列返回 numpy.datetime64；
+    应被 pd.Timestamp().to_pydatetime() 自动转成 Python datetime 并算出 age，
+    而不是因 isinstance(last_ts, datetime)=False 而返 None。
+    """
+    import numpy as np
+    from datetime import datetime as _dt, timedelta as _td
+    # 模拟真实 CH 返回（use_numpy=True 模式下 datetime 列是 numpy.datetime64）
+    last = np.datetime64(_dt.now() - _td(seconds=15), "s")
+    ch = FakeChClient(canned_returns={"max(snapshot_at)": [(last,)]})
+
+    age = latest_spot_age_sec(ch=ch)
+
+    assert age is not None
+    assert 14 <= age <= 17
+
+
+def test_latest_spot_age_sec_handles_pandas_timestamp() -> None:
+    """pandas Timestamp 输入也应被支持。"""
+    from datetime import datetime as _dt, timedelta as _td
+    last = pd.Timestamp(_dt.now() - _td(seconds=10))
+    ch = FakeChClient(canned_returns={"max(snapshot_at)": [(last,)]})
+    age = latest_spot_age_sec(ch=ch)
+    assert age is not None and 9 <= age <= 12
+
+
 def test_latest_spot_age_sec_sql_no_trade_date_filter() -> None:
     """关键修复：SQL 不再带 WHERE trade_date 子句，避免时区错位写了但查不到。"""
     from datetime import datetime as _dt, timedelta as _td
