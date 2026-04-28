@@ -9,9 +9,13 @@
   1m K batch 调用是"逐票独立"的，失败的 symbol 收集到 errors 列表，不影响其它。
 
 akshare 字段参考：
-- ``stock_zh_a_spot_em``：返回中文字段 ["代码","最新价","涨跌幅","成交量","成交额",
-  "今开","最高","最低","昨收", ...]，约 5000+ 行。涨跌幅单位 **百分数**（1.23 = 1.23%），
-  本模块统一转成 **小数**（0.0123）。
+- ``stock_zh_a_spot``（**新浪源**，本项目 spot 实际走这个）：分页拉取，返回中文字段
+  ["代码","名称","最新价","涨跌额","涨跌幅","买入","卖出","昨收","今开","最高","最低",
+  "成交量","成交额","时间戳"]，约 5000+ 行。**代码格式是 ``sh600519`` / ``sz000001`` /
+  ``bj920000``（带前缀的 6 位）**——本模块预处理时剥前缀再 normalize。
+  涨跌幅单位百分数（1.23 = 1.23%），转成小数。
+  之前用过 ``stock_zh_a_spot_em``（东财 push2），实测限流敏感（连续探测后被 RST），
+  改新浪后稳定性大幅提升；新浪源的不利点是分页拉取 → 总响应 10-30s（东财 1-3s）。
 - ``stock_zh_a_hist_min_em``：每次返回单只票当日全量 1m K（已 sorted by 时间）；
   注意接口入参是 6 位裸代码（如 "000001"），不是 QMT 格式。
 """
@@ -83,7 +87,8 @@ def fetch_spot_snapshot(
 
     Args:
         spot_fetcher: 可注入的 akshare 函数，签名 ``() -> DataFrame``；
-            生产环境留 ``None``，会延迟 import ``akshare.stock_zh_a_spot_em``。
+            生产环境留 ``None``，会延迟 import ``akshare.stock_zh_a_spot``
+            （**新浪源**，比 ``stock_zh_a_spot_em`` 更抗限流）。
             单测时传一个 fake，避免真实 HTTP / akshare 依赖。
 
     Returns:
@@ -98,16 +103,16 @@ def fetch_spot_snapshot(
     if spot_fetcher is None:
         import akshare as ak  # noqa: PLC0415（延迟 import 避免依赖污染）
 
-        spot_fetcher = ak.stock_zh_a_spot_em
+        spot_fetcher = ak.stock_zh_a_spot
 
     df_raw = spot_fetcher()
     if df_raw is None or df_raw.empty:
-        raise RuntimeError("akshare spot_em returned empty DataFrame")
+        raise RuntimeError("akshare spot returned empty DataFrame")
 
     missing = [c for c in _SPOT_REQUIRED_FIELDS_ZH if c not in df_raw.columns]
     if missing:
         raise RuntimeError(
-            f"akshare spot_em missing fields: {missing} "
+            f"akshare spot missing fields: {missing} "
             f"(available: {list(df_raw.columns)[:10]}...)"
         )
 
@@ -119,11 +124,17 @@ def fetch_spot_snapshot(
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
 
-    # symbol 规范化：raw_code 是 6 位字符串（akshare 默认补 0），用 normalize_symbol
-    # 自动推断 .SH / .SZ / .BJ 后缀；无法识别的行（如指数代码混入）丢弃。
+    # symbol 规范化：兼容两种代码格式：
+    # - 新浪：``sh600519`` / ``sz000001`` / ``bj920000``（带前缀的 6 位）
+    # - 东财 / 裸码：``600519`` / ``000001``
+    # normalize_symbol 自身只接受裸 6 位 + QMT + Baostock；这里把新浪前缀剥掉
+    # 后再交给它推断 .SH / .SZ / .BJ 后缀。无法识别的行（指数代码混入等）丢弃。
     def _norm(raw: object) -> str | None:
+        s = str(raw).strip().lower()
+        if len(s) == 8 and s[:2] in ("sh", "sz", "bj"):
+            s = s[2:]
         try:
-            return normalize_symbol(str(raw).zfill(6))
+            return normalize_symbol(s.zfill(6))
         except ValueError:
             return None
 

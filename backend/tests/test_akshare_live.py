@@ -120,6 +120,33 @@ def test_spot_skips_unknown_symbol_format() -> None:
     assert "INVALID_X" not in df["symbol"].values
 
 
+def test_spot_handles_sina_prefixed_codes() -> None:
+    """新浪 ``stock_zh_a_spot`` 返回的 ``sh600519`` / ``sz000001`` / ``bj920000``
+    带前缀的 8 字符代码——预处理剥前缀后再 normalize。"""
+    raw = pd.DataFrame(
+        {
+            "代码": ["sh600519", "sz000001", "sz300750", "sh688981", "bj920082"],
+            "名称": ["贵州茅台", "平安银行", "宁德时代", "中芯国际", "北交所样本"],
+            "最新价": [1620.5, 12.3, 32.4, 89.45, 5.5],
+            "涨跌幅": [1.23, -0.5, 0.8, 2.5, 0.1],
+            "涨跌额": [19.7, -0.06, 0.25, 2.18, 0.005],
+            "成交量": [123456, 9876543, 234567, 234567, 12345],
+            "成交额": [2e8, 1.2e8, 3.4e7, 2.1e7, 1.2e6],
+            "今开": [1605.0, 12.45, 32.0, 87.20, 5.4],
+            "最高": [1635.0, 12.55, 33.0, 90.10, 5.6],
+            "最低": [1602.0, 12.20, 31.8, 86.90, 5.3],
+            "昨收": [1601.30, 12.36, 32.1, 87.27, 5.45],
+        }
+    )
+    df = fetch_spot_snapshot(spot_fetcher=lambda: raw)
+    syms = set(df["symbol"])
+    assert "600519.SH" in syms
+    assert "000001.SZ" in syms
+    assert "300750.SZ" in syms
+    assert "688981.SH" in syms
+    assert "920082.BJ" in syms  # 北交所新代码段（bj 前缀）
+
+
 def test_spot_normalizes_short_codes() -> None:
     """5 位甚至更短的代码应被 zfill 到 6 位再推断市场。"""
     raw = pd.DataFrame(

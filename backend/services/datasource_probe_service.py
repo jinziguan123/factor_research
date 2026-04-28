@@ -66,20 +66,21 @@ def probe_akshare() -> tuple[bool, str, int]:
 
 
 def probe_akshare_spot() -> tuple[bool, str, int]:
-    """akshare 行情接口（**实盘信号 spot 实际走这个**）：``stock_zh_a_spot_em``。
+    """akshare 行情接口（**实盘信号 spot 实际走这个**）：``stock_zh_a_spot``（新浪源）。
 
-    单独成一项的原因：用户看到 "akshare ok" 但 spot 拉取报 connection
-    aborted 时，会误以为 akshare 都能用。其实 ``stock_info_a_code_name``
-    和 ``stock_zh_a_spot_em`` 是两个不同的后端（东财 push2 行情服务器），
-    任何一个挂了另一个不受影响。把它们拆开能让诊断更准确。
+    与 ``probe_akshare`` 的 ``stock_info_a_code_name`` 是两个独立后端，任一
+    挂了另一个不受影响。和实盘 spot 走同一接口，结果直接代表实盘可用性。
+
+    新浪 spot 是分页接口，5K+ 票要拉 ~70 页，本探测耗时通常 10-30s。比东财
+    push2 的 1-3s 慢，但稳定性显著更高（旧 spot_em 易被限流 RST）。
     """
     def _do() -> str:
         import akshare as ak  # noqa: PLC0415
 
-        df = ak.stock_zh_a_spot_em()
+        df = ak.stock_zh_a_spot()
         if df is None or len(df) == 0:
             raise RuntimeError("returned empty DataFrame")
-        return f"spot_em 拉到 {len(df)} 行"
+        return f"sina spot 拉到 {len(df)} 行"
 
     return _timed(_do)
 
