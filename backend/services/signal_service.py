@@ -529,16 +529,24 @@ def run_signal(run_id: str, body: dict) -> None:
             try:
                 age = realtime_dao.latest_spot_age_sec(trade_date=as_of_date)
                 if age is None or age > _SPOT_STALE_THRESHOLD_SEC:
-                    log.warning(
-                        "spot 数据陈旧（age=%s），降级 use_realtime=False", age,
+                    log.info(
+                        "spot 数据陈旧或缺失（age=%s）；降级 use_realtime=False（用昨日 close）",
+                        age,
                     )
                     use_realtime = False
                 else:
                     spot_df = realtime_dao.latest_spot_snapshot(
                         symbols, trade_date=as_of_date
                     )
-            except Exception:
-                log.exception("加载 spot 失败，降级 use_realtime=False")
+            except Exception as e:  # noqa: BLE001
+                # DAO 已对"表不存在"做了 None / empty 降级，这里能进只有更严重的错；
+                # 仍降级让信号能跑出来（用昨日 close），但用 warning 不打完整堆栈，
+                # 避免日志被刷爆。需要诊断时把 log level 调到 DEBUG 看 stack。
+                log.warning(
+                    "加载 spot 失败 (%s)；降级 use_realtime=False（用昨日 close）",
+                    e,
+                )
+                log.debug("spot 加载错误详情", exc_info=True)
                 use_realtime = False
 
         # 历史窗口：按 method + ic_lookback_days 算最小"输出窗口"自然日；

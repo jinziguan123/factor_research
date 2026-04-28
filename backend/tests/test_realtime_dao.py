@@ -308,3 +308,54 @@ def test_latest_spot_age_sec_returns_none_when_empty() -> None:
 def test_latest_spot_age_sec_returns_none_when_no_rows() -> None:
     ch = FakeChClient(canned_returns={"max(snapshot_at)": []})
     assert latest_spot_age_sec(ch=ch) is None
+
+
+# ---------------------------- 表不存在友好降级 ----------------------------
+
+
+class _ChRaisingUnknownTable:
+    """模拟 migration 008 未跑，CH 抛 ServerException(code=60)。"""
+    def execute(self, *args, **kwargs):
+        from clickhouse_driver.errors import ServerException
+        raise ServerException(
+            "Code: 60. DB::Exception: Unknown table expression identifier "
+            "'quant_data.stock_spot_realtime'",
+            code=60,
+        )
+
+
+class _ChRaisingOtherError:
+    def execute(self, *args, **kwargs):
+        from clickhouse_driver.errors import ServerException
+        raise ServerException("connection refused", code=210)
+
+
+def test_latest_spot_age_sec_returns_none_when_table_missing() -> None:
+    """migration 008 未跑：表不存在，函数返 None 而非崩。"""
+    assert latest_spot_age_sec(ch=_ChRaisingUnknownTable()) is None
+
+
+def test_latest_spot_age_sec_propagates_other_errors() -> None:
+    """非"表不存在"的错误应正常抛出（如网络 / 权限）。"""
+    from clickhouse_driver.errors import ServerException
+    with pytest.raises(ServerException) as exc_info:
+        latest_spot_age_sec(ch=_ChRaisingOtherError())
+    assert exc_info.value.code == 210
+
+
+def test_latest_spot_snapshot_returns_empty_when_table_missing() -> None:
+    """latest_spot_snapshot 同样降级到空 DataFrame。"""
+    resolver = _make_resolver({"600519.SH": 1001})
+    df = latest_spot_snapshot(
+        ["600519.SH"], resolver=resolver, ch=_ChRaisingUnknownTable(),
+    )
+    assert df.empty
+
+
+def test_latest_spot_snapshot_propagates_other_errors() -> None:
+    from clickhouse_driver.errors import ServerException
+    resolver = _make_resolver({"600519.SH": 1001})
+    with pytest.raises(ServerException):
+        latest_spot_snapshot(
+            ["600519.SH"], resolver=resolver, ch=_ChRaisingOtherError(),
+        )

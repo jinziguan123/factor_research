@@ -8,6 +8,10 @@
 - 查询函数（``latest_spot_snapshot``）面向"取最新一条"场景，用 ``argMax`` 聚合
   避免触发 ReplacingMergeTree 的 ``FINAL``（FINAL 强制 merge，性能差）。
 - ``ch`` client 通过参数注入支持单测；生产留 ``None`` 走 ``ch_client()`` 默认。
+- **表不存在友好降级**：``latest_spot_age_sec`` / ``latest_spot_snapshot`` 捕获
+  ClickHouse Code=60（Unknown table）→ 返 None / empty，让上层 service 自然
+  降级到"昨日 close"模式。这是 migration 008 没跑时的友好保护，避免日志被
+  完整堆栈刷爆。写入函数不捕获该错误（写不进去应该 fail-fast）。
 """
 from __future__ import annotations
 
@@ -17,11 +21,19 @@ from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
+from clickhouse_driver.errors import ServerException
 
 from backend.storage.clickhouse_client import ch_client
 from backend.storage.symbol_resolver import SymbolResolver
 
 log = logging.getLogger(__name__)
+
+# ClickHouse 错误码：60 = Unknown table（migration 008 未跑时触发）
+_CH_UNKNOWN_TABLE = 60
+_MIGRATION_008_HINT = (
+    "请先跑 migration 008 创建 stock_spot_realtime + stock_bar_1m 表："
+    "clickhouse-client --query=\"$(cat backend/scripts/migrations/008_realtime_market_tables.sql)\""
+)
 
 _SPOT_TABLE = "quant_data.stock_spot_realtime"
 _BAR_1M_TABLE = "quant_data.stock_bar_1m"
@@ -259,11 +271,20 @@ def latest_spot_snapshot(
     """
     params = {"sids": tuple(sids), "td": trade_date}
 
-    if ch is None:
-        with ch_client() as c:
-            rows = c.execute(sql, params, with_column_types=True)
-    else:
-        rows = ch.execute(sql, params, with_column_types=True)
+    try:
+        if ch is None:
+            with ch_client() as c:
+                rows = c.execute(sql, params, with_column_types=True)
+        else:
+            rows = ch.execute(sql, params, with_column_types=True)
+    except ServerException as e:
+        if getattr(e, "code", None) == _CH_UNKNOWN_TABLE:
+            log.warning(
+                "stock_spot_realtime 表不存在；返空 DF 让上层降级到昨日 close 模式。%s",
+                _MIGRATION_008_HINT,
+            )
+            return pd.DataFrame()
+        raise
 
     data, col_types = rows
     if not data:
@@ -294,11 +315,20 @@ def latest_spot_age_sec(
     if trade_date is None:
         trade_date = date.today()
     sql = f"SELECT max(snapshot_at) FROM {_SPOT_TABLE} WHERE trade_date = %(td)s"
-    if ch is None:
-        with ch_client() as c:
-            rows = c.execute(sql, {"td": trade_date})
-    else:
-        rows = ch.execute(sql, {"td": trade_date})
+    try:
+        if ch is None:
+            with ch_client() as c:
+                rows = c.execute(sql, {"td": trade_date})
+        else:
+            rows = ch.execute(sql, {"td": trade_date})
+    except ServerException as e:
+        if getattr(e, "code", None) == _CH_UNKNOWN_TABLE:
+            log.warning(
+                "stock_spot_realtime 表不存在；返 None 让上层降级。%s",
+                _MIGRATION_008_HINT,
+            )
+            return None
+        raise
     if not rows or rows[0][0] is None:
         return None
     last_ts = rows[0][0]
