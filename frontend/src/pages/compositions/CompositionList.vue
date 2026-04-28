@@ -35,7 +35,7 @@ const deleteMut = useDeleteComposition()
 
 const { data: pools } = usePools()
 const poolOptions = computed(() =>
-  (pools.value ?? []).map((p: any) => ({ label: p.name, value: p.pool_id })),
+  (pools.value ?? []).map((p: any) => ({ label: p.pool_name, value: p.pool_id })),
 )
 const methodOptions = [
   { label: '等权 (equal)', value: 'equal' },

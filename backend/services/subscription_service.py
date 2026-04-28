@@ -156,6 +156,61 @@ def list_subscriptions(only_active: bool = False) -> list[dict]:
     return [_expand_row(r) for r in rows]
 
 
+def find_matching_active_subscription(body: dict) -> dict | None:
+    """查找与 body 配置完全相同的 ``active=1`` 订阅（去重用）。
+
+    匹配维度：``factor_items``（按顺序逐项 factor_id 比较）、``method``、``pool_id``、
+    ``n_groups``、``ic_lookback_days``、``filter_price_limit``、``top_n``。
+
+    用途：``POST /api/signal-subscriptions`` 时去重——前端可能在 useSubscriptions
+    5s 轮询缓存还没更新时让用户重复点"开启实盘监控"，导致同配置创建多份。
+    本函数让 router 直接返回已存在的订阅，避免重复刷新跑出重复 fr_signal_runs。
+
+    Returns:
+        匹配的订阅 dict 或 None；多条匹配返回 created_at 最早的一条（最稳定）。
+    """
+    target_items = body.get("factor_items") or []
+    target_method = body.get("method", "equal")
+    target_pool = int(body.get("pool_id", -1))
+    target_ngroups = int(body.get("n_groups", 5))
+    target_ic_lookback = int(body.get("ic_lookback_days", 60))
+    target_flim = bool(body.get("filter_price_limit", True))
+    target_topn = body.get("top_n")
+
+    candidates = list_subscriptions(only_active=True)
+    for s in sorted(candidates, key=lambda x: x.get("created_at") or ""):
+        # 主键级别比较
+        if int(s.get("pool_id", -2)) != target_pool:
+            continue
+        if str(s.get("method")) != target_method:
+            continue
+        if int(s.get("n_groups", 0)) != target_ngroups:
+            continue
+        if int(s.get("ic_lookback_days", 0)) != target_ic_lookback:
+            continue
+        if bool(int(s.get("filter_price_limit", 0))) != target_flim:
+            continue
+        s_topn = s.get("top_n")
+        if (s_topn is None) != (target_topn is None):
+            continue
+        if s_topn is not None and target_topn is not None and int(s_topn) != int(target_topn):
+            continue
+        # factor_items 顺序敏感比较
+        s_items = s.get("factor_items", [])
+        if len(s_items) != len(target_items):
+            continue
+        same = True
+        for a, b in zip(s_items, target_items):
+            af = a.get("factor_id") if isinstance(a, dict) else None
+            bf = b.get("factor_id") if isinstance(b, dict) else None
+            if af != bf:
+                same = False
+                break
+        if same:
+            return s
+    return None
+
+
 def find_due_subscriptions(now: datetime) -> list[dict]:
     """worker 主循环用：取所有 is_active=1 且到期需刷新的订阅。
 

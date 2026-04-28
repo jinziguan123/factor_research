@@ -50,8 +50,19 @@ def create_subscription(
     # body.model_dump() 把 Pydantic 模型转成 dict；factor_items 内的
     # CompositionFactorItem 也会被递归转。
     body_dict = body.model_dump()
+
+    # 去重：相同配置已有 active 订阅时直接复用，避免前端 5s 缓存窗口期内
+    # 用户重复点"开启实盘监控"创建多份订阅 → 各自跑出多条 fr_signal_runs。
+    existing = subscription_service.find_matching_active_subscription(body_dict)
+    if existing is not None:
+        return ok({
+            "subscription_id": existing["subscription_id"],
+            "is_active": True,
+            "reused": True,
+        })
+
     sub_id = subscription_service.create_subscription(body_dict)
-    return ok({"subscription_id": sub_id, "is_active": True})
+    return ok({"subscription_id": sub_id, "is_active": True, "reused": False})
 
 
 @router.get("")
