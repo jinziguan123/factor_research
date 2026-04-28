@@ -359,3 +359,47 @@ def test_latest_spot_snapshot_propagates_other_errors() -> None:
         latest_spot_snapshot(
             ["600519.SH"], resolver=resolver, ch=_ChRaisingOtherError(),
         )
+
+
+# ---------------------------- SQL 不再按 trade_date 过滤 ----------------------------
+
+
+class _ChRecordSql:
+    """记录 execute 收到的 SQL，方便断言。"""
+    def __init__(self, return_value):
+        self.received_sqls: list[str] = []
+        self.received_params: list[Any] = []
+        self._return = return_value
+    def execute(self, sql, params=None, **kwargs):
+        self.received_sqls.append(sql)
+        self.received_params.append(params)
+        return self._return
+
+
+def test_latest_spot_age_sec_sql_no_trade_date_filter() -> None:
+    """关键修复：SQL 不再带 WHERE trade_date 子句，避免时区错位写了但查不到。"""
+    from datetime import datetime as _dt, timedelta as _td
+    last = _dt.now() - _td(seconds=20)
+    ch = _ChRecordSql(return_value=[(last,)])
+
+    age = latest_spot_age_sec(ch=ch)
+
+    assert age is not None
+    assert 19 <= age <= 22
+    # 关键：SQL 中不应包含 trade_date 过滤
+    sql = ch.received_sqls[0]
+    assert "trade_date" not in sql
+    assert "max(snapshot_at)" in sql.lower()
+
+
+def test_latest_spot_snapshot_sql_no_trade_date_filter() -> None:
+    """latest_spot_snapshot 同样不再按 trade_date 过滤。"""
+    resolver = _make_resolver({"600519.SH": 1001})
+    ch = _ChRecordSql(return_value=([], []))
+
+    latest_spot_snapshot(["600519.SH"], resolver=resolver, ch=ch)
+
+    sql = ch.received_sqls[0]
+    assert "trade_date" not in sql
+    # 仍按 symbol_id 过滤（不能拉全表）
+    assert "symbol_id IN" in sql.replace("\n", " ").replace("  ", " ")

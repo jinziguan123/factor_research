@@ -213,31 +213,30 @@ def write_1m_bars(
 def latest_spot_snapshot(
     symbols: list[str],
     *,
-    trade_date: date | None = None,
+    trade_date: date | None = None,  # 保留参数兼容旧调用，但内部不再使用
     resolver: SymbolResolver | None = None,
     ch=None,
 ) -> pd.DataFrame:
-    """查每只票当日最新一条 spot 记录。
+    """查每只票"最新一条" spot 记录（按 snapshot_at 取最大）。
 
     用 ``argMax(field, snapshot_at)`` 聚合而非 ``FINAL``——后者强制 merge 全分区，
     在盘中频繁查询场景下很慢；前者在 5000 行 / 1 个分区内快得多。
 
+    **不再按 trade_date 过滤**：实测客户端 / 服务端时区不一致时，
+    ``WHERE trade_date = %(td)s`` 会出现"写入了但查不到"的诡异现象。
+    改为只按 snapshot_at 取最新——上层用 ``latest_spot_age_sec`` + stale 阈值
+    判断"是否够新鲜"，跨日的旧 spot 自然会被视为陈旧不被使用。
+    ``trade_date`` 字段保留作为分区键不变。
+
     Args:
         symbols: QMT 格式 symbol 列表。
-        trade_date: 查询哪一天的 spot；None 时用 ``date.today()``。
+        trade_date: 已废弃（保留参数避免调用方修改），内部不使用。
         resolver: SymbolResolver。
         ch: client。
 
     Returns:
-        DataFrame，列：
-        - ``symbol`` (str)：QMT 格式（resolver 反查）
-        - ``snapshot_at`` (datetime)：最新快照时刻
-        - ``last_price`` / ``open`` / ``high`` / ``low`` / ``prev_close`` (float32)
-        - ``pct_chg`` (float32, 小数)
-        - ``volume`` (int64) / ``amount`` (float64)
-        - ``is_suspended`` (uint8)
-
-        若无任何匹配（symbols 全无效 / 当日无快照），返空 DF。
+        DataFrame，列：``symbol`` / ``snapshot_at`` / ``last_price`` / ...
+        若 symbols 全无效或表无数据，返空 DF。
     """
     if not symbols:
         return pd.DataFrame()
@@ -249,8 +248,6 @@ def latest_spot_snapshot(
     if not sym_map:
         return pd.DataFrame()
     sids = list(sym_map.values())
-    if trade_date is None:
-        trade_date = date.today()
 
     sql = f"""
         SELECT
@@ -266,10 +263,10 @@ def latest_spot_snapshot(
             argMax(amount, snapshot_at) AS amount,
             argMax(is_suspended, snapshot_at) AS is_suspended
         FROM {_SPOT_TABLE}
-        WHERE symbol_id IN %(sids)s AND trade_date = %(td)s
+        WHERE symbol_id IN %(sids)s
         GROUP BY symbol_id
     """
-    params = {"sids": tuple(sids), "td": trade_date}
+    params = {"sids": tuple(sids)}
 
     try:
         if ch is None:
@@ -301,26 +298,28 @@ def latest_spot_snapshot(
 
 def latest_spot_age_sec(
     *,
-    trade_date: date | None = None,
+    trade_date: date | None = None,  # 已废弃，保留参数避免调用方改动
     ch=None,
 ) -> float | None:
-    """库里当日最新一条 spot 距当前 NOW() 的秒数。
+    """库里最新一条 spot 距当前 NOW() 的秒数。
 
     用途：signal_service 启动时判断"实时数据是否新鲜"——若 > 600（10min），
     自动降级到 use_realtime=false 模式（用昨日 close 替代）。
 
+    **不再按 trade_date 过滤**（同 ``latest_spot_snapshot`` 的修改）：
+    时区错位会让"写入了但查不到"。改为全表 max(snapshot_at)，跨日数据
+    会被 stale 阈值自然识别为陈旧。
+
     Returns:
-        秒数（float）；当日无任何快照时返 None。
+        秒数（float）；表为空 / 不存在时返 None。
     """
-    if trade_date is None:
-        trade_date = date.today()
-    sql = f"SELECT max(snapshot_at) FROM {_SPOT_TABLE} WHERE trade_date = %(td)s"
+    sql = f"SELECT max(snapshot_at) FROM {_SPOT_TABLE}"
     try:
         if ch is None:
             with ch_client() as c:
-                rows = c.execute(sql, {"td": trade_date})
+                rows = c.execute(sql)
         else:
-            rows = ch.execute(sql, {"td": trade_date})
+            rows = ch.execute(sql)
     except ServerException as e:
         if getattr(e, "code", None) == _CH_UNKNOWN_TABLE:
             log.warning(
