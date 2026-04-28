@@ -5,12 +5,13 @@
  * 布局：
  * - 顶部：实时模式横幅（仅 use_realtime=1 时显示，红色醒目）
  * - 基础信息（method / 股票池 / as_of_time / use_realtime / top_n / spot_meta）
- * - 快速重跑卡片：复制原 config，可调 use_realtime / filter_price_limit / top_n / n_groups
+ * - 实盘监控订阅卡片：开关 / 立即刷新 / 改间隔 / 删除 / **实时刷新进度**
  * - top 组 / bottom 组排名表（含因子综合值 + 子因子分解）
  *
  * pending/running 时由 useSignal 自动 1.5s 轮询；success/failed 后停。
+ * 已订阅时本页用一个 1s tick 的 nowMs 驱动倒计时 / 相对时间显示。
  */
-import { computed, h, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
@@ -18,7 +19,7 @@ import {
   NButton, NSelect, NSwitch, NIcon, NDivider, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import { useSignal, useCreateSignal } from '@/api/signals'
+import { useSignal } from '@/api/signals'
 import type { SignalHolding } from '@/api/signals'
 import {
   useSubscriptions, useCreateSubscription, useUpdateSubscription,
@@ -34,30 +35,6 @@ const message = useMessage()
 const runId = computed(() => route.params.runId as string)
 const { data: run, isLoading } = useSignal(runId)
 const { lookup: lookupPoolName } = usePoolNameMap()
-
-// 快速重跑：复制原 config + 4 个可调旋钮
-const rerunUseRealtime = ref(true)
-const rerunFilterPriceLimit = ref(true)
-const rerunTopN = ref<number>(20)  // 0 = sentinel "全部"
-const rerunNGroups = ref(5)
-const topNOptions = [
-  { label: 'Top 5', value: 5 },
-  { label: 'Top 10', value: 10 },
-  { label: 'Top 20', value: 20 },
-  { label: 'Top 50', value: 50 },
-  { label: 'Top 100', value: 100 },
-  { label: '全部（qcut 顶组所有）', value: 0 },
-]
-// run 加载完后初始化重跑表单为原值
-watch(run, (r) => {
-  if (!r) return
-  rerunUseRealtime.value = !!r.use_realtime
-  rerunFilterPriceLimit.value = !!r.filter_price_limit
-  rerunTopN.value = r.top_n ?? 0  // null → 0 sentinel
-  rerunNGroups.value = r.n_groups
-}, { immediate: true })
-
-const createSignalMut = useCreateSignal()
 
 // 订阅相关：找当前 run 配置对应的订阅（如果有），用于 toggle 状态
 const { data: allSubs } = useSubscriptions()
@@ -186,35 +163,68 @@ async function handleRefreshSubNow() {
   }
 }
 
-async function handleRerun() {
-  if (!run.value) return
-  const r = run.value
-  // 用原 config 复制 factor_items + 调整后的开关
-  const body: Record<string, any> = {
-    factor_items: r.factor_items.map((it: any) => ({
-      factor_id: it.factor_id,
-      params: it.params ?? null,
-    })),
-    method: r.method,
-    pool_id: r.pool_id,
-    n_groups: rerunNGroups.value,
-    ic_lookback_days: r.ic_lookback_days,
-    use_realtime: rerunUseRealtime.value,
-    filter_price_limit: rerunFilterPriceLimit.value,
-    top_n: rerunTopN.value > 0 ? rerunTopN.value : null,
-  }
-  try {
-    const res = await createSignalMut.mutateAsync(body)
-    message.success('已重新触发，跳转到新 run')
-    router.push(`/signals/${res.run_id}`)
-  } catch (e: any) {
-    message.error(e?.response?.data?.detail || e?.message || '触发失败')
-  }
-}
-
 const isRunning = computed(
   () => run.value?.status === 'pending' || run.value?.status === 'running',
 )
+
+// ---- 实时刷新进度可视化（仅订阅 active 时渲染） ----
+// 1s tick 的当前时间戳，驱动倒计时 / 相对时间 reactive 更新。
+const nowMs = ref(Date.now())
+let nowTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => { nowTimer = setInterval(() => { nowMs.value = Date.now() }, 1000) })
+onBeforeUnmount(() => { if (nowTimer) clearInterval(nowTimer) })
+
+/** 把毫秒数差转人话："5 秒前" / "1 分 23 秒前" / "刚刚"。 */
+function fmtRelative(deltaMs: number): string {
+  if (deltaMs < 1000) return '刚刚'
+  const sec = Math.floor(deltaMs / 1000)
+  if (sec < 60) return `${sec} 秒前`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  if (m < 60) return s ? `${m} 分 ${s} 秒前` : `${m} 分钟前`
+  const h = Math.floor(m / 60)
+  return `${h} 小时 ${m % 60} 分前`
+}
+
+/** 把秒数转 mm:ss / m分s秒 形式（倒计时用）。 */
+function fmtCountdown(sec: number): string {
+  if (sec <= 0) return '即将刷新…'
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return m > 0 ? `${m} 分 ${s} 秒` : `${s} 秒`
+}
+
+const lastRefreshMs = computed<number | null>(() => {
+  const ts = matchedSubscription.value?.last_refresh_at
+  if (!ts) return null
+  // last_refresh_at 是 ``YYYY-MM-DD HH:MM:SS`` 北京时区字符串，也可能是 ISO；
+  // Date.parse 对前者会按本地时区解析，对运行在中国时区的浏览器是正确的。
+  const t = Date.parse(String(ts).replace(' ', 'T'))
+  return isNaN(t) ? null : t
+})
+
+const lastRefreshRelative = computed<string>(() => {
+  if (lastRefreshMs.value == null) return '尚未刷新'
+  return fmtRelative(nowMs.value - lastRefreshMs.value)
+})
+
+/** 距离下次刷新的剩余秒数；订阅未刷新过返 0（即"立刻刷新中"）。 */
+const secondsToNextRefresh = computed<number>(() => {
+  const sub = matchedSubscription.value
+  if (!sub || lastRefreshMs.value == null) return 0
+  const intervalMs = sub.refresh_interval_sec * 1000
+  const elapsed = nowMs.value - lastRefreshMs.value
+  return Math.max(0, Math.ceil((intervalMs - elapsed) / 1000))
+})
+
+/** 刷新进度百分比（0-100），用于 progress bar 视觉反馈。 */
+const refreshProgressPct = computed<number>(() => {
+  const sub = matchedSubscription.value
+  if (!sub || lastRefreshMs.value == null) return 0
+  const intervalMs = sub.refresh_interval_sec * 1000
+  const elapsed = nowMs.value - lastRefreshMs.value
+  return Math.max(0, Math.min(100, (elapsed / intervalMs) * 100))
+})
 const payload = computed(() => run.value?.payload ?? null)
 
 function fmtNum(v: any, digits = 4): string {
@@ -432,6 +442,12 @@ const icColumns: DataTableColumns<IcRow> = [
             </n-descriptions-item>
             <n-descriptions-item label="上次刷新">
               {{ matchedSubscription.last_refresh_at ?? '尚未刷新' }}
+              <span
+                v-if="lastRefreshMs"
+                style="color: #999; font-size: 11px; margin-left: 6px"
+              >
+                ({{ lastRefreshRelative }})
+              </span>
             </n-descriptions-item>
             <n-descriptions-item label="最新 run">
               <code v-if="matchedSubscription.last_run_id">
@@ -496,9 +512,64 @@ const icColumns: DataTableColumns<IcRow> = [
           </n-space>
 
           <div style="margin-top: 8px; color: #999; font-size: 12px">
-            ⚡ <b>立即刷新</b> 不等下一个间隔，立刻按当前订阅配置重算 —— 复用当前
-            run_id（信号详情页 URL 不变、历史不会膨胀）。和下方"快速重跑"按钮的
-            区别是：那里会用调整后的开关创建一条<b>新</b> run（保留历史，便于审计）。
+            ⚡ <b>立即刷新</b> 不等下一个间隔，立刻按当前订阅配置重算（复用当前
+            run_id，URL 不变、历史不膨胀）。
+          </div>
+
+          <!-- 实时刷新节奏：让用户直观看到"系统在定时抓数据 + 重算因子" -->
+          <div
+            v-if="matchedSubscription.is_active"
+            style="margin-top: 14px; padding: 12px 14px;
+                   background: #f0fdf4; border-left: 3px solid #18a058;
+                   border-radius: 4px"
+          >
+            <!-- 当前 run 正在跑：显眼提示 + 后端 progress 条 -->
+            <div
+              v-if="isRunning"
+              style="display: flex; align-items: center; gap: 8px"
+            >
+              <n-spin size="small" />
+              <span style="font-weight: 600; color: #18a058">
+                🔄 正在抓取行情快照 + 重算因子…
+              </span>
+              <span
+                v-if="run?.progress != null"
+                style="color: #888; font-size: 12px; margin-left: auto"
+              >
+                进度 {{ run.progress }}%
+              </span>
+            </div>
+
+            <!-- 当前 run 跑完，距下一次刷新的倒计时进度条 -->
+            <div v-else>
+              <div
+                style="display: flex; align-items: center; gap: 8px;
+                       margin-bottom: 8px"
+              >
+                <span class="pulse-dot" />
+                <span style="color: #18a058; font-weight: 600; font-size: 13px">
+                  系统每 {{ matchedSubscription.refresh_interval_sec }} 秒自动抓取行情 + 重算因子
+                </span>
+                <span
+                  style="color: #888; font-size: 12px; margin-left: auto"
+                >
+                  上次：{{ lastRefreshRelative }}
+                </span>
+              </div>
+              <n-progress
+                type="line"
+                :percentage="refreshProgressPct"
+                :show-indicator="false"
+                :height="6"
+                color="#18a058"
+              />
+              <div
+                style="text-align: right; color: #888; font-size: 11px;
+                       margin-top: 4px"
+              >
+                下次刷新：{{ fmtCountdown(secondsToNextRefresh) }}
+              </div>
+            </div>
           </div>
 
           <n-alert
@@ -561,52 +632,6 @@ const icColumns: DataTableColumns<IcRow> = [
         </n-alert>
       </n-card>
 
-      <!-- 快速重跑：复制原 config，仅暴露 4 个常调旋钮，触发新 run。 -->
-      <n-card
-        v-if="run && run.status !== 'pending' && run.status !== 'running'"
-        title="🔁 以新参数另开一条 run（保留历史 / 用于调参对照）"
-        size="small"
-        style="margin-bottom: 16px"
-      >
-        <n-space :size="24" align="center" wrap>
-          <div>
-            <div style="font-size: 12px; color: #999; margin-bottom: 4px">使用实时数据</div>
-            <n-switch v-model:value="rerunUseRealtime" />
-          </div>
-          <div>
-            <div style="font-size: 12px; color: #999; margin-bottom: 4px">涨跌停过滤</div>
-            <n-switch v-model:value="rerunFilterPriceLimit" />
-          </div>
-          <div style="min-width: 220px">
-            <div style="font-size: 12px; color: #999; margin-bottom: 4px">Top 范围</div>
-            <n-select
-              v-model:value="rerunTopN"
-              :options="topNOptions"
-              style="width: 220px"
-              size="small"
-            />
-          </div>
-          <div style="min-width: 100px">
-            <div style="font-size: 12px; color: #999; margin-bottom: 4px">分组数</div>
-            <n-select
-              v-model:value="rerunNGroups"
-              :options="[2,3,5,10,20].map(v => ({label: String(v), value: v}))"
-              style="width: 100px"
-              size="small"
-            />
-          </div>
-          <n-button
-            type="primary"
-            :loading="createSignalMut.isPending.value"
-            @click="handleRerun"
-          >
-            重新触发
-          </n-button>
-        </n-space>
-        <div style="margin-top: 8px; color: #999; font-size: 12px">
-          会创建一条新的 signal run（保留历史，便于审计）；其它配置（因子清单 / 方法 / 池）沿用本次。
-        </div>
-      </n-card>
 
       <n-alert
         v-if="payload?.spot_meta"
@@ -682,3 +707,23 @@ const icColumns: DataTableColumns<IcRow> = [
     </n-spin>
   </div>
 </template>
+
+<style scoped>
+/* 订阅活跃时的"心跳"小绿点：传达"系统在工作"的视觉反馈，对照倒计时进度条
+   形成动+静两条信息（节奏 + 进度）。 */
+.pulse-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #18a058;
+  box-shadow: 0 0 0 0 rgba(24, 160, 88, 0.6);
+  animation: pulse-grow 1.6s ease-out infinite;
+}
+
+@keyframes pulse-grow {
+  0% { box-shadow: 0 0 0 0 rgba(24, 160, 88, 0.55); }
+  70% { box-shadow: 0 0 0 8px rgba(24, 160, 88, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(24, 160, 88, 0); }
+}
+</style>
