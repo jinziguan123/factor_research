@@ -76,13 +76,24 @@ class LiveMarketConfig:
 # ---------------------------- 单次任务 ----------------------------
 
 
-def run_spot_once(max_retries: int = 2, retry_sleep_sec: float = 1.0) -> int:
+def run_spot_once(
+    max_retries: int = 2,
+    retry_initial_sleep_sec: float = 1.0,
+    retry_backoff_factor: float = 2.0,
+) -> int:
     """拉一次 spot 快照并写库；返回写入行数。
 
     akshare 后端常见 ``ConnectionAborted`` / ``ReadTimeout``，单次失败不应
-    立即降级——这里做最多 ``max_retries`` 次轻量重试（默认 1 + 2 = 共 3 次
-    尝试），每次间隔 ``retry_sleep_sec`` 秒。所有重试都失败才把异常抛给
-    上层（``ensure_spot_fresh`` / ``signal_service`` 会兜住降级到昨日 close）。
+    立即降级——做最多 ``max_retries`` 次重试（默认 1 + 2 = 共 3 次尝试），
+    间隔**指数退避**：第 N 次重试前 sleep
+    ``retry_initial_sleep_sec * retry_backoff_factor ** N``（默认 1s → 2s → 4s）。
+
+    指数退避优于固定 1s：东财 push2 RST 通常持续几秒以上，固定 1s 三次往
+    往全打到同一个故障窗口里；翻倍后总等待 1+2+4=7s，命中恢复点的概率高
+    很多，又不至于阻塞太久。
+
+    所有重试都失败才把异常抛给上层（``ensure_spot_fresh`` /
+    ``signal_service`` 会兜住降级到昨日 close）。
     """
     # Lazy import：未启用 spot 阶段时不付出 akshare / adapter 启动成本
     from backend.adapters.akshare_live import fetch_spot_snapshot
@@ -97,11 +108,14 @@ def run_spot_once(max_retries: int = 2, retry_sleep_sec: float = 1.0) -> int:
         except Exception as e:  # noqa: BLE001 - akshare 抛各种网络错
             last_exc = e
             if attempt < max_retries:
-                log.warning(
-                    "fetch_spot_snapshot 第 %d 次失败 (%s)；%.1fs 后重试",
-                    attempt + 1, e, retry_sleep_sec,
+                sleep_sec = retry_initial_sleep_sec * (
+                    retry_backoff_factor ** attempt
                 )
-                time_mod.sleep(retry_sleep_sec)
+                log.warning(
+                    "fetch_spot_snapshot 第 %d/%d 次失败 (%s)；%.1fs 后重试",
+                    attempt + 1, max_retries + 1, e, sleep_sec,
+                )
+                time_mod.sleep(sleep_sec)
             else:
                 log.warning(
                     "fetch_spot_snapshot 重试 %d 次全部失败；放弃，让上层降级",

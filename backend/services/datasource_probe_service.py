@@ -49,9 +49,10 @@ def _timed(fn) -> tuple[bool, str, int]:
 
 
 def probe_akshare() -> tuple[bool, str, int]:
-    """akshare：拉一次 ``stock_info_a_code_name``（A 股代码列表，~5K 行 < 1MB）。
+    """akshare 基础接口：拉一次 ``stock_info_a_code_name``（A 股代码列表）。
 
-    返回行数 = 0 视为失败（akshare 偶尔返回空 DataFrame）。
+    走的是相对稳定的代码字典接口，不是行情接口。**这一项 ok 不代表
+    akshare-spot 也 ok**——push2 行情后端偶发 RST，是独立的故障域。
     """
     def _do() -> str:
         import akshare as ak  # noqa: PLC0415
@@ -60,6 +61,25 @@ def probe_akshare() -> tuple[bool, str, int]:
         if df is None or len(df) == 0:
             raise RuntimeError("returned empty DataFrame")
         return f"{len(df)} A 股代码"
+
+    return _timed(_do)
+
+
+def probe_akshare_spot() -> tuple[bool, str, int]:
+    """akshare 行情接口（**实盘信号 spot 实际走这个**）：``stock_zh_a_spot_em``。
+
+    单独成一项的原因：用户看到 "akshare ok" 但 spot 拉取报 connection
+    aborted 时，会误以为 akshare 都能用。其实 ``stock_info_a_code_name``
+    和 ``stock_zh_a_spot_em`` 是两个不同的后端（东财 push2 行情服务器），
+    任何一个挂了另一个不受影响。把它们拆开能让诊断更准确。
+    """
+    def _do() -> str:
+        import akshare as ak  # noqa: PLC0415
+
+        df = ak.stock_zh_a_spot_em()
+        if df is None or len(df) == 0:
+            raise RuntimeError("returned empty DataFrame")
+        return f"spot_em 拉到 {len(df)} 行"
 
     return _timed(_do)
 
@@ -125,6 +145,7 @@ def probe_clickhouse() -> tuple[bool, str, int]:
 # (name, callable) 顺序固定，前端展示按此顺序
 _PROBES: list[tuple[str, Any]] = [
     ("akshare", probe_akshare),
+    ("akshare-spot", probe_akshare_spot),
     ("baostock", probe_baostock),
     ("mysql", probe_mysql),
     ("clickhouse", probe_clickhouse),

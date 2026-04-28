@@ -100,6 +100,12 @@ def test_probe_all_status_field_is_string_ok_or_error() -> None:
 
 
 def test_default_probes_registered_in_order() -> None:
-    """生产 _PROBES 顺序固定（前端依赖此顺序展示）。"""
+    """生产 _PROBES 顺序固定（前端依赖此顺序展示）。
+
+    akshare 与 akshare-spot 是两个独立故障域：前者走 stock_info_a_code_name
+    （代码字典），后者走 stock_zh_a_spot_em（push2 行情），后者更脆弱。
+    """
     names = [name for name, _ in svc._PROBES]
-    assert names == ["akshare", "baostock", "mysql", "clickhouse"]
+    assert names == [
+        "akshare", "akshare-spot", "baostock", "mysql", "clickhouse",
+    ]

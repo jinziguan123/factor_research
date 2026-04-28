@@ -22,6 +22,31 @@ def _patch_sleep(monkeypatch):
     monkeypatch.setattr(lm.time_mod, "sleep", lambda *_: None)
 
 
+@pytest.fixture(autouse=True)
+def _patch_leader_lock(monkeypatch):
+    """worker 主循环用 ``distributed_lock.acquire_mysql_lock`` 选 leader。
+
+    该锁需要真连 MySQL；单测环境如果没起 docker 测试库 / 或别的测试搞乱
+    了连接池，锁拿不到 → is_leader=False → process_due_subscription 永
+    远不被调用 → 测试用例的"sub 被处理"断言失败。
+
+    用一个总是 yield True 的 fake context manager 替换它，确保单测专注
+    在主循环逻辑（订阅 / spot / archive 三件事）；leader 选举本身由
+    test_distributed_lock.py 单独覆盖。
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _always_leader(*_a, **_kw):
+        yield True
+
+    # 主循环里 ``from backend.storage.distributed_lock import acquire_mysql_lock``
+    # 是函数内 lazy import，attribute lookup 走源模块——所以 patch 源模块就行
+    monkeypatch.setattr(
+        "backend.storage.distributed_lock.acquire_mysql_lock", _always_leader,
+    )
+
+
 def _mock_calendar(monkeypatch, *, trading: bool, phase: str) -> None:
     monkeypatch.setattr(
         "backend.workers.trading_calendar.is_trading_day", lambda _d: trading
@@ -211,6 +236,69 @@ def test_spot_failure_does_not_crash(monkeypatch):
     assert rv == 0
     # spot 拉取失败但订阅仍会被处理（service 内会自动降级到昨日 close）
     assert processed == ["sub_a"]
+
+
+# ---------------------------- run_spot_once retry ----------------------------
+
+
+def test_run_spot_once_succeeds_after_retry(monkeypatch):
+    """前两次 fetch 抛 ConnectionAborted，第 3 次成功 → 不抛、返回写入行数。"""
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise ConnectionAbortedError("Remote end closed connection")
+        import pandas as pd
+        return pd.DataFrame({"symbol": ["X"], "last_price": [1.0]})
+
+    monkeypatch.setattr(
+        "backend.adapters.akshare_live.fetch_spot_snapshot", _flaky,
+    )
+    monkeypatch.setattr(
+        "backend.storage.realtime_dao.write_spot_snapshot",
+        lambda df, snap_at: len(df),
+    )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(lm.time_mod, "sleep", lambda s: sleeps.append(s))
+
+    n = lm.run_spot_once()
+    assert n == 1
+    assert calls["n"] == 3
+    # 指数退避：1s、2s
+    assert sleeps == [1.0, 2.0]
+
+
+def test_run_spot_once_raises_after_all_retries(monkeypatch):
+    """全部 max_retries+1 次都失败 → 抛最后一次异常。"""
+    def _always_boom():
+        raise ConnectionAbortedError("nope")
+
+    monkeypatch.setattr(
+        "backend.adapters.akshare_live.fetch_spot_snapshot", _always_boom,
+    )
+    monkeypatch.setattr(lm.time_mod, "sleep", lambda *_: None)
+
+    with pytest.raises(ConnectionAbortedError, match="nope"):
+        lm.run_spot_once(max_retries=2)
+
+
+def test_run_spot_once_uses_exponential_backoff(monkeypatch):
+    """3 次失败 → sleep 调用按 1s × 2^N 指数退避（1s、2s）。"""
+    monkeypatch.setattr(
+        "backend.adapters.akshare_live.fetch_spot_snapshot",
+        lambda: (_ for _ in ()).throw(ConnectionAbortedError("x")),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(lm.time_mod, "sleep", lambda s: sleeps.append(s))
+
+    with pytest.raises(ConnectionAbortedError):
+        lm.run_spot_once(
+            max_retries=3, retry_initial_sleep_sec=1.0, retry_backoff_factor=2.0,
+        )
+    # 3 次重试间隔：1s、2s、4s（最后一次失败后不再 sleep）
+    assert sleeps == [1.0, 2.0, 4.0]
 
 
 def test_main_loop_stops_on_stop_event(monkeypatch):
