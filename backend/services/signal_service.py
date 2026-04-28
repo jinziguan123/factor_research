@@ -67,7 +67,15 @@ _STOCK_BAR_1D_STALE_THRESHOLD_DAYS = 5
 
 
 def get_latest_bar_1d_trade_date(ch=None):
-    """查 ClickHouse stock_bar_1d 最新一条 trade_date；空库返 None。"""
+    """查 ClickHouse stock_bar_1d 最新一条 trade_date（统一返回 Python ``date``）。
+
+    ClickHouse driver 在 ``use_numpy=True`` 下把 Date 列返回成 ``numpy.datetime64``，
+    与 Python ``date`` 直接相减会抛 UFuncBinaryResolutionError。这里集中做一次
+    标准化，让上层调用者拿到的永远是 Python ``date``。
+
+    Returns:
+        Python ``date`` 或 ``None``（空库）。
+    """
     from backend.storage.clickhouse_client import ch_client
 
     sql = "SELECT max(trade_date) FROM quant_data.stock_bar_1d FINAL"
@@ -78,7 +86,9 @@ def get_latest_bar_1d_trade_date(ch=None):
         rows = ch.execute(sql)
     if not rows or rows[0][0] is None:
         return None
-    return rows[0][0]
+    raw = rows[0][0]
+    # numpy.datetime64 / pandas Timestamp / str → 统一为 Python date
+    return pd.Timestamp(raw).date()
 
 
 def check_data_freshness(
@@ -107,11 +117,8 @@ def check_data_freshness(
         ValueError: 数据落后且自动补救失败 / 关闭，message 含手动命令。
     """
     latest = get_latest_bar_1d_trade_date(ch=ch)
-    # 统一为 date
-    if hasattr(as_of_date, "date") and not isinstance(as_of_date, type):
-        as_of = as_of_date.date() if callable(getattr(as_of_date, "date")) else as_of_date
-    else:
-        as_of = as_of_date
+    # 统一 as_of 为 Python date：接受 date / datetime / pd.Timestamp / numpy.datetime64
+    as_of = pd.Timestamp(as_of_date).date()
 
     if latest is None:
         # 表完全为空：自动补需要明确起点，不适合自动判断；强制人工介入
@@ -121,7 +128,9 @@ def check_data_freshness(
             "从 akshare 补一段。"
         )
 
-    gap = (as_of - latest).days if hasattr(as_of, "__sub__") else 0
+    # latest 在 get_latest_bar_1d_trade_date 内已统一为 Python date，
+    # 这里直接相减得 timedelta。
+    gap = (as_of - latest).days
     if gap <= threshold_days:
         return  # 数据新鲜，通过
 

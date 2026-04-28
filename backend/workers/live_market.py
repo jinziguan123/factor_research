@@ -167,16 +167,28 @@ def main_loop(
             today_is_trading = is_trading_day(today)
             phase = determine_phase(now, today_is_trading)
 
-            if phase == "spot" and cfg.spot_enabled:
-                # 订阅驱动：先查 due 订阅，没有就跳过整个 spot 流程
+            # ---- 订阅刷新（与 phase 解耦：盘外也跑，service 内部自动降级）----
+            #
+            # 旧逻辑只在 phase=='spot' 时处理订阅，导致用户开订阅后
+            # 在盘外（idle/午休/收盘后）一直没有刷新——违背"立即看到结果"的预期。
+            #
+            # 新逻辑：
+            # - 任何时刻都查 due 订阅；
+            # - 在 spot 时段额外拉一次 spot 共享给所有 due 订阅；
+            # - 在非 spot 时段不拉 spot，service 内部检测到 spot 陈旧 / 缺失会
+            #   自动降级 use_realtime=False（用昨日 close 当今日 close）。
+            due_subs: list = []
+            if cfg.spot_enabled:
                 from backend.services import subscription_service
 
                 due_subs = subscription_service.find_due_subscriptions(now)
-                if not due_subs:
-                    log.debug("[spot] no due subscriptions; skip spot fetch")
-                else:
-                    log.info("[spot] %d due subscriptions need refresh", len(due_subs))
-                    # 共享 spot 拉取：本 tick 内多个订阅复用一次 spot 数据
+
+            if due_subs:
+                log.info(
+                    "[sub] %d due subscriptions (phase=%s, trading=%s)",
+                    len(due_subs), phase, today_is_trading,
+                )
+                if phase == "spot":
                     try:
                         ensure_spot_fresh(cfg.spot_stale_sec)
                     except Exception:
@@ -184,19 +196,26 @@ def main_loop(
                             "[spot] ensure_spot_fresh failed; subscriptions will "
                             "downgrade to yesterday close"
                         )
-                    # 串行处理 due 订阅（worker 单线程；多并发会和 ProcessPool 抢锁）
-                    for sub in due_subs:
-                        sid = sub["subscription_id"]
-                        try:
-                            rid = subscription_service.process_due_subscription(sub)
-                            log.info(
-                                "[sub] %s refreshed → run_id=%s",
-                                sid[:8], rid[:8],
-                            )
-                        except Exception:
-                            log.exception("[sub] failed sub=%s", sid)
+                else:
+                    log.info(
+                        "[sub] phase=%s (offline) — service will downgrade to yesterday close",
+                        phase,
+                    )
+                # 串行处理 due 订阅
+                from backend.services import subscription_service
 
-            elif phase == "eod_archive":
+                for sub in due_subs:
+                    sid = sub["subscription_id"]
+                    try:
+                        rid = subscription_service.process_due_subscription(sub)
+                        log.info(
+                            "[sub] %s refreshed → run_id=%s", sid[:8], rid[:8],
+                        )
+                    except Exception:
+                        log.exception("[sub] failed sub=%s", sid)
+
+            # ---- 盘后归档（与订阅互不干扰） ----
+            if phase == "eod_archive":
                 if not cfg.archive_1m_enabled:
                     log.debug("[eod_archive] phase reached but archive_1m_enabled=False")
                 elif today in archived_dates:
@@ -218,8 +237,8 @@ def main_loop(
                         )
                     archived_dates.add(today)
 
-            else:
-                # idle：每 30 分钟一次心跳日志
+            # ---- 心跳：仅当本轮没有任何订阅活动 + 非 eod_archive 时输出 ----
+            if not due_subs and phase != "eod_archive":
                 if (
                     last_idle_heartbeat is None
                     or (now - last_idle_heartbeat).total_seconds()

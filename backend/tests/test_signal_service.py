@@ -470,6 +470,25 @@ def test_freshness_threshold_configurable() -> None:
     check_data_freshness(_d(2026, 4, 28), ch=ch, threshold_days=3)
 
 
+def test_freshness_handles_numpy_datetime64_from_clickhouse() -> None:
+    """ClickHouse driver use_numpy=True 返回 numpy.datetime64；
+    应被 pd.Timestamp().date() 自动归一为 Python date 不抛 UFunc 错。"""
+    import numpy as np
+    from datetime import date as _d
+    # mock 返回 numpy.datetime64 模拟真实 CH 行为
+    ch = _FakeChClient(latest=np.datetime64("2026-04-25", "D"))
+    # 不应抛 UFuncBinaryResolutionError，应正常通过 / 抛 ValueError
+    check_data_freshness(_d(2026, 4, 28), ch=ch)  # gap=3 < 5，通过
+
+
+def test_freshness_handles_pandas_timestamp_input() -> None:
+    """as_of 传 pandas Timestamp 也应被归一化。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 25))
+    # as_of 用 pd.Timestamp 而非 date
+    check_data_freshness(pd.Timestamp("2026-04-28"), ch=ch)
+
+
 # ---------------------------- auto_backfill ----------------------------
 
 
