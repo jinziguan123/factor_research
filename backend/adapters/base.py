@@ -51,13 +51,15 @@ def normalize_symbol(raw: str) -> str:
     # 裸代码：按首位数字推断 A 股市场（沪/深/北）
     if re.fullmatch(r"\d{6}", s):
         code = s
-        # 6/5/9 开头 → 沪；0/3 开头 → 深；4/8 开头 → 北交所
+        # 北交所优先判定：旧 4/8 开头 + 新 92/93 段（2023 年北交所新增代码段，
+        # 必须先于 9 开头的沪市规则，否则 920xxx / 930xxx 会被误判为沪市）。
+        if code[0] in "48" or code[:2] in ("92", "93"):
+            return f"{code}.BJ"
+        # 沪市：6 开头（A 股主板）/ 5 开头（基金）/ 9 开头（已停的 B 股 900xxx，保留兼容）
         if code[0] in "69" or code.startswith("5"):
             return f"{code}.SH"
         if code[0] in "03":
             return f"{code}.SZ"
-        if code[0] in "48":
-            return f"{code}.BJ"
 
     raise ValueError(f"cannot normalize symbol: {raw!r}")
 
