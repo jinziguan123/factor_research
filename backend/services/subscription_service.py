@@ -201,53 +201,104 @@ def _expand_row(row: dict) -> dict:
 def process_due_subscription(sub: dict) -> str:
     """对一个 due 订阅触发一次完整的 signal 计算。
 
-    流程：
-    1. 生成新 ``run_id``；
-    2. INSERT ``fr_signal_runs`` 一行 pending（带 ``subscription_id`` 反向关联）；
-    3. 同步调 ``signal_service.run_signal(run_id, body)``——service 内部把
-       status 从 pending 转成 running → success/failed，并写 payload；
-    4. 无论成功失败，``mark_refreshed`` 回写订阅 ``last_refresh_at + last_run_id``，
-       避免下一轮立即重试拖垮 worker。
+    **复用语义**：一个订阅永远只对应一条 fr_signal_runs 记录——
+    - 首次刷新：INSERT 新 run，sub.last_run_id ← 新 run_id；
+    - 后续刷新：UPDATE 同一条 run（重置为 pending + 清旧 payload + 同步最新订阅参数），
+      run_signal 跑完会再次转成 success/failed；
+    - 用户在前端删了那条 run（last_run_id 失效）：fall back 到 INSERT。
+
+    这样信号列表不会被订阅刷新刷爆，订阅详情页 URL 始终不变。
 
     Returns:
-        新 run_id（前端订阅详情页据此查刷新历史）。
+        run_id（首次为新 ID，后续与 sub.last_run_id 相同）。
     """
     # Lazy import：subscription_service 自身在 worker / router 导入时不应拉起
     # signal_service 的全部依赖（pandas / numpy / 因子注册表等）。
     from backend.services.signal_service import run_signal
 
-    run_id = uuid.uuid4().hex
     body = subscription_to_signal_body(sub)
     now = datetime.now()
     items_json = json.dumps(body["factor_items"], ensure_ascii=False)
+    sub_id = sub["subscription_id"]
+    existing_run_id: str | None = sub.get("last_run_id")
 
     with mysql_conn() as c:
         with c.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO fr_signal_runs
-                (run_id, factor_items_json, method, pool_id, n_groups,
-                 ic_lookback_days, as_of_time, as_of_date,
-                 use_realtime, filter_price_limit, top_n,
-                 subscription_id,
-                 status, progress, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,'pending',0,%s)
-                """,
-                (
-                    run_id,
-                    items_json,
-                    body["method"],
-                    body["pool_id"],
-                    body["n_groups"],
-                    body["ic_lookback_days"],
-                    now,
-                    now.date(),
-                    1 if body["filter_price_limit"] else 0,
-                    body["top_n"],
-                    sub["subscription_id"],
-                    now,
-                ),
-            )
+            run_id_to_reuse: str | None = None
+            if existing_run_id:
+                # 检查 last_run_id 仍存在（用户可能手动删了那条 run）
+                cur.execute(
+                    "SELECT run_id FROM fr_signal_runs WHERE run_id=%s",
+                    (existing_run_id,),
+                )
+                if cur.fetchone() is not None:
+                    run_id_to_reuse = existing_run_id
+
+            if run_id_to_reuse:
+                # 复用：UPDATE 同一条 run，重置状态 + 同步最新订阅参数
+                # （订阅可能改了 top_n / refresh_interval 等，run 字段需要同步）
+                cur.execute(
+                    """
+                    UPDATE fr_signal_runs
+                    SET factor_items_json=%s,
+                        method=%s,
+                        n_groups=%s,
+                        ic_lookback_days=%s,
+                        filter_price_limit=%s,
+                        top_n=%s,
+                        as_of_time=%s,
+                        as_of_date=%s,
+                        status='pending',
+                        progress=0,
+                        error_message=NULL,
+                        started_at=NULL,
+                        finished_at=NULL,
+                        n_holdings_top=NULL,
+                        n_holdings_bot=NULL,
+                        payload_json=NULL
+                    WHERE run_id=%s
+                    """,
+                    (
+                        items_json,
+                        body["method"],
+                        body["n_groups"],
+                        body["ic_lookback_days"],
+                        1 if body["filter_price_limit"] else 0,
+                        body["top_n"],
+                        now,
+                        now.date(),
+                        run_id_to_reuse,
+                    ),
+                )
+                run_id = run_id_to_reuse
+            else:
+                # 首次（或 last_run_id 失效）：INSERT 新 run
+                run_id = uuid.uuid4().hex
+                cur.execute(
+                    """
+                    INSERT INTO fr_signal_runs
+                    (run_id, factor_items_json, method, pool_id, n_groups,
+                     ic_lookback_days, as_of_time, as_of_date,
+                     use_realtime, filter_price_limit, top_n,
+                     subscription_id,
+                     status, progress, created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,'pending',0,%s)
+                    """,
+                    (
+                        run_id,
+                        items_json,
+                        body["method"],
+                        body["pool_id"],
+                        body["n_groups"],
+                        body["ic_lookback_days"],
+                        now,
+                        now.date(),
+                        1 if body["filter_price_limit"] else 0,
+                        body["top_n"],
+                        sub_id,
+                        now,
+                    ),
+                )
         c.commit()
 
     # service 期望 as_of_time 是 ISO 字符串（pickle 友好）
@@ -258,11 +309,11 @@ def process_due_subscription(sub: dict) -> str:
     except Exception:
         log.exception(
             "process_due_subscription: run_signal failed for sub=%s run=%s",
-            sub["subscription_id"], run_id,
+            sub_id, run_id,
         )
 
     # 失败也要 mark：避免下一 tick 立即重试雪崩。
-    mark_refreshed(sub["subscription_id"], run_id, now)
+    mark_refreshed(sub_id, run_id, now)
     return run_id
 
 
