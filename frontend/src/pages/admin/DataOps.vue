@@ -6,14 +6,85 @@
  * 推荐执行顺序：分钟线 → 聚合日线 → 复权因子。
  * 所有任务走后端 BackgroundTasks，提交后在"最近任务"（/api/admin/jobs）里查看进度。
  */
-import { ref } from 'vue'
+import { computed, h, ref } from 'vue'
 import {
   NPageHeader, NCard, NDatePicker, NButton, NSpace, NAlert,
-  NInputNumber, NInput, NSelect, useMessage,
+  NInputNumber, NInput, NSelect, NDataTable, NTag, useMessage,
 } from 'naive-ui'
+import type { DataTableColumns } from 'naive-ui'
 import { client } from '@/api/client'
 
 const message = useMessage()
+
+// ---- 数据源可用性探测 ----
+// 同步探测 akshare / baostock / mysql / clickhouse；点击立即出结果。
+interface DatasourceProbe {
+  name: string
+  status: 'ok' | 'error'
+  latency_ms: number
+  message: string
+  tested_at: string
+}
+const probeLoading = ref(false)
+const probeResults = ref<DatasourceProbe[]>([])
+const probeLastRunAt = ref<string | null>(null)
+
+async function handleProbeDatasources() {
+  probeLoading.value = true
+  try {
+    const data = await client.post('/admin/datasources:probe').then(r => r.data)
+    probeResults.value = data?.sources ?? []
+    probeLastRunAt.value = new Date().toISOString().slice(0, 19).replace('T', ' ')
+    const okCount = probeResults.value.filter(s => s.status === 'ok').length
+    const total = probeResults.value.length
+    if (okCount === total) {
+      message.success(`数据源探测完成：${okCount}/${total} 全部可用`)
+    } else {
+      message.warning(`数据源探测完成：${okCount}/${total} 可用，详见表格`)
+    }
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e?.message || '探测失败')
+  } finally {
+    probeLoading.value = false
+  }
+}
+
+const probeColumns: DataTableColumns<DatasourceProbe> = [
+  {
+    title: '数据源',
+    key: 'name',
+    width: 130,
+    render: (row) => h('code', { style: 'font-size: 13px; font-weight: 600' }, row.name),
+  },
+  {
+    title: '状态',
+    key: 'status',
+    width: 100,
+    render: (row) =>
+      row.status === 'ok'
+        ? h(NTag, { type: 'success', size: 'small', bordered: false }, { default: () => '🟢 可用' })
+        : h(NTag, { type: 'error', size: 'small', bordered: false }, { default: () => '🔴 失败' }),
+  },
+  {
+    title: '耗时',
+    key: 'latency_ms',
+    width: 100,
+    render: (row) => `${row.latency_ms} ms`,
+  },
+  {
+    title: '消息',
+    key: 'message',
+    ellipsis: { tooltip: true },
+    render: (row) =>
+      h('span', { style: row.status === 'ok' ? 'color: #18a058' : 'color: #d03050' }, row.message),
+  },
+]
+
+const probeSummary = computed(() => {
+  if (probeResults.value.length === 0) return ''
+  const ok = probeResults.value.filter(s => s.status === 'ok').length
+  return `${ok} / ${probeResults.value.length} 可用 · 最近探测：${probeLastRunAt.value}`
+})
 
 // ---- 导入分钟线 (QMT .DAT → stock_bar_1m) ----
 // 留空约定：symbol / base_dir 留空 → 后端使用环境变量 IQUANT_LOCAL_DATA_DIR + 全量扫目录。
@@ -232,6 +303,39 @@ async function handleSyncCalendar() {
 <template>
   <div>
     <n-page-header title="数据维护" style="margin-bottom: 16px" />
+
+    <!-- 数据源可用性探测：4 个源各跑一次最小请求，同步出结果 -->
+    <n-card
+      title="🔍 数据源可用性探测"
+      style="margin-bottom: 16px"
+      size="small"
+    >
+      <n-space :size="12" align="center" wrap style="margin-bottom: 12px">
+        <n-button
+          type="primary"
+          :loading="probeLoading"
+          @click="handleProbeDatasources"
+        >
+          立即探测
+        </n-button>
+        <span v-if="probeSummary" style="font-size: 12px; color: #666">
+          {{ probeSummary }}
+        </span>
+        <span v-else style="font-size: 12px; color: #999">
+          akshare / baostock / mysql / clickhouse —— 各跑一次最小请求验证连通性
+        </span>
+      </n-space>
+
+      <n-data-table
+        v-if="probeResults.length > 0"
+        :columns="probeColumns"
+        :data="probeResults"
+        :bordered="false"
+        :single-line="false"
+        :row-key="(row: any) => row.name"
+        size="small"
+      />
+    </n-card>
 
     <!-- 导入分钟线 -->
     <n-card title="导入分钟线 (QMT .DAT → stock_bar_1m)" style="margin-bottom: 16px">

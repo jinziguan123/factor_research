@@ -434,6 +434,20 @@ def trigger_sync_baostock_profit(
     )
 
 
+@router.post("/datasources:probe")
+def probe_datasources() -> dict:
+    """同步探测 akshare / baostock / MySQL / ClickHouse 是否可用。
+
+    每个源各跑一次最小请求（akshare A 股代码列表 / baostock query_trade_dates /
+    SELECT 1 / SELECT 1），返回各自 ``status`` + ``latency_ms`` + ``message``。
+    任一项失败不影响其它项；总耗时通常 <10s。详见
+    ``services/datasource_probe_service.py``。
+    """
+    from backend.services.datasource_probe_service import probe_all
+
+    return ok({"sources": probe_all()})
+
+
 @router.get("/jobs")
 def list_jobs() -> dict:
     """列最近 20 条 ``stock_bar_import_job``。表缺失 / 异常时回空列表并打 log。
