@@ -56,6 +56,29 @@ log = logging.getLogger(__name__)
 _SPOT_STALE_THRESHOLD_SEC = 600
 # 涨跌停阈值（与 backtest_service._compute_price_limit_mask 一致）
 _PRICE_LIMIT_THRESHOLD = 0.097
+# 历史窗口最小 buffer（自然日）：兜节假日，让因子至少有几天有效输出
+_MIN_NATURAL_DAYS_BUFFER = 7
+# IC 加权回看窗口的自然日折算系数：trading days × 1.5 ≈ natural days
+_IC_LOOKBACK_NATURAL_FACTOR = 1.5
+
+
+def compute_signal_window_natural_days(
+    method: str, ic_lookback_days: int,
+) -> int:
+    """signal 场景下，service 层应往前拉多少自然日的"因子值输出窗口"。
+
+    - 单因子 / equal / orthogonal_equal：只需要 ``as_of_date`` 这天的横截面就能
+      取末行 qcut，理论上 0 天就够；给 7 天 buffer 兜节假日。
+    - ic_weighted：需要历史 IC 序列做加权，至少要 ic_lookback_days 个交易日
+      的因子值输出 → 折成 ~1.5× 自然日 + buffer。
+
+    注意：因子 ``compute`` 内部会**额外**往前推 ``required_warmup`` 去加载
+    底层 K 线，所以最终拉的 K 线窗口 = ``natural_days + max(factor_warmup)``。
+    本函数只决定 service 层的"输出窗口"。
+    """
+    if method == "ic_weighted":
+        return int(ic_lookback_days * _IC_LOOKBACK_NATURAL_FACTOR) + _MIN_NATURAL_DAYS_BUFFER
+    return _MIN_NATURAL_DAYS_BUFFER
 
 # spot DataFrame 字段 → factor.load_panel 的 field 参数 映射
 _SPOT_FIELD_BY_PANEL_FIELD = {
@@ -383,9 +406,16 @@ def run_signal(run_id: str, body: dict) -> None:
                 log.exception("加载 spot 失败，降级 use_realtime=False")
                 use_realtime = False
 
-        # 历史窗口：自然日数 = max(180, ic_lookback_days * 2)，覆盖 warmup + IC 回看
-        natural_days = max(180, ic_lookback_days * 2)
+        # 历史窗口：按 method + ic_lookback_days 算最小"输出窗口"自然日；
+        # 因子 compute 内部还会再减 required_warmup 去加载底层 K 线，
+        # 所以这里 service 层不必额外预留 warmup（避免双重 warmup 拉到几年前数据）。
+        natural_days = compute_signal_window_natural_days(method, ic_lookback_days)
         start_date = as_of_date - timedelta(days=natural_days)
+        log.info(
+            "signal window: as_of=%s, method=%s, ic_lookback=%dd → "
+            "start_date=%s (natural_days=%d)",
+            as_of_date, method, ic_lookback_days, start_date, natural_days,
+        )
 
         # 构造装饰层 DataService
         data = (

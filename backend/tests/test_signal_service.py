@@ -18,6 +18,7 @@ import pytest
 from backend.services.signal_service import (
     RealtimeAwareDataService,
     _build_top_bottom,
+    compute_signal_window_natural_days,
 )
 
 
@@ -358,3 +359,48 @@ def test_build_top_bottom_top_n_larger_than_group_size() -> None:
         F, pd.DataFrame(), n_groups=5, filter_price_limit=False, top_n=100,
     )
     assert n_top == 2  # 顶组本身只有 2 只，top_n=100 不会凭空造票
+
+
+# ---------------------------- compute_signal_window_natural_days ----------------------------
+
+
+def test_window_single_method_minimal() -> None:
+    """single 方法只需要末行因子值 → 极小窗口（仅 buffer）。"""
+    n = compute_signal_window_natural_days("single", ic_lookback_days=60)
+    # buffer 默认 7 天，与 ic_lookback 无关
+    assert n == 7
+
+
+def test_window_equal_method_minimal() -> None:
+    """equal 方法同 single：末行 qcut，不需要历史。"""
+    n = compute_signal_window_natural_days("equal", ic_lookback_days=60)
+    assert n == 7
+
+
+def test_window_orthogonal_equal_method_minimal() -> None:
+    n = compute_signal_window_natural_days("orthogonal_equal", ic_lookback_days=60)
+    assert n == 7
+
+
+def test_window_ic_weighted_scales_with_lookback() -> None:
+    """ic_weighted 需要 IC 历史 → ic_lookback × 1.5 自然日 + buffer。"""
+    # 60 trading days × 1.5 + 7 = 97
+    n = compute_signal_window_natural_days("ic_weighted", ic_lookback_days=60)
+    assert n == 97
+    # 30 → 45+7=52
+    assert compute_signal_window_natural_days("ic_weighted", 30) == 52
+    # 200 → 300+7=307
+    assert compute_signal_window_natural_days("ic_weighted", 200) == 307
+
+
+def test_window_unknown_method_falls_back_to_minimal() -> None:
+    """未知 method 默认 minimal（防御性）。"""
+    n = compute_signal_window_natural_days("future_method_x", ic_lookback_days=60)
+    assert n == 7
+
+
+def test_window_significantly_smaller_than_old_180_default() -> None:
+    """优化效果验证：默认 single + ic_lookback=60 比旧的 180 小 25 倍。"""
+    new_window = compute_signal_window_natural_days("single", 60)
+    old_default = max(180, 60 * 2)  # 旧逻辑
+    assert new_window < old_default / 10  # 至少缩小 10 倍
