@@ -76,15 +76,39 @@ class LiveMarketConfig:
 # ---------------------------- 单次任务 ----------------------------
 
 
-def run_spot_once() -> int:
-    """拉一次 spot 快照并写库；返回写入行数。"""
+def run_spot_once(max_retries: int = 2, retry_sleep_sec: float = 1.0) -> int:
+    """拉一次 spot 快照并写库；返回写入行数。
+
+    akshare 后端常见 ``ConnectionAborted`` / ``ReadTimeout``，单次失败不应
+    立即降级——这里做最多 ``max_retries`` 次轻量重试（默认 1 + 2 = 共 3 次
+    尝试），每次间隔 ``retry_sleep_sec`` 秒。所有重试都失败才把异常抛给
+    上层（``ensure_spot_fresh`` / ``signal_service`` 会兜住降级到昨日 close）。
+    """
     # Lazy import：未启用 spot 阶段时不付出 akshare / adapter 启动成本
     from backend.adapters.akshare_live import fetch_spot_snapshot
     from backend.storage.realtime_dao import write_spot_snapshot
 
-    snapshot_at = datetime.now()
-    df = fetch_spot_snapshot()
-    return write_spot_snapshot(df, snapshot_at)
+    last_exc: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            snapshot_at = datetime.now()
+            df = fetch_spot_snapshot()
+            return write_spot_snapshot(df, snapshot_at)
+        except Exception as e:  # noqa: BLE001 - akshare 抛各种网络错
+            last_exc = e
+            if attempt < max_retries:
+                log.warning(
+                    "fetch_spot_snapshot 第 %d 次失败 (%s)；%.1fs 后重试",
+                    attempt + 1, e, retry_sleep_sec,
+                )
+                time_mod.sleep(retry_sleep_sec)
+            else:
+                log.warning(
+                    "fetch_spot_snapshot 重试 %d 次全部失败；放弃，让上层降级",
+                    max_retries + 1,
+                )
+    assert last_exc is not None
+    raise last_exc
 
 
 def run_archive_once(max_workers: int = 20) -> dict:

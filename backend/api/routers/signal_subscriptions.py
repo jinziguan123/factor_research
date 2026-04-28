@@ -126,16 +126,23 @@ def delete_subscription(subscription_id: str) -> dict:
 
 @router.post("/{subscription_id}/refresh-now")
 def refresh_subscription_now(
-    subscription_id: str, bt: BackgroundTasks,
+    subscription_id: str,
+    bt: BackgroundTasks,
+    target_run_id: str | None = None,
 ) -> dict:
-    """立即刷新一条订阅——不等下个 tick；复用 last_run_id（同 worker 路径）。
+    """立即刷新一条订阅——不等下个 tick；复用 run_id 不会创建新信号。
+
+    Args:
+        target_run_id: 可选；传入时强制 UPDATE 这个 run（即"原地刷新当前
+            详情页"语义）；不传则用 ``sub.last_run_id`` 或 INSERT 新 run。
+            前端 SignalDetail 的"⚡ 立即刷新"按钮始终传当前页的 ``runId``。
 
     流程：
-    1. 路由内同步调 ``prepare_subscription_refresh``：UPDATE 现有 run 或
-       INSERT 新 run（重置 pending），并 ``mark_refreshed``；
+    1. 路由内同步调 ``prepare_subscription_refresh`` 拿到 run_id（同时
+       ``mark_refreshed`` 防止 worker 主循环重复触发）；
     2. ``signal_entry`` 通过 ProcessPool 异步跑（与 ``POST /api/signals``
        同构，避免阻塞 HTTP 几十秒）；
-    3. 返回 ``run_id``，前端跳到详情页轮询 status。
+    3. 返回 ``run_id``，前端在原页面或跳转后轮询 status。
 
     跟"快速重跑"按钮的本质区别：本端点**复用 run_id**（信号详情页 URL
     不变、历史不会膨胀），快速重跑则始终新建 run。
@@ -148,7 +155,14 @@ def refresh_subscription_now(
             status_code=400, detail="订阅已暂停，请先打开实盘监控开关再立即刷新",
         )
 
-    run_id, body = subscription_service.prepare_subscription_refresh(sub)
+    try:
+        run_id, body = subscription_service.prepare_subscription_refresh(
+            sub, target_run_id=target_run_id,
+        )
+    except ValueError as e:
+        # target_run_id 不存在 → 400 让前端能展示具体错误
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
     bt.add_task(submit, signal_entry, run_id, body)
     return ok({
         "subscription_id": subscription_id,

@@ -92,23 +92,31 @@ export function useDeleteSubscription() {
   })
 }
 
-/** 立即刷新一条订阅：复用 last_run_id 重置为 pending 并 enqueue。
+/** 立即刷新一条订阅：复用 run_id 重置为 pending 并 enqueue。
  *
  * 与 useCreateSignal（快速重跑那个按钮）的关键区别：本 hook 不会创建
  * 新 run_id，详情页 URL 不变；适合"我现在就想看新结果"这个场景。
+ *
+ * targetRunId：可选；传入时强制 UPDATE 这个 run（"原地刷新当前页"）。
+ * SignalDetail 的按钮始终传当前 runId，确保"在哪个 run 详情页点的就刷哪个"，
+ * 即便这个 run 不是订阅 last_run_id 上次产出的。
  */
 export function useRefreshSubscriptionNow() {
   const qc = useQueryClient()
   return useMutation<
     { run_id: string; subscription_id: string; status: string },
     Error,
-    string
+    { id: string; targetRunId?: string }
   >({
-    mutationFn: (id: string) =>
-      client.post(`/signal-subscriptions/${id}/refresh-now`).then(r => r.data),
-    onSuccess: (_res, id) => {
+    mutationFn: ({ id, targetRunId }) => {
+      const url = targetRunId
+        ? `/signal-subscriptions/${id}/refresh-now?target_run_id=${encodeURIComponent(targetRunId)}`
+        : `/signal-subscriptions/${id}/refresh-now`
+      return client.post(url).then(r => r.data)
+    },
+    onSuccess: (_res, vars) => {
       qc.invalidateQueries({ queryKey: ['signal-subscriptions'] })
-      qc.invalidateQueries({ queryKey: ['signal-subscription', id] })
+      qc.invalidateQueries({ queryKey: ['signal-subscription', vars.id] })
       // run 列表 / 详情都会被重置为 pending → 让相关查询重抓
       qc.invalidateQueries({ queryKey: ['signals'] })
       qc.invalidateQueries({ queryKey: ['signal'] })

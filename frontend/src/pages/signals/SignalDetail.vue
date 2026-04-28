@@ -165,17 +165,22 @@ async function handleDeleteSubscription() {
   }
 }
 
-/** 立即刷新订阅：复用当前 run_id（信号详情页不变），异步跑。 */
+/** 立即刷新订阅：原地刷新**当前正在看的** run_id（URL 不变），异步跑。
+ *
+ * 把 runId 作为 targetRunId 传过去：后端 prepare_subscription_refresh 会
+ * UPDATE 这条 run + 把 sub.last_run_id 改指它。这样：
+ * - 当前页 useSignal 的 1.5s 轮询会自动看到 pending → success
+ * - 不会创建新 run（修复"立即刷新还在新建信号"）
+ */
 async function handleRefreshSubNow() {
   const sub = matchedSubscription.value
   if (!sub) return
   try {
-    const res = await refreshSubMut.mutateAsync(sub.subscription_id)
+    const res = await refreshSubMut.mutateAsync({
+      id: sub.subscription_id,
+      targetRunId: runId.value,
+    })
     message.success(`已触发刷新（run ${res.run_id.slice(0, 8)}）；状态会自动更新`)
-    // 当前页就是 last_run_id 的详情页时，useSignal 的轮询会自动重新拉到 pending
-    if (res.run_id !== runId.value) {
-      router.push(`/signals/${res.run_id}`)
-    }
   } catch (e: any) {
     message.error(e?.response?.data?.detail || e?.message || '触发刷新失败')
   }

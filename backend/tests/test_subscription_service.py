@@ -6,12 +6,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from backend.services.subscription_service import (
     compute_config_hash,
     find_matching_active_subscription,
     is_subscription_due,
+    prepare_subscription_refresh,
     subscription_to_signal_body,
 )
 
@@ -322,3 +325,129 @@ def test_config_hash_returns_40_char_sha1() -> None:
     h = compute_config_hash({"factor_items": [], "pool_id": 1})
     assert len(h) == 40
     assert all(c in "0123456789abcdef" for c in h)
+
+
+# ---------------------------- prepare_subscription_refresh ----------------------------
+
+
+def _make_prepare_mocks(run_id_lookups: dict[str, bool]):
+    """构造 mysql_conn 假 context；fetchone 按 run_id 参数返回是否存在。
+
+    run_id_lookups: {run_id: True/False}—— SELECT FROM fr_signal_runs WHERE run_id=%s
+    时 fetchone 的返回（True → 返回 dict 模拟存在；False → None）。
+    """
+    cursor = MagicMock()
+    cursor.__enter__ = lambda s: cursor
+    cursor.__exit__ = lambda s, *a: None
+    executed = []
+
+    def _fake_execute(sql, params=()):
+        executed.append((sql, params))
+        # SELECT run_id ... 时 cursor.fetchone() 由下面 side_effect 决定
+        if "SELECT run_id FROM fr_signal_runs" in sql:
+            looked_up_id = params[0] if params else None
+            cursor._next_fetchone = (
+                {"run_id": looked_up_id}
+                if run_id_lookups.get(looked_up_id, False)
+                else None
+            )
+        else:
+            cursor._next_fetchone = None
+        return None
+
+    cursor.execute.side_effect = _fake_execute
+    cursor.fetchone.side_effect = lambda: cursor._next_fetchone
+
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    conn.__enter__ = lambda s: conn
+    conn.__exit__ = lambda s, *a: None
+
+    cm = MagicMock()
+    cm.__enter__ = lambda s: conn
+    cm.__exit__ = lambda s, *a: None
+    return MagicMock(return_value=cm), executed
+
+
+def test_prepare_uses_target_run_id_when_provided(monkeypatch) -> None:
+    """传 target_run_id（存在）→ UPDATE 它；忽略 last_run_id。"""
+    sub = _full_sub(last_run_id="OLD_RUN", pool_id=5)
+    fake_conn, executed = _make_prepare_mocks({"TARGET_RUN": True})
+    monkeypatch.setattr(
+        "backend.services.subscription_service.mysql_conn", fake_conn,
+    )
+    with patch(
+        "backend.services.subscription_service.mark_refreshed"
+    ) as mark:
+        run_id, body = prepare_subscription_refresh(sub, target_run_id="TARGET_RUN")
+
+    assert run_id == "TARGET_RUN"
+    # 必须 UPDATE TARGET_RUN，不能 INSERT
+    sqls = [s for s, _ in executed]
+    assert any("UPDATE fr_signal_runs" in s for s in sqls)
+    assert not any("INSERT INTO fr_signal_runs" in s for s in sqls)
+    # mark_refreshed 把 last_run_id 重指向 TARGET_RUN
+    mark.assert_called_once()
+    assert mark.call_args.args[1] == "TARGET_RUN"
+
+
+def test_prepare_raises_when_target_run_id_missing(monkeypatch) -> None:
+    """target_run_id 在表里不存在 → ValueError（前端会展示 400）。"""
+    sub = _full_sub(last_run_id="OLD")
+    fake_conn, _ = _make_prepare_mocks({"GHOST_RUN": False})
+    monkeypatch.setattr(
+        "backend.services.subscription_service.mysql_conn", fake_conn,
+    )
+    with patch("backend.services.subscription_service.mark_refreshed"):
+        with pytest.raises(ValueError, match="GHOST_RUN.*不存在"):
+            prepare_subscription_refresh(sub, target_run_id="GHOST_RUN")
+
+
+def test_prepare_falls_back_to_last_run_id(monkeypatch) -> None:
+    """不传 target；sub.last_run_id 存在 → UPDATE last_run_id（worker 路径）。"""
+    sub = _full_sub(last_run_id="LAST_RUN")
+    fake_conn, executed = _make_prepare_mocks({"LAST_RUN": True})
+    monkeypatch.setattr(
+        "backend.services.subscription_service.mysql_conn", fake_conn,
+    )
+    with patch("backend.services.subscription_service.mark_refreshed") as mark:
+        run_id, _ = prepare_subscription_refresh(sub)
+
+    assert run_id == "LAST_RUN"
+    sqls = [s for s, _ in executed]
+    assert any("UPDATE fr_signal_runs" in s for s in sqls)
+    assert not any("INSERT INTO fr_signal_runs" in s for s in sqls)
+    assert mark.call_args.args[1] == "LAST_RUN"
+
+
+def test_prepare_inserts_when_no_last_run_and_no_target(monkeypatch) -> None:
+    """不传 target；sub.last_run_id=None → INSERT 新 run（首次刷新）。"""
+    sub = _full_sub(last_run_id=None)
+    fake_conn, executed = _make_prepare_mocks({})
+    monkeypatch.setattr(
+        "backend.services.subscription_service.mysql_conn", fake_conn,
+    )
+    with patch("backend.services.subscription_service.mark_refreshed"):
+        run_id, _ = prepare_subscription_refresh(sub)
+
+    sqls = [s for s, _ in executed]
+    assert any("INSERT INTO fr_signal_runs" in s for s in sqls)
+    assert not any("UPDATE fr_signal_runs" in s for s in sqls)
+    # 新 run_id 是 32 位 hex (uuid4().hex)
+    assert len(run_id) == 32
+
+
+def test_prepare_inserts_when_last_run_id_was_deleted(monkeypatch) -> None:
+    """sub.last_run_id 在表里找不到（用户手动删了）→ fall back INSERT 新 run。"""
+    sub = _full_sub(last_run_id="DELETED_RUN")
+    fake_conn, executed = _make_prepare_mocks({"DELETED_RUN": False})
+    monkeypatch.setattr(
+        "backend.services.subscription_service.mysql_conn", fake_conn,
+    )
+    with patch("backend.services.subscription_service.mark_refreshed"):
+        run_id, _ = prepare_subscription_refresh(sub)
+
+    sqls = [s for s, _ in executed]
+    assert any("INSERT INTO fr_signal_runs" in s for s in sqls)
+    assert run_id != "DELETED_RUN"
+    assert len(run_id) == 32

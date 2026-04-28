@@ -312,21 +312,31 @@ def _expand_row(row: dict) -> dict:
     return out
 
 
-def prepare_subscription_refresh(sub: dict) -> tuple[str, dict]:
+def prepare_subscription_refresh(
+    sub: dict, *, target_run_id: str | None = None,
+) -> tuple[str, dict]:
     """同步：UPDATE 现有 run 或 INSERT 新 run（重置 pending）+ mark_refreshed。
 
     抽出来供"立即刷新"路由使用——HTTP 端点先同步走完这一步拿到 run_id，
     再把 run_signal 的耗时执行 enqueue 给 ProcessPool；前端立即跳转到详情
     页轮询状态。``process_due_subscription`` 复用本函数。
 
-    复用语义同 ``process_due_subscription``：
-    - 首次刷新：INSERT 新 run；
-    - 后续刷新：UPDATE 同 ``last_run_id`` 一条记录（重置 pending 清 payload）；
-    - 用户删了那条 run → fall back 到 INSERT。
+    复用语义（按优先级）：
+    1. ``target_run_id`` 传入且存在 → UPDATE 它；mark_refreshed 把
+       ``sub.last_run_id`` 改指它（前端"立即刷新"按钮专用：让用户在哪个
+       run 详情页点的就刷新哪一个，URL 不会变）；
+    2. 否则 ``sub.last_run_id`` 存在 → UPDATE 它（worker 路径 / 订阅列表
+       页路径）；
+    3. 都失败 → INSERT 新 run（首次刷新 / 历史 run 被删 fall back）。
 
     ``mark_refreshed`` 在本函数内立即执行（设 ``last_refresh_at = now`` +
     ``last_run_id``）——避免在异步 run_signal 还没跑完时 worker 主循环把同
     一订阅再判定为 due 重复触发。
+
+    Args:
+        sub: 完整 subscription dict（``get_subscription`` 返回的形态）。
+        target_run_id: 可选；传入时**强制** UPDATE 这个 run（必须已存在）。
+            前端"立即刷新"会传当前页 ``runId``。
 
     Returns:
         ``(run_id, body)``：body 已含 ISO 字符串 ``as_of_time``，可直接交给
@@ -341,7 +351,19 @@ def prepare_subscription_refresh(sub: dict) -> tuple[str, dict]:
     with mysql_conn() as c:
         with c.cursor() as cur:
             run_id_to_reuse: str | None = None
-            if existing_run_id:
+            # 优先级 1：target_run_id（前端指定）—— 必须存在
+            if target_run_id:
+                cur.execute(
+                    "SELECT run_id FROM fr_signal_runs WHERE run_id=%s",
+                    (target_run_id,),
+                )
+                if cur.fetchone() is None:
+                    raise ValueError(
+                        f"target_run_id={target_run_id} 不存在；无法原地刷新"
+                    )
+                run_id_to_reuse = target_run_id
+            # 优先级 2：sub.last_run_id（worker 路径）
+            elif existing_run_id:
                 # 检查 last_run_id 仍存在（用户可能手动删了那条 run）
                 cur.execute(
                     "SELECT run_id FROM fr_signal_runs WHERE run_id=%s",
