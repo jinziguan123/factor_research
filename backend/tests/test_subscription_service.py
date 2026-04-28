@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from backend.services.subscription_service import (
+    compute_config_hash,
     find_matching_active_subscription,
     is_subscription_due,
     subscription_to_signal_body,
@@ -256,3 +257,68 @@ def test_find_matching_picks_oldest_when_multiple_match() -> None:
         result = find_matching_active_subscription(body)
     assert result is not None
     assert result["subscription_id"] == "S_old"
+
+
+# ---------------------------- compute_config_hash ----------------------------
+
+
+def test_config_hash_stable_for_same_body() -> None:
+    """相同 body 必须产生相同 hash（跨调用稳定）。"""
+    body = _body_matching(_full_sub())
+    assert compute_config_hash(body) == compute_config_hash(body)
+
+
+def test_config_hash_independent_of_dict_key_order() -> None:
+    """body 字段顺序不同不应影响 hash（dict 序列化排序）。"""
+    body1 = {
+        "factor_items": [{"factor_id": "a", "params": {"y": 2, "x": 1}}],
+        "method": "single", "pool_id": 5,
+        "n_groups": 5, "ic_lookback_days": 60,
+        "filter_price_limit": True, "top_n": 20,
+    }
+    body2 = {
+        "top_n": 20, "filter_price_limit": True,
+        "ic_lookback_days": 60, "n_groups": 5,
+        "pool_id": 5, "method": "single",
+        # params 内字段顺序也调换
+        "factor_items": [{"factor_id": "a", "params": {"x": 1, "y": 2}}],
+    }
+    assert compute_config_hash(body1) == compute_config_hash(body2)
+
+
+def test_config_hash_sensitive_to_factor_items_order() -> None:
+    """factor_items 顺序变化 → hash 变（orthogonal_equal 对顺序敏感的语义要求）。"""
+    body1 = {
+        "factor_items": [{"factor_id": "a"}, {"factor_id": "b"}],
+        "method": "single", "pool_id": 5,
+    }
+    body2 = {
+        "factor_items": [{"factor_id": "b"}, {"factor_id": "a"}],
+        "method": "single", "pool_id": 5,
+    }
+    assert compute_config_hash(body1) != compute_config_hash(body2)
+
+
+def test_config_hash_sensitive_to_top_n() -> None:
+    """top_n=None 与 top_n=20 必须不同 hash（语义不同）。"""
+    body_none = {"factor_items": [{"factor_id": "a"}], "method": "single",
+                 "pool_id": 5, "top_n": None}
+    body_20 = {"factor_items": [{"factor_id": "a"}], "method": "single",
+               "pool_id": 5, "top_n": 20}
+    assert compute_config_hash(body_none) != compute_config_hash(body_20)
+
+
+def test_config_hash_ignores_refresh_interval_sec() -> None:
+    """refresh_interval_sec 不参与 hash（同配置不同间隔仍是同订阅）。"""
+    body1 = {"factor_items": [{"factor_id": "a"}], "method": "single",
+             "pool_id": 5, "refresh_interval_sec": 60}
+    body2 = {"factor_items": [{"factor_id": "a"}], "method": "single",
+             "pool_id": 5, "refresh_interval_sec": 600}
+    assert compute_config_hash(body1) == compute_config_hash(body2)
+
+
+def test_config_hash_returns_40_char_sha1() -> None:
+    """hash 输出为 40 字符（SHA-1 hex）。"""
+    h = compute_config_hash({"factor_items": [], "pool_id": 1})
+    assert len(h) == 40
+    assert all(c in "0123456789abcdef" for c in h)

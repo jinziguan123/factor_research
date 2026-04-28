@@ -167,77 +167,81 @@ def main_loop(
             today_is_trading = is_trading_day(today)
             phase = determine_phase(now, today_is_trading)
 
-            # ---- 订阅刷新（与 phase 解耦：盘外也跑，service 内部自动降级）----
-            #
-            # 旧逻辑只在 phase=='spot' 时处理订阅，导致用户开订阅后
-            # 在盘外（idle/午休/收盘后）一直没有刷新——违背"立即看到结果"的预期。
-            #
-            # 新逻辑：
-            # - 任何时刻都查 due 订阅；
-            # - 在 spot 时段额外拉一次 spot 共享给所有 due 订阅；
-            # - 在非 spot 时段不拉 spot，service 内部检测到 spot 陈旧 / 缺失会
-            #   自动降级 use_realtime=False（用昨日 close 当今日 close）。
+            # ---- 跨实例 leader 选举：多台后端共享同一 MySQL 时只让一个跑 ----
+            # GET_LOCK 立即返回（timeout=0）：拿到锁 = 我是本轮 leader；
+            # 拿不到 = 其它实例已是 leader，本实例本轮 follower（不动订阅 / archive）。
+            # leader 实例崩溃时 MySQL 会话断开自动释放锁，下个 tick 任意 follower
+            # 抢到即接管，无需手动切换。
+            from backend.storage.distributed_lock import acquire_mysql_lock
+
+            is_leader = False
             due_subs: list = []
-            if cfg.spot_enabled:
-                from backend.services import subscription_service
-
-                due_subs = subscription_service.find_due_subscriptions(now)
-
-            if due_subs:
-                log.info(
-                    "[sub] %d due subscriptions (phase=%s, trading=%s)",
-                    len(due_subs), phase, today_is_trading,
-                )
-                if phase == "spot":
-                    try:
-                        ensure_spot_fresh(cfg.spot_stale_sec)
-                    except Exception:
-                        log.exception(
-                            "[spot] ensure_spot_fresh failed; subscriptions will "
-                            "downgrade to yesterday close"
-                        )
+            with acquire_mysql_lock("live_market_leader", timeout=0) as got_lock:
+                is_leader = got_lock
+                if not is_leader:
+                    log.debug("worker is follower; leader 在另一实例")
                 else:
-                    log.info(
-                        "[sub] phase=%s (offline) — service will downgrade to yesterday close",
-                        phase,
-                    )
-                # 串行处理 due 订阅
-                from backend.services import subscription_service
+                    # ---- 订阅刷新（仅 leader 跑）----
+                    # 任何时刻都跑（盘外 service 自动降级用昨日 close）。
+                    if cfg.spot_enabled:
+                        from backend.services import subscription_service
 
-                for sub in due_subs:
-                    sid = sub["subscription_id"]
-                    try:
-                        rid = subscription_service.process_due_subscription(sub)
+                        due_subs = subscription_service.find_due_subscriptions(now)
+
+                    if due_subs:
                         log.info(
-                            "[sub] %s refreshed → run_id=%s", sid[:8], rid[:8],
+                            "[sub] %d due subscriptions (phase=%s, trading=%s, leader=True)",
+                            len(due_subs), phase, today_is_trading,
                         )
-                    except Exception:
-                        log.exception("[sub] failed sub=%s", sid)
+                        if phase == "spot":
+                            try:
+                                ensure_spot_fresh(cfg.spot_stale_sec)
+                            except Exception:
+                                log.exception(
+                                    "[spot] ensure_spot_fresh failed; subscriptions "
+                                    "will downgrade to yesterday close"
+                                )
+                        else:
+                            log.info(
+                                "[sub] phase=%s (offline) — service will downgrade to yesterday close",
+                                phase,
+                            )
+                        from backend.services import subscription_service
 
-            # ---- 盘后归档（与订阅互不干扰） ----
-            if phase == "eod_archive":
-                if not cfg.archive_1m_enabled:
-                    log.debug("[eod_archive] phase reached but archive_1m_enabled=False")
-                elif today in archived_dates:
-                    log.debug("[eod_archive] %s already archived, skip", today)
-                else:
-                    log.info("[eod_archive] starting 1m K archive for %s", today)
-                    try:
-                        stats = run_archive_once(cfg.archive_max_workers)
-                        log.info(
-                            "[eod_archive] done: symbols=%d bars=%d errors=%d",
-                            stats["n_symbols"],
-                            stats["n_bars_written"],
-                            stats["n_errors"],
-                        )
-                    except Exception:
-                        log.exception(
-                            "[eod_archive] failed for %s; marking done to avoid retry",
-                            today,
-                        )
-                    archived_dates.add(today)
+                        for sub in due_subs:
+                            sid = sub["subscription_id"]
+                            try:
+                                rid = subscription_service.process_due_subscription(sub)
+                                log.info(
+                                    "[sub] %s refreshed → run_id=%s", sid[:8], rid[:8],
+                                )
+                            except Exception:
+                                log.exception("[sub] failed sub=%s", sid)
 
-            # ---- 心跳：仅当本轮没有任何订阅活动 + 非 eod_archive 时输出 ----
+                    # ---- 盘后归档（仅 leader 跑；多实例同跑会让 akshare 流量翻倍）----
+                    if phase == "eod_archive":
+                        if not cfg.archive_1m_enabled:
+                            log.debug("[eod_archive] phase reached but archive_1m_enabled=False")
+                        elif today in archived_dates:
+                            log.debug("[eod_archive] %s already archived, skip", today)
+                        else:
+                            log.info("[eod_archive] starting 1m K archive for %s", today)
+                            try:
+                                stats = run_archive_once(cfg.archive_max_workers)
+                                log.info(
+                                    "[eod_archive] done: symbols=%d bars=%d errors=%d",
+                                    stats["n_symbols"],
+                                    stats["n_bars_written"],
+                                    stats["n_errors"],
+                                )
+                            except Exception:
+                                log.exception(
+                                    "[eod_archive] failed for %s; marking done to avoid retry",
+                                    today,
+                                )
+                            archived_dates.add(today)
+
+            # ---- 心跳：任何实例都打（含 follower），证明自己活着 ----
             if not due_subs and phase != "eod_archive":
                 if (
                     last_idle_heartbeat is None
@@ -245,8 +249,8 @@ def main_loop(
                     >= cfg.idle_heartbeat_sec
                 ):
                     log.info(
-                        "[idle] phase=%s trading_day=%s now=%s",
-                        phase, today_is_trading,
+                        "[idle] phase=%s trading_day=%s leader=%s now=%s",
+                        phase, today_is_trading, is_leader,
                         now.strftime("%Y-%m-%d %H:%M:%S"),
                     )
                     last_idle_heartbeat = now

@@ -13,12 +13,14 @@ body + 把结果回写。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
+from backend.storage.distributed_lock import acquire_mysql_lock
 from backend.storage.mysql_client import mysql_conn
 
 log = logging.getLogger(__name__)
@@ -59,47 +61,104 @@ def is_subscription_due(
 # ---------------------------- DB CRUD ----------------------------
 
 
-def create_subscription(body: dict) -> str:
-    """创建一个新订阅。
+def compute_config_hash(body: dict) -> str:
+    """订阅配置稳定 SHA-1 hash（40 字符），用于跨实例去重锁键。
 
-    Args:
-        body: 字段对齐 fr_signal_subscriptions 列：
-            factor_items（list[dict]）、method、pool_id、n_groups、ic_lookback_days、
-            filter_price_limit、top_n、refresh_interval_sec。
+    维度（与 ``find_matching_active_subscription`` 完全一致）：
+    factor_items（顺序敏感）/ method / pool_id / n_groups / ic_lookback_days /
+    filter_price_limit / top_n。
+
+    refresh_interval_sec **不参与** hash——同配置不同间隔仍视为同订阅
+    （间隔可以 PUT 修改而不重建）。
+    """
+    items = body.get("factor_items") or []
+    # 序列化 factor_items：每项只取 factor_id + params（params 内 key 排序确保稳定）
+    norm_items = []
+    for it in items:
+        if not isinstance(it, dict):
+            norm_items.append({"factor_id": str(it), "params": None})
+            continue
+        norm_items.append(
+            {
+                "factor_id": it.get("factor_id"),
+                "params": it.get("params") or None,
+            }
+        )
+    items_str = json.dumps(norm_items, ensure_ascii=False, sort_keys=True)
+    parts = (
+        items_str,
+        str(body.get("method", "equal")),
+        str(int(body.get("pool_id", -1))),
+        str(int(body.get("n_groups", 5))),
+        str(int(body.get("ic_lookback_days", 60))),
+        str(bool(body.get("filter_price_limit", True))),
+        "null" if body.get("top_n") is None else str(int(body["top_n"])),
+    )
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def create_subscription(body: dict) -> tuple[str, bool]:
+    """创建订阅；跨实例去重。
+
+    流程：
+    1. 计算 ``config_hash``；
+    2. 用 ``acquire_mysql_lock("sub_create:<hash>", timeout=5)`` 串行化跨实例
+       的相同配置创建 — 两台设备同时 POST 时第二个会等到第一个完成；
+    3. 锁内查 ``find_matching_active_subscription``：
+       - 已存在 active 订阅 → 直接返回 ``(existing_id, True)``，不重新创建；
+       - 不存在 → INSERT 新订阅。
+    4. 返回 ``(subscription_id, reused)``。
+
+    锁拿不到（5s 超时）走兜底：直接尝试 find_matching → 没有就 INSERT。
+    极端竞态下可能产生 1 份重复（罕见，可接受）。
 
     Returns:
-        新订阅的 subscription_id。
+        ``(subscription_id, reused)``：reused=True 表示返回的是已有订阅。
     """
-    subscription_id = uuid.uuid4().hex
-    now = datetime.now()
-    items_json = json.dumps(body.get("factor_items") or [], ensure_ascii=False)
-    with mysql_conn() as c:
-        with c.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO fr_signal_subscriptions
-                (subscription_id, factor_items_json, method, pool_id, n_groups,
-                 ic_lookback_days, filter_price_limit, top_n,
-                 refresh_interval_sec, is_active,
-                 created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)
-                """,
-                (
-                    subscription_id,
-                    items_json,
-                    body.get("method", "equal"),
-                    int(body["pool_id"]),
-                    int(body.get("n_groups", 5)),
-                    int(body.get("ic_lookback_days", 60)),
-                    1 if body.get("filter_price_limit", True) else 0,
-                    body.get("top_n"),
-                    int(body.get("refresh_interval_sec", 300)),
-                    now,
-                    now,
-                ),
+    config_hash = compute_config_hash(body)
+    lock_name = f"sub_create:{config_hash[:16]}"  # MySQL 锁名 64 字符上限
+
+    with acquire_mysql_lock(lock_name, timeout=5) as got_lock:
+        if not got_lock:
+            log.warning(
+                "create_subscription 拿锁超时 (5s)；继续执行，极端情况下可能创建重复"
             )
-        c.commit()
-    return subscription_id
+
+        # 锁内（或超时后）：查现有
+        existing = find_matching_active_subscription(body)
+        if existing is not None:
+            return existing["subscription_id"], True
+
+        subscription_id = uuid.uuid4().hex
+        now = datetime.now()
+        items_json = json.dumps(body.get("factor_items") or [], ensure_ascii=False)
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO fr_signal_subscriptions
+                    (subscription_id, factor_items_json, method, pool_id, n_groups,
+                     ic_lookback_days, filter_price_limit, top_n,
+                     refresh_interval_sec, is_active,
+                     created_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)
+                    """,
+                    (
+                        subscription_id,
+                        items_json,
+                        body.get("method", "equal"),
+                        int(body["pool_id"]),
+                        int(body.get("n_groups", 5)),
+                        int(body.get("ic_lookback_days", 60)),
+                        1 if body.get("filter_price_limit", True) else 0,
+                        body.get("top_n"),
+                        int(body.get("refresh_interval_sec", 300)),
+                        now,
+                        now,
+                    ),
+                )
+            c.commit()
+        return subscription_id, False
 
 
 def set_active(subscription_id: str, is_active: bool) -> bool:
