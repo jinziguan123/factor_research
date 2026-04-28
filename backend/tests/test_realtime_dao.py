@@ -239,9 +239,11 @@ def test_latest_spot_snapshot_returns_mapped_dataframe() -> None:
         (1002, datetime(2026, 4, 27, 14, 30, 15), 12.3, 12.45, 12.55,
          12.20, 12.36, -0.005, 9876543, 1.2e8, 0),
     ]
+    # 注意：SQL 用了 ``max(snapshot_at) AS snapshot_at_max`` 避新版 CH 别名冲突，
+    # 函数内部 rename 回 snapshot_at；mock 的 col_types 也按 SQL 实际返回值给。
     col_types = [
         ("symbol_id", "UInt32"),
-        ("snapshot_at", "DateTime"),
+        ("snapshot_at_max", "DateTime"),
         ("last_price", "Float32"),
         ("open", "Float32"),
         ("high", "Float32"),
@@ -262,8 +264,10 @@ def test_latest_spot_snapshot_returns_mapped_dataframe() -> None:
     )
 
     assert len(df) == 2
-    # symbol_id 列已 drop，symbol 列已加
+    # symbol_id 列已 drop，symbol 列已加；snapshot_at_max 已 rename 回 snapshot_at
     assert "symbol_id" not in df.columns
+    assert "snapshot_at_max" not in df.columns
+    assert "snapshot_at" in df.columns
     assert set(df["symbol"]) == {"600519.SH", "000001.SZ"}
 
 
@@ -429,3 +433,21 @@ def test_latest_spot_snapshot_sql_no_trade_date_filter() -> None:
     assert "trade_date" not in sql
     # 仍按 symbol_id 过滤（不能拉全表）
     assert "symbol_id IN" in sql.replace("\n", " ").replace("  ", " ")
+
+
+def test_latest_spot_snapshot_sql_avoids_alias_conflict() -> None:
+    """关键：SQL 不能有 ``max(snapshot_at) AS snapshot_at``——新版 CH analyzer
+    会把这个别名当成"argMax 内的聚合函数"报 Code 184。
+    """
+    resolver = _make_resolver({"600519.SH": 1001})
+    ch = _ChRecordSql(return_value=([], []))
+
+    latest_spot_snapshot(["600519.SH"], resolver=resolver, ch=ch)
+
+    sql = ch.received_sqls[0]
+    # 不能有 "AS snapshot_at" 这个别名（会与 argMax(_, snapshot_at) 冲突）
+    assert "AS snapshot_at\n" not in sql and "AS snapshot_at " not in sql, (
+        f"SQL 仍含冲突别名:\n{sql}"
+    )
+    # 改用 snapshot_at_max
+    assert "snapshot_at_max" in sql

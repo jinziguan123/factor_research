@@ -249,10 +249,14 @@ def latest_spot_snapshot(
         return pd.DataFrame()
     sids = list(sym_map.values())
 
+    # 注意：``max(snapshot_at) AS snapshot_at`` 在 ClickHouse 22+ 的新 query
+    # analyzer 下会被解析成"聚合函数的输出又被 argMax 当参数"——报 Code 184
+    # "Aggregate function found inside another aggregate function"。
+    # 用不同别名 ``snapshot_at_max`` 避开，Python 端再 rename 回 ``snapshot_at``。
     sql = f"""
         SELECT
             symbol_id,
-            max(snapshot_at) AS snapshot_at,
+            max(snapshot_at) AS snapshot_at_max,
             argMax(last_price, snapshot_at) AS last_price,
             argMax(open, snapshot_at) AS open,
             argMax(high, snapshot_at) AS high,
@@ -288,6 +292,10 @@ def latest_spot_snapshot(
         return pd.DataFrame()
     cols = [name for name, _ in col_types]
     df = pd.DataFrame(data, columns=cols)
+    # 把 SQL 端为避语法冲突起的别名复原，让上层（signal_service / 前端）
+    # 看到的字段名仍是 snapshot_at。
+    if "snapshot_at_max" in df.columns:
+        df = df.rename(columns={"snapshot_at_max": "snapshot_at"})
 
     # symbol_id → symbol 反查
     inv_map = {sid: sym for sym, sid in sym_map.items()}
