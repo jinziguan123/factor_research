@@ -81,15 +81,30 @@ def get_latest_bar_1d_trade_date(ch=None):
     return rows[0][0]
 
 
-def check_data_freshness(as_of_date, *, ch=None, threshold_days: int = _STOCK_BAR_1D_STALE_THRESHOLD_DAYS):
-    """检查 stock_bar_1d 是否新鲜；落后 > threshold_days 抛 ValueError。
+def check_data_freshness(
+    as_of_date,
+    *,
+    ch=None,
+    threshold_days: int = _STOCK_BAR_1D_STALE_THRESHOLD_DAYS,
+    symbols: list[str] | None = None,
+    auto_backfill: bool = False,
+    backfill_fn=None,
+):
+    """检查 stock_bar_1d 是否新鲜；落后时按配置自动 backfill 或抛错。
 
     Args:
-        as_of_date: 信号触发日期（``date`` 或 ``datetime`` / pandas Timestamp）。
-        threshold_days: 容忍天数；A 股周末 + 1 工作日 = 3 天，5 天兜节假日。
+        as_of_date: 信号触发日期。
+        threshold_days: 容忍天数（A 股周末 + 1 工作日 = 3 天，5 天兜节假日）。
+        symbols: 仅在 auto_backfill=True 时使用——按这个 symbols 列表限定 backfill
+            范围（通常是订阅的 pool symbols），避免每次都补全 A 浪费 IP 配额。
+            None → backfill 走全 A。
+        auto_backfill: True 时检测到落后会**同步**调 backfill_daily_bars 补救，
+            完成后再校验一次；二次仍落后才抛错。False 沿用旧的 fail-with-message。
+        backfill_fn: 测试注入用，签名 ``(start, end, symbols) -> stats``；None 则
+            用真实 ``backfill_daily_bars.backfill``。
 
     Raises:
-        ValueError: 数据落后超过阈值，message 包含具体补救命令。
+        ValueError: 数据落后且自动补救失败 / 关闭，message 含手动命令。
     """
     latest = get_latest_bar_1d_trade_date(ch=ch)
     # 统一为 date
@@ -99,6 +114,7 @@ def check_data_freshness(as_of_date, *, ch=None, threshold_days: int = _STOCK_BA
         as_of = as_of_date
 
     if latest is None:
+        # 表完全为空：自动补需要明确起点，不适合自动判断；强制人工介入
         raise ValueError(
             "stock_bar_1d 表为空。请先导入历史日线数据，或调用 "
             "`python -m backend.scripts.backfill_daily_bars --start <D1> --end <D2>` "
@@ -106,19 +122,61 @@ def check_data_freshness(as_of_date, *, ch=None, threshold_days: int = _STOCK_BA
         )
 
     gap = (as_of - latest).days if hasattr(as_of, "__sub__") else 0
-    if gap > threshold_days:
-        # 给出可复制的修复命令
-        next_day = latest
-        if hasattr(latest, "__add__"):
-            from datetime import timedelta as _td
-            next_day = latest + _td(days=1)
-        raise ValueError(
-            f"stock_bar_1d 最新到 {latest}，距 as_of_date={as_of} 已 {gap} 天 "
-            f"(阈值 {threshold_days})；请先补齐：\n"
-            f"  python -m backend.scripts.backfill_daily_bars "
-            f"--start {next_day} --end {as_of}\n"
-            f"或确认 QMT 行情下载 + 1m K 聚合链路是否正常。"
+    if gap <= threshold_days:
+        return  # 数据新鲜，通过
+
+    # 落后；决定走自动 backfill 还是抛错
+    from datetime import timedelta as _td
+    next_day = latest + _td(days=1)
+
+    if auto_backfill:
+        log.warning(
+            "stock_bar_1d 最新到 %s，距 as_of=%s 落后 %d 天 (>%d)；"
+            "尝试自动 backfill [%s, %s] symbols=%s ...",
+            latest, as_of, gap, threshold_days, next_day, as_of,
+            len(symbols) if symbols else "全 A",
         )
+        try:
+            if backfill_fn is None:
+                from backend.scripts.backfill_daily_bars import backfill as _bf
+
+                def _do_backfill(start, end, syms):
+                    return _bf(start=start, end=end, symbols=syms)
+                backfill_fn = _do_backfill
+
+            stats = backfill_fn(next_day, as_of, symbols)
+            log.info("auto backfill 完成: %s", stats)
+        except Exception as e:  # noqa: BLE001
+            log.exception("auto backfill 抛异常")
+            raise ValueError(
+                f"自动 backfill 失败 ({e})；请人工跑：\n"
+                f"  python -m backend.scripts.backfill_daily_bars "
+                f"--start {next_day} --end {as_of}"
+            ) from e
+
+        # 再次校验：可能 akshare 部分返回空 / 全部失败
+        latest2 = get_latest_bar_1d_trade_date(ch=ch)
+        if latest2 is None:
+            gap2 = 999
+        else:
+            gap2 = (as_of - latest2).days
+        if gap2 > threshold_days:
+            raise ValueError(
+                f"自动 backfill 后 stock_bar_1d 最新仍是 {latest2} (落后 {gap2} 天)；"
+                "可能 akshare 限流 / 接口异常，请稍后人工跑：\n"
+                f"  python -m backend.scripts.backfill_daily_bars "
+                f"--start {next_day} --end {as_of}"
+            )
+        return  # 自动补救成功
+
+    # 非自动 → 抛错给出修复命令
+    raise ValueError(
+        f"stock_bar_1d 最新到 {latest}，距 as_of_date={as_of} 已 {gap} 天 "
+        f"(阈值 {threshold_days})；请先补齐：\n"
+        f"  python -m backend.scripts.backfill_daily_bars "
+        f"--start {next_day} --end {as_of}\n"
+        f"或将 FR_LIVE_MARKET_AUTO_BACKFILL_DAILY=1 开启自动补救。"
+    )
 
 
 def compute_signal_window_natural_days(
@@ -435,10 +493,6 @@ def run_signal(run_id: str, body: dict) -> None:
         top_n_raw = body.get("top_n")
         top_n: int | None = int(top_n_raw) if top_n_raw is not None else None
 
-        # 数据健康度守卫：stock_bar_1d 落后太多时立即 fail，
-        # 避免跑出"看似成功但因子值跨断档段"的错误信号。
-        check_data_freshness(as_of_date)
-
         reg = FactorRegistry()
         reg.scan_and_register()
         base_data = DataService()
@@ -448,6 +502,15 @@ def run_signal(run_id: str, body: dict) -> None:
                 f"股票池 pool_id={body['pool_id']} 仅含 {len(symbols)} 只，"
                 f"小于 n_groups={n_groups}"
             )
+
+        # 数据健康度守卫：stock_bar_1d 落后太多时按配置自动 backfill 或抛错。
+        # 放 symbols 解析之后：自动补救只补本次订阅的 pool 范围（更省 IP 配额）。
+        from backend.config import settings as _settings
+        check_data_freshness(
+            as_of_date,
+            symbols=symbols,
+            auto_backfill=_settings.live_market_auto_backfill_daily,
+        )
 
         _update_status(run_id, progress=15)
 

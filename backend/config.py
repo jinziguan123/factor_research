@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     live_market_archive_1m: bool = Field(
         default=False, alias="FR_LIVE_MARKET_ARCHIVE_1M",
     )
+    # 数据落后时是否自动 backfill：True 则 signal_service 检测到 stock_bar_1d 落后
+    # 时同步触发 akshare 拉补当前订阅 pool 的缺口（首次会阻塞 ~1-5min 取决于池大小），
+    # False 沿用 fail-with-message（要求用户手动跑 backfill 命令）。
+    live_market_auto_backfill_daily: bool = Field(
+        default=True, alias="FR_LIVE_MARKET_AUTO_BACKFILL_DAILY",
+    )
 
     # ---------- LLM（因子助手用；走 OpenAI 兼容协议，中转 / 官方都行） ----------
     # 为空串时 factor_assistant API 会直接报 503，提醒用户先在 .env 里配好 key。

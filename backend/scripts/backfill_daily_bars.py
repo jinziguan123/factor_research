@@ -95,6 +95,7 @@ def backfill(
     start: date,
     end: date,
     pool_id: int | None = None,
+    symbols: list[str] | None = None,
     max_workers: int = 20,
     batch_size: int = 500,
 ) -> dict:
@@ -103,6 +104,8 @@ def backfill(
     Args:
         start / end: 补的日期闭区间。
         pool_id: 限定股票池；None → 全 A（stock_symbol 表所有 listed 票）。
+        symbols: 显式 symbol 列表；优先级高于 pool_id（用于 auto_backfill 场景，
+            按订阅当前的 pool 限定补救范围，避免每次都补全 A 浪费 IP 配额）。
         max_workers: 线程并发数；> 30 易触发 akshare IP 限流。
         batch_size: 每批多少只票（避免一次提交几千 task 到 ThreadPoolExecutor）。
 
@@ -112,7 +115,10 @@ def backfill(
     data = DataService()
     resolver = SymbolResolver()
 
-    if pool_id is not None:
+    # symbols 优先；其次 pool_id；最后全 A
+    if symbols is not None:
+        logger.info("使用显式 symbols 列表（%d 只）", len(symbols))
+    elif pool_id is not None:
         symbols = data.resolve_pool(pool_id)
         logger.info("pool_id=%s 含 %d 只票", pool_id, len(symbols))
     else:

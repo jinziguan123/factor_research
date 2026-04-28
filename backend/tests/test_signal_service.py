@@ -468,3 +468,107 @@ def test_freshness_threshold_configurable() -> None:
         check_data_freshness(_d(2026, 4, 28), ch=ch, threshold_days=1)
     # threshold=3 → 通过
     check_data_freshness(_d(2026, 4, 28), ch=ch, threshold_days=3)
+
+
+# ---------------------------- auto_backfill ----------------------------
+
+
+class _MutableLatestChClient:
+    """支持 backfill 后"latest 变新"的 mock。"""
+    def __init__(self, initial_latest):
+        self._latest = initial_latest
+        self.execute_count = 0
+    def execute(self, sql):
+        self.execute_count += 1
+        return [(self._latest,)] if self._latest is not None else [(None,)]
+    def set_latest(self, new_latest):
+        self._latest = new_latest
+
+
+def test_auto_backfill_called_when_stale_then_passes() -> None:
+    """auto_backfill=True 且数据落后 → 调 backfill_fn → 再次校验通过。"""
+    from datetime import date as _d
+    ch = _MutableLatestChClient(initial_latest=_d(2026, 4, 20))
+    backfill_calls: list[tuple] = []
+
+    def fake_backfill(start, end, symbols):
+        backfill_calls.append((start, end, len(symbols) if symbols else 0))
+        # 模拟 backfill 后数据补到 as_of
+        ch.set_latest(_d(2026, 4, 28))
+        return {"n_symbols": 100, "n_bars_written": 700, "n_errors": 0}
+
+    check_data_freshness(
+        _d(2026, 4, 28),
+        ch=ch,
+        symbols=["600519.SH"] * 100,
+        auto_backfill=True,
+        backfill_fn=fake_backfill,
+    )
+    assert len(backfill_calls) == 1
+    start, end, n_syms = backfill_calls[0]
+    assert start == _d(2026, 4, 21)  # latest+1
+    assert end == _d(2026, 4, 28)
+    assert n_syms == 100
+
+
+def test_auto_backfill_disabled_falls_back_to_error() -> None:
+    """auto_backfill=False → 沿用旧行为（直接抛错）。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 20))
+    with pytest.raises(ValueError) as exc_info:
+        check_data_freshness(_d(2026, 4, 28), ch=ch, auto_backfill=False)
+    msg = str(exc_info.value)
+    assert "FR_LIVE_MARKET_AUTO_BACKFILL_DAILY=1" in msg
+
+
+def test_auto_backfill_failure_raises_with_command() -> None:
+    """backfill_fn 抛异常 → check_data_freshness 抛 ValueError 含手动命令。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 20))
+
+    def boom(start, end, symbols):
+        raise RuntimeError("akshare 503")
+
+    with pytest.raises(ValueError) as exc_info:
+        check_data_freshness(
+            _d(2026, 4, 28), ch=ch,
+            auto_backfill=True, backfill_fn=boom,
+        )
+    msg = str(exc_info.value)
+    assert "自动 backfill 失败" in msg
+    assert "backfill_daily_bars" in msg
+
+
+def test_auto_backfill_partial_still_too_stale_raises() -> None:
+    """backfill 跑完但 latest 仍落后（如 akshare 大量限流空返回）→ 抛错。"""
+    from datetime import date as _d
+    ch = _MutableLatestChClient(initial_latest=_d(2026, 4, 20))
+
+    def partial_backfill(start, end, symbols):
+        # 只补到 04-22 就停，仍落后 6 天
+        ch.set_latest(_d(2026, 4, 22))
+        return {"n_symbols": 100, "n_bars_written": 200, "n_errors": 50}
+
+    with pytest.raises(ValueError) as exc_info:
+        check_data_freshness(
+            _d(2026, 4, 28), ch=ch,
+            auto_backfill=True, backfill_fn=partial_backfill,
+        )
+    msg = str(exc_info.value)
+    assert "自动 backfill 后" in msg
+    assert "仍是 2026-04-22" in msg
+
+
+def test_auto_backfill_passes_through_when_data_fresh() -> None:
+    """数据本来就新鲜 → auto_backfill=True 也不调 backfill_fn。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 27))
+    backfill_calls: list = []
+
+    check_data_freshness(
+        _d(2026, 4, 28),
+        ch=ch,
+        auto_backfill=True,
+        backfill_fn=lambda *a, **kw: backfill_calls.append(a),
+    )
+    assert backfill_calls == []  # 没调用
