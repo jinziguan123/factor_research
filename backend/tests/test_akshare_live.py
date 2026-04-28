@@ -16,6 +16,8 @@ import pytest
 from backend.adapters.akshare_live import (
     fetch_1m_bars_batch,
     fetch_1m_bars_one,
+    fetch_daily_bars_batch,
+    fetch_daily_bars_one,
     fetch_spot_snapshot,
 )
 
@@ -222,3 +224,81 @@ def test_fetch_1m_bars_batch_empty_input() -> None:
     combined, errors = fetch_1m_bars_batch([])
     assert combined.empty
     assert errors == []
+
+
+# ---------------------------- daily K backfill ----------------------------
+
+
+def _fake_daily_bars(bare_code: str, start: str, end: str) -> pd.DataFrame:
+    """构造拟真的日线返回（5 个交易日）。"""
+    from datetime import date as _date
+    return pd.DataFrame(
+        {
+            "日期": [_date(2026, 4, 21), _date(2026, 4, 22),
+                    _date(2026, 4, 23), _date(2026, 4, 24),
+                    _date(2026, 4, 25)],
+            "开盘": [10.0, 10.05, 10.10, 10.15, 10.20],
+            "收盘": [10.05, 10.10, 10.15, 10.20, 10.25],
+            "最高": [10.06, 10.11, 10.16, 10.21, 10.26],
+            "最低": [9.98, 10.04, 10.09, 10.14, 10.19],
+            "成交量": [10000, 15000, 8000, 20000, 12000],
+            "成交额": [1.005e5, 1.51e5, 8.12e4, 2.02e5, 1.215e5],
+        }
+    )
+
+
+def test_fetch_daily_bars_one_field_mapping() -> None:
+    df = fetch_daily_bars_one(
+        "600519.SH", "20260421", "20260425", daily_fetcher=_fake_daily_bars,
+    )
+    assert len(df) == 5
+    assert list(df.columns) == [
+        "symbol", "trade_date", "open", "high", "low", "close", "volume", "amount",
+    ]
+    assert (df["symbol"] == "600519.SH").all()
+    # trade_date 是 date 不是 datetime
+    from datetime import date as _date
+    assert isinstance(df["trade_date"].iloc[0], _date)
+    assert df["close"].iloc[-1] == 10.25
+
+
+def test_fetch_daily_bars_one_empty() -> None:
+    df = fetch_daily_bars_one(
+        "600519.SH", "20260421", "20260425",
+        daily_fetcher=lambda c, s, e: pd.DataFrame(),
+    )
+    assert df.empty
+
+
+def test_fetch_daily_bars_batch_concurrent() -> None:
+    """20 只票各 5 个交易日 → 总 100 行。"""
+    symbols = [f"600{i:03d}.SH" for i in range(20)]
+    combined, errors = fetch_daily_bars_batch(
+        symbols, "20260421", "20260425",
+        max_workers=5, daily_fetcher=_fake_daily_bars,
+    )
+    assert len(combined) == 20 * 5
+    assert errors == []
+    assert set(combined["symbol"]) == set(symbols)
+
+
+def test_fetch_daily_bars_batch_collects_errors() -> None:
+    """部分票失败时其它票仍能拿到。"""
+    failing_bare = {"600002", "600007"}
+
+    def flaky(bare, s, e):
+        if bare in failing_bare:
+            raise RuntimeError("akshare 503")
+        return _fake_daily_bars(bare, s, e)
+
+    symbols = [f"600{i:03d}.SH" for i in range(10)]
+    combined, errors = fetch_daily_bars_batch(
+        symbols, "20260421", "20260425", max_workers=5, daily_fetcher=flaky,
+    )
+    assert len(combined) == 8 * 5
+    assert {sym for sym, _ in errors} == {f"{c}.SH" for c in failing_bare}
+
+
+def test_fetch_daily_bars_batch_empty_input() -> None:
+    combined, errors = fetch_daily_bars_batch([], "20260421", "20260425")
+    assert combined.empty and errors == []

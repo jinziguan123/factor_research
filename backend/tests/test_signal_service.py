@@ -18,6 +18,7 @@ import pytest
 from backend.services.signal_service import (
     RealtimeAwareDataService,
     _build_top_bottom,
+    check_data_freshness,
     compute_signal_window_natural_days,
 )
 
@@ -404,3 +405,66 @@ def test_window_significantly_smaller_than_old_180_default() -> None:
     new_window = compute_signal_window_natural_days("single", 60)
     old_default = max(180, 60 * 2)  # 旧逻辑
     assert new_window < old_default / 10  # 至少缩小 10 倍
+
+
+# ---------------------------- check_data_freshness ----------------------------
+
+
+class _FakeChClient:
+    """最小 mock：execute() 返回预设值。"""
+    def __init__(self, latest):
+        self._latest = latest
+        self.calls = []
+    def execute(self, sql):
+        self.calls.append(sql)
+        if self._latest is None:
+            return [(None,)]
+        return [(self._latest,)]
+
+
+def test_freshness_passes_when_latest_within_threshold() -> None:
+    """latest 距 as_of 在阈值内（默认 5 天）→ 不抛错。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 25))
+    # as_of 04-28，gap=3，<= 5 → OK
+    check_data_freshness(_d(2026, 4, 28), ch=ch)
+
+
+def test_freshness_passes_at_boundary() -> None:
+    """gap 恰好等于阈值 → 通过（>=, 非 >）。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 23))
+    # gap=5 == threshold → 通过
+    check_data_freshness(_d(2026, 4, 28), ch=ch, threshold_days=5)
+
+
+def test_freshness_fails_when_too_stale() -> None:
+    """latest 落后超阈值 → 抛 ValueError 含修复命令。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 20))
+    # gap=8 > 5 → 抛
+    with pytest.raises(ValueError) as exc_info:
+        check_data_freshness(_d(2026, 4, 28), ch=ch)
+    msg = str(exc_info.value)
+    assert "stock_bar_1d" in msg
+    assert "backfill_daily_bars" in msg  # 修复命令
+    assert "2026-04-21" in msg  # next_day = latest + 1
+
+
+def test_freshness_fails_when_table_empty() -> None:
+    from datetime import date as _d
+    ch = _FakeChClient(latest=None)
+    with pytest.raises(ValueError) as exc_info:
+        check_data_freshness(_d(2026, 4, 28), ch=ch)
+    assert "为空" in str(exc_info.value)
+
+
+def test_freshness_threshold_configurable() -> None:
+    """threshold_days 可配置；调小后更严格。"""
+    from datetime import date as _d
+    ch = _FakeChClient(latest=_d(2026, 4, 26))
+    # gap=2，threshold=1 → fail
+    with pytest.raises(ValueError):
+        check_data_freshness(_d(2026, 4, 28), ch=ch, threshold_days=1)
+    # threshold=3 → 通过
+    check_data_freshness(_d(2026, 4, 28), ch=ch, threshold_days=3)

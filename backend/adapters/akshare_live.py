@@ -64,6 +64,17 @@ _BAR_RENAME = {
     "成交额": "amount",
 }
 
+# 日线接口字段（``stock_zh_a_hist`` period='daily'）
+_DAILY_BAR_RENAME = {
+    "日期": "trade_date",
+    "开盘": "open",
+    "收盘": "close",
+    "最高": "high",
+    "最低": "low",
+    "成交量": "volume",     # 单位：手（akshare 默认）
+    "成交额": "amount",      # 单位：元
+}
+
 
 def fetch_spot_snapshot(
     spot_fetcher: Callable[[], pd.DataFrame] | None = None,
@@ -239,6 +250,100 @@ def fetch_1m_bars_batch(
             except Exception as e:  # noqa: BLE001 - 故意宽 except，单点失败不传播
                 errors.append((sym, str(e)))
                 log.warning("fetch 1m K failed for %s: %s", sym, e)
+
+    combined = (
+        pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+    )
+    return combined, errors
+
+
+# ---------------------------- 日线 backfill ----------------------------
+
+
+def fetch_daily_bars_one(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    daily_fetcher: Callable[[str, str, str], pd.DataFrame] | None = None,
+) -> pd.DataFrame:
+    """单只票指定区间的日线（用于补 stock_bar_1d 的缺口）。
+
+    akshare ``stock_zh_a_hist(symbol, period='daily', start_date, end_date, adjust='')``
+    接受 6 位裸代码 + ``YYYYMMDD`` 格式日期；返回未复权日线。
+
+    Args:
+        symbol: QMT 格式（如 ``"600519.SH"``）。
+        start_date / end_date: ``YYYYMMDD`` 字符串（akshare 要求）。
+        daily_fetcher: 可注入获取函数，签名 ``(bare_code, start, end) -> DataFrame``。
+
+    Returns:
+        DataFrame，列：``symbol`` / ``trade_date`` (date) / ``open`` / ``high`` /
+        ``low`` / ``close`` / ``volume`` (手) / ``amount`` (元)。
+        无数据（停牌 / 全段休市）时返回空 DF。
+    """
+    bare_code = symbol.split(".")[0]
+
+    if daily_fetcher is None:
+        import akshare as ak  # noqa: PLC0415
+
+        daily_fetcher = lambda c, s, e: ak.stock_zh_a_hist(  # noqa: E731
+            symbol=c, period="daily", start_date=s, end_date=e, adjust=""
+        )
+
+    df_raw = daily_fetcher(bare_code, start_date, end_date)
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame()
+
+    missing = [c for c in _DAILY_BAR_RENAME if c not in df_raw.columns]
+    if missing:
+        raise RuntimeError(
+            f"akshare stock_zh_a_hist missing fields for {symbol}: {missing}"
+        )
+
+    df = df_raw[list(_DAILY_BAR_RENAME.keys())].rename(columns=_DAILY_BAR_RENAME).copy()
+    # akshare 返回 "日期" 是 datetime.date 或字符串，统一转 date
+    df["trade_date"] = pd.to_datetime(df["trade_date"]).dt.date
+    for col in ["open", "high", "low", "close", "amount"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
+    df["symbol"] = symbol
+
+    return df[
+        ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
+    ].reset_index(drop=True)
+
+
+def fetch_daily_bars_batch(
+    symbols: list[str],
+    start_date: str,
+    end_date: str,
+    max_workers: int = 20,
+    daily_fetcher: Callable[[str, str, str], pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame, list[tuple[str, str]]]:
+    """并发拉 N 只票指定区间的日线，合并成长表。
+
+    与 ``fetch_1m_bars_batch`` 同款签名（错误隔离 + 线程池）。
+    """
+    if not symbols:
+        return pd.DataFrame(), []
+
+    results: list[pd.DataFrame] = []
+    errors: list[tuple[str, str]] = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_to_sym = {
+            ex.submit(fetch_daily_bars_one, s, start_date, end_date, daily_fetcher): s
+            for s in symbols
+        }
+        for fut in as_completed(future_to_sym):
+            sym = future_to_sym[fut]
+            try:
+                df = fut.result()
+                if not df.empty:
+                    results.append(df)
+            except Exception as e:  # noqa: BLE001
+                errors.append((sym, str(e)))
+                log.warning("fetch daily K failed for %s: %s", sym, e)
 
     combined = (
         pd.concat(results, ignore_index=True) if results else pd.DataFrame()

@@ -62,6 +62,65 @@ _MIN_NATURAL_DAYS_BUFFER = 7
 _IC_LOOKBACK_NATURAL_FACTOR = 1.5
 
 
+# 数据健康度守卫：stock_bar_1d 落后 > 此天数 → run_signal 立即 fail（避免跑出错误信号）
+_STOCK_BAR_1D_STALE_THRESHOLD_DAYS = 5
+
+
+def get_latest_bar_1d_trade_date(ch=None):
+    """查 ClickHouse stock_bar_1d 最新一条 trade_date；空库返 None。"""
+    from backend.storage.clickhouse_client import ch_client
+
+    sql = "SELECT max(trade_date) FROM quant_data.stock_bar_1d FINAL"
+    if ch is None:
+        with ch_client() as c:
+            rows = c.execute(sql)
+    else:
+        rows = ch.execute(sql)
+    if not rows or rows[0][0] is None:
+        return None
+    return rows[0][0]
+
+
+def check_data_freshness(as_of_date, *, ch=None, threshold_days: int = _STOCK_BAR_1D_STALE_THRESHOLD_DAYS):
+    """检查 stock_bar_1d 是否新鲜；落后 > threshold_days 抛 ValueError。
+
+    Args:
+        as_of_date: 信号触发日期（``date`` 或 ``datetime`` / pandas Timestamp）。
+        threshold_days: 容忍天数；A 股周末 + 1 工作日 = 3 天，5 天兜节假日。
+
+    Raises:
+        ValueError: 数据落后超过阈值，message 包含具体补救命令。
+    """
+    latest = get_latest_bar_1d_trade_date(ch=ch)
+    # 统一为 date
+    if hasattr(as_of_date, "date") and not isinstance(as_of_date, type):
+        as_of = as_of_date.date() if callable(getattr(as_of_date, "date")) else as_of_date
+    else:
+        as_of = as_of_date
+
+    if latest is None:
+        raise ValueError(
+            "stock_bar_1d 表为空。请先导入历史日线数据，或调用 "
+            "`python -m backend.scripts.backfill_daily_bars --start <D1> --end <D2>` "
+            "从 akshare 补一段。"
+        )
+
+    gap = (as_of - latest).days if hasattr(as_of, "__sub__") else 0
+    if gap > threshold_days:
+        # 给出可复制的修复命令
+        next_day = latest
+        if hasattr(latest, "__add__"):
+            from datetime import timedelta as _td
+            next_day = latest + _td(days=1)
+        raise ValueError(
+            f"stock_bar_1d 最新到 {latest}，距 as_of_date={as_of} 已 {gap} 天 "
+            f"(阈值 {threshold_days})；请先补齐：\n"
+            f"  python -m backend.scripts.backfill_daily_bars "
+            f"--start {next_day} --end {as_of}\n"
+            f"或确认 QMT 行情下载 + 1m K 聚合链路是否正常。"
+        )
+
+
 def compute_signal_window_natural_days(
     method: str, ic_lookback_days: int,
 ) -> int:
@@ -375,6 +434,10 @@ def run_signal(run_id: str, body: dict) -> None:
         filter_price_limit = bool(body.get("filter_price_limit", True))
         top_n_raw = body.get("top_n")
         top_n: int | None = int(top_n_raw) if top_n_raw is not None else None
+
+        # 数据健康度守卫：stock_bar_1d 落后太多时立即 fail，
+        # 避免跑出"看似成功但因子值跨断档段"的错误信号。
+        check_data_freshness(as_of_date)
 
         reg = FactorRegistry()
         reg.scan_and_register()
