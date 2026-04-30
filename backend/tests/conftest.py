@@ -74,6 +74,50 @@ def _isolate_settings_env(monkeypatch):
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_pending_migrations() -> None:
+    """幂等执行未跑的 schema 迁移；让测试 db 始终匹配最新 init_mysql.sql。
+
+    背景：docker-compose-test 的 mysql 容器只在首次启动时跑一次
+    ``init_mysql.sql``，之后的 ``ALTER TABLE`` 类迁移（如 013 加 hypothesis）
+    需要单独应用。否则 router 测试启动 app → ``scan_and_register`` →
+    INSERT fr_factor_meta(hypothesis) → ``Unknown column 'hypothesis'``。
+
+    每条迁移用 INFORMATION_SCHEMA 检查再执行（MySQL 5.7/8.0 都不支持
+    ADD COLUMN IF NOT EXISTS）。连不上 db 就静默跳过——纯单元测试不依
+    赖 db，让它们继续跑。
+    """
+    try:
+        from backend.storage.mysql_client import mysql_conn
+    except Exception:  # noqa: BLE001
+        return
+
+    pending = [
+        # (table, column, ALTER 语句) —— 列不存在时执行后者
+        (
+            "fr_factor_meta",
+            "hypothesis",
+            "ALTER TABLE fr_factor_meta ADD COLUMN hypothesis TEXT "
+            "DEFAULT NULL AFTER description",
+        ),
+    ]
+    try:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                for table, col, alter_sql in pending:
+                    cur.execute(
+                        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_SCHEMA=DATABASE() "
+                        "AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                        (table, col),
+                    )
+                    if cur.fetchone() is None:
+                        cur.execute(alter_sql)
+            c.commit()
+    except Exception:  # noqa: BLE001 - 测试 db 不可用时直接放行
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _integration_db_settings(request, monkeypatch):
     """为带 ``@pytest.mark.integration`` 的用例把 settings 指向本地测试库。

@@ -109,6 +109,7 @@ def translate(body: TranslateIn) -> dict:
             "display_name": gen.display_name,
             "category": gen.category,
             "description": gen.description,
+            "hypothesis": gen.hypothesis,
             "default_params": gen.default_params,
             "code": gen.code,
             "saved_path": gen.saved_path,

@@ -142,6 +142,7 @@ class FactorRegistry:
                         "display_name": getattr(cls, "display_name", factor_id),
                         "category": getattr(cls, "category", "custom"),
                         "description": getattr(cls, "description", ""),
+                        "hypothesis": getattr(cls, "hypothesis", ""),
                         "params_schema": getattr(cls, "params_schema", {}),
                         "default_params": getattr(cls, "default_params", {}),
                         "supported_freqs": list(
@@ -302,6 +303,7 @@ class FactorRegistry:
         display_name: str = getattr(cls, "display_name", factor_id)
         category: str = getattr(cls, "category", "custom")
         description: str = getattr(cls, "description", "") or ""
+        hypothesis: str = getattr(cls, "hypothesis", "") or ""
         params_schema = json.dumps(
             getattr(cls, "params_schema", {}), ensure_ascii=False
         )
@@ -314,14 +316,15 @@ class FactorRegistry:
             with c.cursor() as cur:
                 cur.execute(
                     "INSERT INTO fr_factor_meta "
-                    "(factor_id, display_name, category, description, "
+                    "(factor_id, display_name, category, description, hypothesis, "
                     "params_schema, default_params, supported_freqs, "
                     "code_hash, version, is_active) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, 1) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, 1) "
                     "ON DUPLICATE KEY UPDATE "
                     "display_name    = VALUES(display_name), "
                     "category        = VALUES(category), "
                     "description     = VALUES(description), "
+                    "hypothesis      = VALUES(hypothesis), "
                     "params_schema   = VALUES(params_schema), "
                     "default_params  = VALUES(default_params), "
                     "supported_freqs = VALUES(supported_freqs), "
@@ -334,6 +337,7 @@ class FactorRegistry:
                         display_name,
                         category,
                         description,
+                        hypothesis,
                         params_schema,
                         default_params,
                         supported_freqs,

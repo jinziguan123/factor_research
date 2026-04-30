@@ -56,7 +56,10 @@ class BaseFactor:
       ``custom``...），通常与所在子目录一致。
 
     **可选**：
-    - ``description``：简介，前端 tooltip。
+    - ``description``：简介，前端 tooltip（**事实陈述**："因子做什么"）。
+    - ``hypothesis``：研究假设，作者写一句话表达"为什么相信这个因子有 alpha"
+      （**主观直觉**：方向判断 + 经济学直觉 + 盈利逻辑），借鉴 RD-Agent 的
+      Hypothesis 一等公民概念，让因子能被回顾"当初为什么建它"。
     - ``params_schema``：参数描述（类型 / 默认值 / 范围），前端据此生成表单。
     - ``default_params``：``params_schema`` 中默认值的快照，便于调用方不填参直接跑。
     - ``supported_freqs``：该因子可用于哪些频率（MVP 只有 ``"1d"``）。
@@ -70,6 +73,7 @@ class BaseFactor:
     display_name: ClassVar[str]
     category: ClassVar[str]
     description: ClassVar[str] = ""
+    hypothesis: ClassVar[str] = ""
     params_schema: ClassVar[dict] = {}
     default_params: ClassVar[dict] = {}
     supported_freqs: ClassVar[tuple[str, ...]] = ("1d",)

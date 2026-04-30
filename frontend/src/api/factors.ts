@@ -17,6 +17,9 @@ export interface Factor {
   display_name: string
   category: string
   description: string
+  /** 研究假设：作者写的"为什么相信这个因子有 alpha"主观陈述（方向 + 机制 + 适用前提）。
+   * 借鉴 RD-Agent 把 Hypothesis 作为一等公民的设计；旧因子未填留空字符串。 */
+  hypothesis?: string
   params_schema: Record<string, any>
   default_params: Record<string, any>
   supported_freqs: string[]
@@ -36,6 +39,7 @@ export interface FactorMutationResult {
   display_name: string
   category: string
   description: string
+  hypothesis?: string
   version: number
   /**
    * PUT /api/factors/{id}/code 成功时，返回覆写前的备份路径（相对 repo 根）。

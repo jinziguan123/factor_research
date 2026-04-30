@@ -246,6 +246,7 @@ def get_factor(factor_id: str) -> dict:
             "display_name": inst.display_name,
             "category": inst.category,
             "description": inst.description,
+            "hypothesis": getattr(inst, "hypothesis", ""),
             "params_schema": inst.params_schema,
             "default_params": inst.default_params,
             "supported_freqs": list(inst.supported_freqs),
@@ -319,6 +320,7 @@ def update_factor_code(factor_id: str, body: UpdateFactorCodeIn) -> dict:
             "display_name": inst.display_name,
             "category": inst.category,
             "description": inst.description,
+            "hypothesis": getattr(inst, "hypothesis", ""),
             "version": reg.current_version(factor_id),
             # 新增字段:给前端展示"已备份至 ..." toast;新因子首次 PUT 为 null
             "backup_path": str(backup_path) if backup_path else None,
@@ -392,6 +394,7 @@ def create_factor(body: CreateFactorIn) -> dict:
             "display_name": inst.display_name,
             "category": inst.category,
             "description": inst.description,
+            "hypothesis": getattr(inst, "hypothesis", ""),
             "version": reg.current_version(body.factor_id),
         }
     )

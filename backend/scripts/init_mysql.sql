@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS `fr_factor_meta` (
   `display_name`    varchar(128) NOT NULL,
   `category`        varchar(64)  NOT NULL,
   `description`     varchar(1000) DEFAULT NULL,
+  -- hypothesis：研究假设（为什么相信这个因子有 alpha），区别于 description 的
+  -- 事实陈述。借鉴 RD-Agent 把 Hypothesis 作为一等公民。旧因子未填留 NULL；
+  -- factor_assistant 之后生成新因子会强制填这一项（system prompt 约束）。
+  `hypothesis`      text DEFAULT NULL,
   `params_schema`   longtext,
   `default_params`  longtext,
   `supported_freqs` varchar(64) NOT NULL DEFAULT '1d',

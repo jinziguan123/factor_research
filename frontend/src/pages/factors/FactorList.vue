@@ -324,6 +324,15 @@ async function submitTemplate() {
               <div style="color: #848E9C; font-size: 13px; line-height: 1.6">
                 {{ factor.description || '暂无描述' }}
               </div>
+              <!-- 研究假设：有则显示 1 行截断；点击因子卡进详情看全文 -->
+              <div
+                v-if="factor.hypothesis"
+                style="margin-top: 6px; font-size: 12px; color: #5AC8FA;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap"
+                :title="factor.hypothesis"
+              >
+                💡 {{ factor.hypothesis }}
+              </div>
               <div style="margin-top: 8px; font-size: 12px; color: #848E9C">
                 版本 v{{ factor.version ?? 1 }}
               </div>
@@ -429,6 +438,9 @@ async function submitTemplate() {
           </n-form-item>
           <n-form-item label="描述">
             <span>{{ aiResult.description }}</span>
+          </n-form-item>
+          <n-form-item v-if="aiResult.hypothesis" label="研究假设">
+            <span style="white-space: pre-wrap">{{ aiResult.hypothesis }}</span>
           </n-form-item>
           <n-form-item label="默认参数">
             <code style="font-size: 12px">{{ JSON.stringify(aiResult.default_params) }}</code>

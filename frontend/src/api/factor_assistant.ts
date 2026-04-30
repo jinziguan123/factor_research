@@ -30,6 +30,8 @@ export interface GenerateFactorOut {
   display_name: string
   category: string
   description: string
+  /** 研究假设（方向 + 机制 + 适用前提）。LLM 强制填，不会为空。 */
+  hypothesis: string
   default_params: Record<string, any>
   code: string
   saved_path: string

@@ -243,6 +243,10 @@ function confirmDelete() {
         <n-descriptions-item label="因子 ID">{{ factor.factor_id }}</n-descriptions-item>
         <n-descriptions-item label="分类">{{ factor.category }}</n-descriptions-item>
         <n-descriptions-item label="描述" :span="2">{{ factor.description || '-' }}</n-descriptions-item>
+        <n-descriptions-item label="研究假设" :span="2">
+          <span v-if="factor.hypothesis" style="white-space: pre-wrap">{{ factor.hypothesis }}</span>
+          <span v-else style="color: #999; font-style: italic">未填写（旧因子或手写源码未声明 hypothesis 类属性）</span>
+        </n-descriptions-item>
         <n-descriptions-item label="支持频率">
           <n-space>
             <n-tag v-for="f in factor.supported_freqs" :key="f" size="small">{{ f }}</n-tag>

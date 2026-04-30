@@ -72,6 +72,7 @@ def _good_payload(**overrides) -> dict:
         "display_name": "测试因子",
         "category": "momentum",
         "description": "一个测试用的因子",
+        "hypothesis": "动量延续假设；机制是机构惯性；趋势末段失效。",
         "default_params": {"window": 20},
         "code": "class X(BaseFactor): pass\n",
     }
@@ -83,6 +84,7 @@ def test_validate_payload_happy_path():
     out = _validate_llm_payload(_good_payload())
     assert out["factor_id"] == "my_factor_test"
     assert out["category"] == "momentum"
+    assert out["hypothesis"]  # 非空
 
 
 def test_validate_payload_rejects_missing_field():
@@ -90,6 +92,27 @@ def test_validate_payload_rejects_missing_field():
     del bad["category"]
     with pytest.raises(FactorAssistantError, match="缺少字段"):
         _validate_llm_payload(bad)
+
+
+def test_validate_payload_rejects_missing_hypothesis():
+    """hypothesis 是 RD-Agent 借鉴的一等公民字段，缺失视为 LLM 输出不合规。"""
+    bad = _good_payload()
+    del bad["hypothesis"]
+    with pytest.raises(FactorAssistantError, match="缺少字段"):
+        _validate_llm_payload(bad)
+
+
+def test_validate_payload_rejects_empty_hypothesis():
+    """hypothesis 字段存在但为空白——同样拒绝（防 LLM 偷懒）。"""
+    with pytest.raises(FactorAssistantError, match="hypothesis 字段不能为空"):
+        _validate_llm_payload(_good_payload(hypothesis="   "))
+
+
+def test_validate_payload_truncates_long_hypothesis():
+    """超长 hypothesis 截到 500 字符（防 LLM 灌大段说明文）。"""
+    long = "a" * 1000
+    out = _validate_llm_payload(_good_payload(hypothesis=long))
+    assert len(out["hypothesis"]) == 500
 
 
 def test_validate_payload_rejects_bad_factor_id():
@@ -242,6 +265,7 @@ def test_translate_and_save_end_to_end(tmp_path, monkeypatch):
         "display_name": "Mock 因子",
         "category": "momentum",
         "description": "mock",
+        "hypothesis": "测试假设：方向 + 机制 + 适用前提。",
         "default_params": {"window": 10},
         "code": _GOOD_CODE,
     }
@@ -249,6 +273,7 @@ def test_translate_and_save_end_to_end(tmp_path, monkeypatch):
 
     gen = fa.translate_and_save("测试描述", None)
     assert gen.factor_id == "my_mocked"
+    assert gen.hypothesis.startswith("测试假设")
     assert Path(gen.saved_path).exists()
     assert Path(gen.saved_path).parent == target_dir
 
@@ -304,6 +329,7 @@ def test_router_maps_validation_error_to_400(tmp_path, monkeypatch):
         "display_name": "X",
         "category": "SOMETHING_BAD",
         "description": "x",
+        "hypothesis": "测试假设。",
         "default_params": {},
         "code": _GOOD_CODE,
     }
@@ -337,6 +363,7 @@ def test_router_maps_existing_file_to_409(tmp_path, monkeypatch):
         "display_name": "Dup",
         "category": "momentum",
         "description": "x",
+        "hypothesis": "测试假设。",
         "default_params": {},
         "code": _GOOD_CODE,
     }

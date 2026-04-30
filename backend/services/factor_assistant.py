@@ -92,6 +92,7 @@ class GeneratedFactor:
     display_name: str
     category: str
     description: str
+    hypothesis: str
     default_params: dict
     code: str
     saved_path: str
@@ -117,7 +118,12 @@ _SYSTEM_PROMPT = """\
    - factor_id: 小写 snake_case 字符串，3-48 个字符，全局唯一
    - display_name: 中文可读名（≤20 字）
    - category: **只能**从 ["reversal", "momentum", "volatility", "volume", "custom"] 选一
-   - description: 中文简介（≤80 字）
+   - description: 中文简介（≤80 字，**事实陈述**："因子做什么"）
+   - hypothesis: 研究假设（≤200 字，**主观直觉**："为什么相信这个因子有 alpha"）
+     必须包含三件事：方向判断（值大 / 值小 → 未来收益正 / 负）+ 经济学直觉（行为
+     金融学 / 微观结构 / 信息不对称等机制）+ 适用前提（什么市场环境会失效）。
+     例："反转假设——短期超买后续 3-5 日易回调；机制是噪声交易者过度反应；牛市
+     后段单边趋势市会显著失效。"
    - default_params: 所有参数的默认值字典
    - params_schema: 参数的 schema 字典（type/default/min/max/desc），用于前端渲染
    - supported_freqs: ("1d",)  —— MVP 只支持日频
@@ -173,9 +179,14 @@ _SYSTEM_PROMPT = """\
   "display_name": "...",
   "category": "reversal|momentum|volatility|volume|custom",
   "description": "...",
+  "hypothesis": "...",
   "default_params": {...},
   "code": "<完整的 .py 文件内容字符串，必须能被 python 直接 import 执行>"
 }
+
+注意：``code`` 里 BaseFactor 子类**也必须**带 ``hypothesis`` 类属性（与 JSON 顶
+层 hypothesis 一致），这样 FactorRegistry 热加载时能从源码读到，跟 JSON 落库
+两条路径保持一致。
 
 【示例】
 用户需求：跳过最近 5 天，计算再往前 120 天的涨幅。
@@ -186,8 +197,9 @@ _SYSTEM_PROMPT = """\
   "display_name": "120日跳5日动量（示例）",
   "category": "momentum",
   "description": "跳过最近 5 天，计算更早 120 日的累计涨幅。",
+  "hypothesis": "中长期动量假设——历史涨幅强的票未来 1 周延续概率高；跳过最近 5 天回避短期反转噪声。机制是机构资金惯性建仓 + 散户跟风。在熊市末端 / 风格切换期会失效。",
   "default_params": {"window": 120, "skip": 5},
-  "code": "\\"\\"\\"示例：跳跃式动量因子。\\"\\"\\"\\nfrom __future__ import annotations\\n\\nimport pandas as pd\\n\\nfrom backend.factors.base import BaseFactor, FactorContext\\n\\n\\nclass ExampleMomentum120_5(BaseFactor):\\n    factor_id = \\"example_momentum_120_5\\"\\n    display_name = \\"120日跳5日动量（示例）\\"\\n    category = \\"momentum\\"\\n    description = \\"跳过最近 5 天，计算更早 120 日的累计涨幅。\\"\\n    default_params = {\\"window\\": 120, \\"skip\\": 5}\\n    params_schema = {\\n        \\"window\\": {\\"type\\": \\"int\\", \\"default\\": 120, \\"min\\": 5, \\"max\\": 504, \\"desc\\": \\"动量窗口（交易日）\\"},\\n        \\"skip\\": {\\"type\\": \\"int\\", \\"default\\": 5, \\"min\\": 0, \\"max\\": 60, \\"desc\\": \\"跳过最近 N 日\\"},\\n    }\\n    supported_freqs = (\\"1d\\",)\\n\\n    def required_warmup(self, params: dict) -> int:\\n        window = int(params.get(\\"window\\", self.default_params[\\"window\\"]))\\n        skip = int(params.get(\\"skip\\", self.default_params[\\"skip\\"]))\\n        return int((window + skip) * 1.5) + 10\\n\\n    def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:\\n        window = int(params.get(\\"window\\", self.default_params[\\"window\\"]))\\n        skip = int(params.get(\\"skip\\", self.default_params[\\"skip\\"]))\\n        warmup = self.required_warmup(params)\\n        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()\\n        close = ctx.data.load_panel(ctx.symbols, data_start, ctx.end_date.date(), freq=\\"1d\\", field=\\"close\\", adjust=\\"qfq\\")\\n        if close.empty:\\n            return pd.DataFrame()\\n        factor = close.shift(skip) / close.shift(skip + window) - 1\\n        return factor.loc[ctx.start_date:]\\n"
+  "code": "\\"\\"\\"示例：跳跃式动量因子。\\"\\"\\"\\nfrom __future__ import annotations\\n\\nimport pandas as pd\\n\\nfrom backend.factors.base import BaseFactor, FactorContext\\n\\n\\nclass ExampleMomentum120_5(BaseFactor):\\n    factor_id = \\"example_momentum_120_5\\"\\n    display_name = \\"120日跳5日动量（示例）\\"\\n    category = \\"momentum\\"\\n    description = \\"跳过最近 5 天，计算更早 120 日的累计涨幅。\\"\\n    hypothesis = \\"中长期动量假设——历史涨幅强的票未来 1 周延续概率高；跳过最近 5 天回避短期反转噪声。机制是机构资金惯性建仓 + 散户跟风。在熊市末端 / 风格切换期会失效。\\"\\n    default_params = {\\"window\\": 120, \\"skip\\": 5}\\n    params_schema = {\\n        \\"window\\": {\\"type\\": \\"int\\", \\"default\\": 120, \\"min\\": 5, \\"max\\": 504, \\"desc\\": \\"动量窗口（交易日）\\"},\\n        \\"skip\\": {\\"type\\": \\"int\\", \\"default\\": 5, \\"min\\": 0, \\"max\\": 60, \\"desc\\": \\"跳过最近 N 日\\"},\\n    }\\n    supported_freqs = (\\"1d\\",)\\n\\n    def required_warmup(self, params: dict) -> int:\\n        window = int(params.get(\\"window\\", self.default_params[\\"window\\"]))\\n        skip = int(params.get(\\"skip\\", self.default_params[\\"skip\\"]))\\n        return int((window + skip) * 1.5) + 10\\n\\n    def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:\\n        window = int(params.get(\\"window\\", self.default_params[\\"window\\"]))\\n        skip = int(params.get(\\"skip\\", self.default_params[\\"skip\\"]))\\n        warmup = self.required_warmup(params)\\n        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()\\n        close = ctx.data.load_panel(ctx.symbols, data_start, ctx.end_date.date(), freq=\\"1d\\", field=\\"close\\", adjust=\\"qfq\\")\\n        if close.empty:\\n            return pd.DataFrame()\\n        factor = close.shift(skip) / close.shift(skip + window) - 1\\n        return factor.loc[ctx.start_date:]\\n"
 }
 """
 
@@ -418,7 +430,11 @@ def _parse_llm_json(raw: str) -> dict:
 
 def _validate_llm_payload(obj: dict) -> dict:
     """校验 LLM 返回的字段齐整 + 类型合法，返回标准化后的 dict。"""
-    required = ("factor_id", "display_name", "category", "description", "code")
+    # hypothesis 是 RD-Agent 借鉴：因子的研究假设作为一等公民。LLM 必须填，
+    # 旧手写因子未填留空仅在 fr_factor_meta 层兼容（hypothesis 列 NULL）。
+    required = (
+        "factor_id", "display_name", "category", "description", "hypothesis", "code",
+    )
     missing = [k for k in required if k not in obj]
     if missing:
         raise FactorAssistantError(f"LLM 返回缺少字段：{missing}")
@@ -443,11 +459,18 @@ def _validate_llm_payload(obj: dict) -> dict:
     if not code.strip():
         raise FactorAssistantError("code 字段为空")
 
+    hypothesis = str(obj["hypothesis"]).strip()
+    if not hypothesis:
+        raise FactorAssistantError(
+            "hypothesis 字段不能为空——必须说明研究假设（方向 + 机制 + 适用前提）"
+        )
+
     return {
         "factor_id": factor_id,
         "display_name": str(obj["display_name"]).strip()[:50],
         "category": category,
         "description": str(obj["description"]).strip()[:200],
+        "hypothesis": hypothesis[:500],
         "default_params": default_params,
         "code": code,
     }
@@ -621,6 +644,7 @@ def translate_and_save(
         display_name=payload["display_name"],
         category=payload["category"],
         description=payload["description"],
+        hypothesis=payload["hypothesis"],
         default_params=payload["default_params"],
         code=payload["code"],
         saved_path=str(saved),
