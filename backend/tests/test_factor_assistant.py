@@ -402,6 +402,124 @@ def test_translate_and_save_missing_api_key_raises(monkeypatch):
         fa.translate_and_save("some factor", None)
 
 
+# ---------------------------- L2.D evolve_factor ----------------------------
+
+
+def _good_evolve_response(factor_id: str = "child_evo2") -> str:
+    """构造一份合规的 evolve LLM 响应（factor_id 后端会改写，这里随便填）。"""
+    return json.dumps({
+        "factor_id": factor_id,
+        "display_name": "测试 v2",
+        "category": "momentum",
+        "description": "v2 改了窗口",
+        "hypothesis": "v2 调整：缩窗口 + EMA 平滑",
+        "default_params": {"window": 10},
+        "code": _GOOD_CODE,
+    }, ensure_ascii=False)
+
+
+def test_evolve_factor_renames_factor_id_to_root_evo_n(tmp_path, monkeypatch):
+    """evolve 后 factor_id 强制 = <root>_evo<gen+1>，无视 LLM 输出的名字。"""
+    target_dir = tmp_path / "llm_generated"
+    target_dir.mkdir(parents=True)
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+
+    # mock parent meta：root=foo_root, generation=2 → 期望 new_factor_id=foo_root_evo3
+    def _fake_meta(parent_id):
+        return {
+            "factor_id": parent_id,
+            "hypothesis": "原假设",
+            "generation": 2,
+            "root_factor_id": "foo_root",
+        }
+    monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", _fake_meta)
+
+    # mock eval ctx 空
+    monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {})
+
+    # LLM 给个故意"错"的 factor_id 看看会不会被改写
+    monkeypatch.setattr(
+        fa, "_call_openai_compatible",
+        lambda msgs: _good_evolve_response(factor_id="totally_wrong_name"),
+    )
+
+    gen = fa.evolve_factor(
+        parent_factor_id="foo_root_evo2",
+        parent_source_code=_GOOD_CODE,
+    )
+    assert gen.factor_id == "foo_root_evo3"
+    saved = target_dir / "foo_root_evo3.py"
+    assert saved.exists()
+    # 落盘的代码里 factor_id 已被改写成 foo_root_evo3
+    content = saved.read_text()
+    assert "foo_root_evo3" in content
+    assert "totally_wrong_name" not in content
+
+
+def test_evolve_factor_includes_eval_feedback_in_prompt(tmp_path, monkeypatch):
+    """parent_eval_run_id 给定 → prompt 携带 feedback_text + 关键 metrics。"""
+    target_dir = tmp_path / "llm_generated"
+    target_dir.mkdir(parents=True)
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", lambda _: {
+        "factor_id": "foo", "hypothesis": "h", "generation": 1, "root_factor_id": "foo",
+    })
+    monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {
+        "feedback_text": "📋 IC 偏弱，建议改 EMA 平滑",
+        "ic_mean": 0.012, "ic_ir": 0.31, "long_short_sharpe": 0.4,
+        "long_short_annret": 0.06, "turnover_mean": 0.45,
+    })
+
+    captured: dict = {}
+
+    def _capture(msgs):
+        captured["msgs"] = msgs
+        return _good_evolve_response()
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _capture)
+
+    fa.evolve_factor(
+        parent_factor_id="foo",
+        parent_source_code=_GOOD_CODE,
+        parent_eval_run_id="run_xyz",
+        extra_hint="想要更短窗口",
+    )
+    user_prompt = captured["msgs"][-1]["content"]
+    assert "IC 偏弱" in user_prompt
+    assert "0.0120" in user_prompt or "0.012" in user_prompt  # IC mean
+    assert "想要更短窗口" in user_prompt
+
+
+def test_evolve_factor_propagates_loop_failure(tmp_path, monkeypatch):
+    """LLM 始终返回不合规代码 → evolve 抛 FactorAssistantError "反馈循环 N 轮仍失败"。"""
+    target_dir = tmp_path / "llm_generated"
+    target_dir.mkdir(parents=True)
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(fa, "_TRANSLATE_MAX_RETRIES", 1)  # 共 2 次尝试
+    monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", lambda _: {
+        "factor_id": "foo", "hypothesis": "h", "generation": 1, "root_factor_id": "foo",
+    })
+    monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {})
+
+    bad_code = _GOOD_CODE.replace(
+        "from __future__ import annotations",
+        "from __future__ import annotations\n\nimport os",
+        1,
+    )
+    monkeypatch.setattr(
+        fa, "_call_openai_compatible",
+        lambda msgs: _good_evolve_response(factor_id="x").replace(
+            json.dumps(_GOOD_CODE), json.dumps(bad_code),
+        ),
+    )
+
+    with pytest.raises(FactorAssistantError, match="反馈循环.*仍失败"):
+        fa.evolve_factor(parent_factor_id="foo", parent_source_code=_GOOD_CODE)
+
+
 # ---------------------------- L2.B 反馈循环 ----------------------------
 
 

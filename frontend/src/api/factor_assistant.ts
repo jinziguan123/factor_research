@@ -67,6 +67,35 @@ export interface NegateFactorIn {
   auto_eval_pool_id?: number | null
 }
 
+
+export interface EvolveFactorIn {
+  parent_factor_id: string
+  parent_eval_run_id?: string | null
+  extra_hint?: string | null
+  auto_eval_pool_id?: number | null
+}
+
+/** L2.D 因子进化：基于父代因子 + 评估反馈 + 用户额外指令生成下一代。 */
+export function useEvolveFactor() {
+  const qc = useQueryClient()
+  return useMutation<
+    GenerateFactorOut & {
+      parent_factor_id: string
+      parent_eval_run_id: string | null
+      generation: number
+      root_factor_id: string
+    },
+    any,
+    EvolveFactorIn
+  >({
+    mutationFn: (body) =>
+      client
+        .post('/factor_assistant/evolve', body, { timeout: LLM_REQUEST_TIMEOUT_MS })
+        .then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['factors'] }),
+  })
+}
+
 /** L2.A 反向因子：调 /api/factor_assistant/negate，AST 改写一个 negated 版本。
  *
  * 用于 EvalDetail 诊断卡片"反向"按钮——评估显示多空 Sharpe 为负时一键

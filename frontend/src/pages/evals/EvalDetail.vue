@@ -3,16 +3,16 @@
  * 评估详情页
  * 自动轮询到完成，展示图表和结构化指标
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NGrid, NGridItem, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NEmpty, NAlert, NCard, NTag,
-  NTable, useMessage,
+  NTable, NModal, NInput, NSelect, NFormItem, useMessage,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
-import { useNegateFactor } from '@/api/factor_assistant'
-import { usePoolNameMap } from '@/api/pools'
+import { useNegateFactor, useEvolveFactor } from '@/api/factor_assistant'
+import { usePoolNameMap, usePools } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 import ChartCard from '@/components/charts/ChartCard.vue'
 import IcSeriesChart from '@/components/charts/IcSeriesChart.vue'
@@ -39,6 +39,44 @@ const showNegateAction = computed(() => {
   const fb = evalRun.value?.feedback_text
   return !!fb && (fb.includes('取负号') || fb.includes('试将因子取负'))
 })
+
+// L2.D：因子进化 dialog
+const evolveOpen = ref(false)
+const evolveExtraHint = ref('')
+const evolveAutoEvalPoolId = ref<number | null>(null)
+const { data: poolsData } = usePools()
+const evolvePoolOptions = computed(() =>
+  (poolsData.value ?? []).map((p: any) => ({ label: p.pool_name, value: p.pool_id })),
+)
+const evolveMut = useEvolveFactor()
+
+function openEvolveDialog() {
+  // 预选当前评估池作为 default 评估池
+  evolveAutoEvalPoolId.value = evalRun.value?.pool_id ?? null
+  evolveExtraHint.value = ''
+  evolveOpen.value = true
+}
+
+async function handleEvolveSubmit() {
+  if (!evalRun.value) return
+  try {
+    const res = await evolveMut.mutateAsync({
+      parent_factor_id: evalRun.value.factor_id,
+      parent_eval_run_id: runId.value,
+      extra_hint: evolveExtraHint.value.trim() || null,
+      auto_eval_pool_id: evolveAutoEvalPoolId.value,
+    })
+    message.success(`已生成 v${res.generation}：${res.factor_id}`)
+    evolveOpen.value = false
+    if (res.auto_eval_run_id) {
+      router.push(`/evals/${res.auto_eval_run_id}`)
+    } else {
+      router.push(`/factors/${res.factor_id}`)
+    }
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e?.message || '进化失败')
+  }
+}
 
 async function handleNegateFactor() {
   if (!evalRun.value) return
@@ -247,7 +285,67 @@ const rankIcMeanDiverged = computed(() =>
             AST 改写、不调 LLM；新因子在同一池子立即跑 60 天 IC
           </span>
         </div>
+
+        <!-- L2.D：进化下一代按钮（success 状态总展示） -->
+        <div
+          v-if="evalRun?.status === 'success'"
+          style="margin-top: 12px; padding-top: 12px; border-top: 1px dashed #DDD"
+        >
+          <n-button
+            type="info"
+            size="small"
+            @click="openEvolveDialog"
+          >
+            🧬 基于本次反馈进化下一代
+          </n-button>
+          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+            LLM 根据指标 + 诊断 + 你的额外指令生成下一代
+          </span>
+        </div>
       </n-alert>
+
+      <!-- L2.D 进化对话框 -->
+      <n-modal
+        v-model:show="evolveOpen"
+        preset="dialog"
+        title="🧬 因子进化下一代"
+        positive-text="生成"
+        negative-text="取消"
+        style="width: 600px"
+        :positive-button-props="{ loading: evolveMut.isPending.value }"
+        @positive-click="handleEvolveSubmit"
+      >
+        <n-form-item label="父代评估">
+          <code>{{ evalRun?.factor_id }}</code>
+          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+            run {{ runId.slice(0, 8) }}
+          </span>
+        </n-form-item>
+        <n-form-item label="额外指令（可选）">
+          <n-input
+            v-model:value="evolveExtraHint"
+            type="textarea"
+            placeholder="例：想要更短窗口 / 加 EMA 平滑 / 在熊市段更稳"
+            :autosize="{ minRows: 2, maxRows: 4 }"
+            maxlength="500"
+            show-count
+          />
+        </n-form-item>
+        <n-form-item label="自动评估池（可选）">
+          <n-select
+            v-model:value="evolveAutoEvalPoolId"
+            :options="evolvePoolOptions"
+            placeholder="留空跳过自动评估"
+            clearable
+            filterable
+            style="width: 320px"
+          />
+        </n-form-item>
+        <n-alert type="info" size="small" :show-icon="false" style="margin-top: 8px">
+          LLM 会拿到（父代源码 + 假设 + 评估指标 + 诊断 + 你的指令）来生成下一代。
+          factor_id 自动 = <code>&lt;root&gt;_evo&lt;N&gt;</code>，由后端按当前代数计算。
+        </n-alert>
+      </n-modal>
 
       <!-- 任务基本信息 -->
       <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" style="margin-bottom: 24px">

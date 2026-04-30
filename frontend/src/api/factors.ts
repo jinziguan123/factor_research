@@ -26,6 +26,49 @@ export interface Factor {
   version?: number
   /** 仅详情接口返回：当前因子源码是否位于 llm_generated/，据此决定是否展示"编辑源码 / 删除"按钮。 */
   editable?: boolean
+  /** L2.D 血缘 / SOTA 字段（list 接口已 enrich，详情接口同样返回）。 */
+  parent_factor_id?: string | null
+  parent_eval_run_id?: string | null
+  generation?: number
+  is_sota?: 0 | 1 | number
+  root_factor_id?: string | null
+}
+
+
+export interface FactorLineage {
+  factor_id: string
+  self: any
+  ancestors: { factor_id: string; display_name: string; generation: number; is_sota: number }[]
+  descendants: { factor_id: string; display_name: string; generation: number; is_sota: number }[]
+  same_root_sota: string | null
+  root_factor_id: string
+}
+
+/** GET /api/factors/{id}/lineage，详情页族谱区块用。 */
+export function useFactorLineage(factorId: Ref<string>) {
+  return useQuery<FactorLineage>({
+    queryKey: ['factor-lineage', factorId],
+    queryFn: () => client.get(`/factors/${factorId.value}/lineage`).then(r => r.data),
+    enabled: () => !!factorId.value,
+  })
+}
+
+/** PUT /api/factors/{id}/sota，切换 SOTA 标记。 */
+export function useSetSota() {
+  const qc = useQueryClient()
+  return useMutation<
+    { factor_id: string; is_sota: number },
+    any,
+    { factor_id: string; is_sota: boolean }
+  >({
+    mutationFn: ({ factor_id, is_sota }) =>
+      client.put(`/factors/${factor_id}/sota`, { is_sota }).then(r => r.data),
+    onSuccess: (_res, vars) => {
+      qc.invalidateQueries({ queryKey: ['factors'] })
+      qc.invalidateQueries({ queryKey: ['factor', vars.factor_id] })
+      qc.invalidateQueries({ queryKey: ['factor-lineage'] })
+    },
+  })
 }
 
 export interface FactorCode {

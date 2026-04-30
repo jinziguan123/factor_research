@@ -17,6 +17,7 @@ import {
 import PyCodeEditor from '@/components/forms/PyCodeEditor.vue'
 import {
   useFactor, useFactorCode, useUpdateFactorCode, useDeleteFactor,
+  useFactorLineage, useSetSota,
 } from '@/api/factors'
 import { useEvals } from '@/api/evals'
 import type { EvalRun } from '@/api/evals'
@@ -30,6 +31,22 @@ const dialog = useDialog()
 
 const factorId = computed(() => route.params.factorId as string)
 const { data: factor, isLoading } = useFactor(factorId)
+const { data: lineage } = useFactorLineage(factorId)
+const setSotaMut = useSetSota()
+
+async function handleToggleSota() {
+  if (!factor.value) return
+  const next = !factor.value.is_sota
+  try {
+    await setSotaMut.mutateAsync({
+      factor_id: factor.value.factor_id,
+      is_sota: next,
+    })
+    message.success(next ? '已标记为 SOTA' : '已取消 SOTA 标记')
+  } catch (e: any) {
+    message.error(e?.message || '切换 SOTA 失败')
+  }
+}
 
 // 历史评估列表
 const evalParams = computed(() => ({ factor_id: factorId.value }))
@@ -258,6 +275,78 @@ function confirmDelete() {
         </n-descriptions-item>
         <n-descriptions-item label="参数 Schema" :span="2">
           <code style="font-size: 12px">{{ JSON.stringify(factor.params_schema) }}</code>
+        </n-descriptions-item>
+      </n-descriptions>
+
+      <!-- L2.D 族谱区块（借鉴 RD-Agent SOTA / lineage 概念） -->
+      <n-descriptions
+        v-if="factor"
+        bordered
+        :column="2"
+        label-placement="left"
+        title="🧬 因子族谱"
+        style="margin-bottom: 24px"
+      >
+        <n-descriptions-item label="代际">
+          v{{ factor.generation ?? 1 }}
+          <span style="color: #848E9C; margin-left: 6px">
+            （根：<code>{{ factor.root_factor_id ?? factor.factor_id }}</code>）
+          </span>
+        </n-descriptions-item>
+        <n-descriptions-item label="SOTA 标记">
+          <n-button
+            size="small"
+            :type="factor.is_sota ? 'warning' : 'default'"
+            :loading="setSotaMut.isPending.value"
+            @click="handleToggleSota"
+          >
+            {{ factor.is_sota ? '⭐ 已标记 SOTA（点击取消）' : '点击标为 SOTA' }}
+          </n-button>
+          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+            同 root 唯一；新进化默认从 SOTA 出发
+          </span>
+        </n-descriptions-item>
+        <n-descriptions-item label="父代">
+          <span v-if="lineage && lineage.ancestors.length > 0">
+            <a
+              v-for="(a, idx) in lineage.ancestors"
+              :key="a.factor_id"
+              style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
+              @click="router.push(`/factors/${a.factor_id}`)"
+            >
+              <span v-if="idx > 0">←</span>
+              <code>{{ a.factor_id }}</code>
+              <span v-if="a.is_sota">⭐</span>
+              <span style="color: #848E9C; font-size: 11px"> v{{ a.generation }}</span>
+            </a>
+          </span>
+          <span v-else style="color: #999">（根因子，无父代）</span>
+        </n-descriptions-item>
+        <n-descriptions-item label="子代">
+          <span v-if="lineage && lineage.descendants.length > 0">
+            <a
+              v-for="d in lineage.descendants"
+              :key="d.factor_id"
+              style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
+              @click="router.push(`/factors/${d.factor_id}`)"
+            >
+              <code>{{ d.factor_id }}</code>
+              <span v-if="d.is_sota">⭐</span>
+              <span style="color: #848E9C; font-size: 11px"> v{{ d.generation }}</span>
+            </a>
+          </span>
+          <span v-else style="color: #999">（暂无子代——可在评估详情点"🧬 进化下一代"）</span>
+        </n-descriptions-item>
+        <n-descriptions-item v-if="lineage?.same_root_sota && lineage.same_root_sota !== factor.factor_id" label="同链 SOTA" :span="2">
+          <a
+            style="cursor: pointer; color: #5AC8FA"
+            @click="router.push(`/factors/${lineage!.same_root_sota}`)"
+          >
+            <code>⭐ {{ lineage!.same_root_sota }}</code>
+          </a>
+          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+            （本链路用户标记的最优；后续进化默认从这个出发）
+          </span>
         </n-descriptions-item>
       </n-descriptions>
     </n-spin>

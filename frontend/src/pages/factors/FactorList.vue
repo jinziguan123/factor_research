@@ -325,6 +325,20 @@ async function submitTemplate() {
             >
               <template #header>
                 <span style="font-size: 15px; font-weight: 600">{{ factor.display_name }}</span>
+                <!-- L2.D：SOTA 因子加 ⭐ 徽章 + generation > 1 时显示 v 号 -->
+                <n-tag
+                  v-if="factor.is_sota"
+                  size="tiny" type="warning" :bordered="false"
+                  style="margin-left: 6px"
+                >
+                  ⭐ SOTA
+                </n-tag>
+                <span
+                  v-if="(factor.generation ?? 1) > 1"
+                  style="color: #848E9C; font-size: 12px; margin-left: 6px"
+                >
+                  v{{ factor.generation }}
+                </span>
               </template>
               <template #header-extra>
                 <n-tag size="small" :bordered="false">{{ categoryLabels[factor.category] ?? factor.category }}</n-tag>
