@@ -103,7 +103,16 @@ def _list_symbols_in_dir(base_dir: str) -> list[str]:
 
 
 def _query_ch_last_trade_date(symbol_id: int) -> date | None:
-    """从 ClickHouse 读单只股票已入库的最大 trade_date；空库返回 None。"""
+    """从 ClickHouse 读单只股票已入库的最大 trade_date；空库返回 None。
+
+    clickhouse-driver 在 ``use_numpy=True`` 模式下把 Date / DateTime 列返
+    回成 ``numpy.datetime64``——它和 Python ``timedelta`` 直接相减会抛
+    ``UFuncBinaryResolutionError``（dtype('<M8[D]') vs dtype('O')）。
+    用 ``pd.Timestamp(v).date()`` 兜底，覆盖三种可能的返回类型：
+    - ``datetime.date``：本就是目标
+    - ``datetime.datetime``：取 .date()
+    - ``numpy.datetime64``：经 pd.Timestamp 转 Python date
+    """
     with ch_client() as ch:
         rows = ch.execute(
             "SELECT max(trade_date) FROM quant_data.stock_bar_1m FINAL "
@@ -113,10 +122,16 @@ def _query_ch_last_trade_date(symbol_id: int) -> date | None:
     if not rows or rows[0][0] is None:
         return None
     v = rows[0][0]
-    # clickhouse-driver 可能返回 date / datetime；统一为 date。
-    if isinstance(v, datetime):
-        return v.date()
-    return v
+    try:
+        return pd.Timestamp(v).date()
+    except Exception:  # noqa: BLE001
+        # 极端边角（非常老版 driver 把日期当字符串等）；记 log 让上层降级
+        # 到 None（增量退化为全量），不阻塞后续因子。
+        logger.warning(
+            "_query_ch_last_trade_date: 不识别的返回类型 type=%s value=%r",
+            type(v).__name__, v,
+        )
+        return None
 
 
 def _incremental_start_ts(last_trade_date: date | None, rewind_days: int) -> int | None:

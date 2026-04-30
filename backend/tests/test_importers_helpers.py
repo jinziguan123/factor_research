@@ -296,6 +296,64 @@ def test_incremental_start_ts_rewind_lower_bound():
     assert ts0 == ts1
 
 
+def test_query_ch_last_trade_date_handles_numpy_datetime64(monkeypatch):
+    """回归 bug：ClickHouse use_numpy=True 返回 numpy.datetime64 时，
+    必须转成 Python date——否则后续 ``date - timedelta`` 抛
+    UFuncBinaryResolutionError。
+    """
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from backend.scripts.importers import stock_1m as mod
+
+    fake_ch = MagicMock()
+    fake_ch.execute.return_value = [(np.datetime64("2026-04-30"),)]
+    fake_ctx = MagicMock()
+    fake_ctx.__enter__ = lambda s: fake_ch
+    fake_ctx.__exit__ = lambda s, *a: None
+    monkeypatch.setattr(mod, "ch_client", lambda: fake_ctx)
+
+    out = mod._query_ch_last_trade_date(symbol_id=1)
+    assert isinstance(out, date)  # 必须是 Python date 不是 numpy.datetime64
+    assert out == date(2026, 4, 30)
+    # 立刻验证下游能减 timedelta（不再抛 UFuncBinaryResolutionError）
+    from datetime import timedelta as _td
+    assert out - _td(days=3) == date(2026, 4, 27)
+
+
+def test_query_ch_last_trade_date_handles_python_date(monkeypatch):
+    """clickhouse-driver 在 use_numpy=False 模式返回 Python date——保持兼容。"""
+    from unittest.mock import MagicMock
+
+    from backend.scripts.importers import stock_1m as mod
+
+    fake_ch = MagicMock()
+    fake_ch.execute.return_value = [(date(2026, 4, 30),)]
+    fake_ctx = MagicMock()
+    fake_ctx.__enter__ = lambda s: fake_ch
+    fake_ctx.__exit__ = lambda s, *a: None
+    monkeypatch.setattr(mod, "ch_client", lambda: fake_ctx)
+
+    assert mod._query_ch_last_trade_date(1) == date(2026, 4, 30)
+
+
+def test_query_ch_last_trade_date_returns_none_on_empty_result(monkeypatch):
+    """空表 / 没数据 → None（增量退化为全量）。"""
+    from unittest.mock import MagicMock
+
+    from backend.scripts.importers import stock_1m as mod
+
+    fake_ch = MagicMock()
+    fake_ch.execute.return_value = [(None,)]
+    fake_ctx = MagicMock()
+    fake_ctx.__enter__ = lambda s: fake_ch
+    fake_ctx.__exit__ = lambda s, *a: None
+    monkeypatch.setattr(mod, "ch_client", lambda: fake_ctx)
+
+    assert mod._query_ch_last_trade_date(1) is None
+
+
 # ------------------------- stock_1m._compute_batch_boundaries -------------------------
 
 
