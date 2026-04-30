@@ -370,6 +370,70 @@ def test_eval_service_imports():
     assert callable(run_eval)
 
 
+def test_set_status_writes_feedback_text(monkeypatch):
+    """_set_status feedback 参数应该拼到 SQL 的 feedback_text=%s。"""
+    from unittest.mock import MagicMock
+
+    from backend.services import eval_service
+
+    cursor = MagicMock()
+    cursor.__enter__ = lambda s: cursor
+    cursor.__exit__ = lambda s, *a: None
+    executed: list[tuple] = []
+
+    def _exec(sql, vals=()):
+        executed.append((sql, vals))
+
+    cursor.execute.side_effect = _exec
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    conn.__enter__ = lambda s: conn
+    conn.__exit__ = lambda s, *a: None
+    cm = MagicMock()
+    cm.__enter__ = lambda s: conn
+    cm.__exit__ = lambda s, *a: None
+    monkeypatch.setattr(eval_service, "mysql_conn", MagicMock(return_value=cm))
+
+    eval_service._set_status(
+        "RUN1",
+        status="success",
+        feedback="IC=0.001 偏弱；与因子 X 相关 0.99 重复，建议改写或合并",
+    )
+
+    assert len(executed) == 1
+    sql, vals = executed[0]
+    assert "feedback_text=%s" in sql
+    # vals 顺序：status / feedback / run_id
+    assert vals[1].startswith("IC=0.001")
+    assert vals[-1] == "RUN1"
+
+
+def test_set_status_omits_feedback_when_not_passed(monkeypatch):
+    """不传 feedback → SQL 里不应包含 feedback_text 子句（避免无意义写空）。"""
+    from unittest.mock import MagicMock
+
+    from backend.services import eval_service
+
+    cursor = MagicMock()
+    cursor.__enter__ = lambda s: cursor
+    cursor.__exit__ = lambda s, *a: None
+    executed: list[tuple] = []
+    cursor.execute.side_effect = lambda sql, vals=(): executed.append((sql, vals))
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    conn.__enter__ = lambda s: conn
+    conn.__exit__ = lambda s, *a: None
+    cm = MagicMock()
+    cm.__enter__ = lambda s: conn
+    cm.__exit__ = lambda s, *a: None
+    monkeypatch.setattr(eval_service, "mysql_conn", MagicMock(return_value=cm))
+
+    eval_service._set_status("RUN2", progress=50)
+
+    sql, _ = executed[0]
+    assert "feedback_text" not in sql
+
+
 def test_build_health_green_for_healthy_factor():
     """连续高斯因子 + 稳定正向 IC + 合理换手 → overall green。"""
     from backend.services.eval_service import _build_health

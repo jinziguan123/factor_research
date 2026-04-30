@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS `fr_factor_eval_runs` (
   `status`          varchar(16) NOT NULL,
   `progress`        tinyint unsigned NOT NULL DEFAULT 0,
   `error_message`   text,
+  -- feedback_text：LLM 友好的"诊断 + 改进建议"，与 error_message 互补：
+  -- error_message 仅 failed 写；feedback_text 在 success / failed 都可写
+  -- （例如 success 但 IC 极低也算需要诊断）。借鉴 RD-Agent 反馈三元组。
+  `feedback_text`   text,
   `created_at`      datetime NOT NULL,
   `started_at`      datetime DEFAULT NULL,
   `finished_at`     datetime DEFAULT NULL,

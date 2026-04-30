@@ -100,6 +100,12 @@ def _ensure_pending_migrations() -> None:
             "ALTER TABLE fr_factor_meta ADD COLUMN hypothesis TEXT "
             "DEFAULT NULL AFTER description",
         ),
+        (
+            "fr_factor_eval_runs",
+            "feedback_text",
+            "ALTER TABLE fr_factor_eval_runs ADD COLUMN feedback_text TEXT "
+            "DEFAULT NULL AFTER error_message",
+        ),
     ]
     try:
         with mysql_conn() as c:

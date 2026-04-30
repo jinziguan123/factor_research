@@ -46,6 +46,7 @@ def _set_status(
     status: str | None = None,
     progress: int | None = None,
     error: str | None = None,
+    feedback: str | None = None,
     started: bool = False,
     finished: bool = False,
 ) -> None:
@@ -54,6 +55,12 @@ def _set_status(
     只更新显式传入的字段，避免把别的字段误写为 NULL。``started`` / ``finished``
     为 True 时分别写入 ``started_at`` / ``finished_at``。
     无任何字段更新时直接 return（避免生成空 SET 语句）。
+
+    Args:
+        feedback: LLM 友好的"诊断 + 改进建议"文本（写入 ``feedback_text`` 列）。
+            与 ``error`` 互补——error 仅 failed 时写 traceback，feedback 在
+            success / failed 都可写（例如 success 但 IC 极低需要诊断）。
+            借鉴 RD-Agent 反馈三元组的语义槽位。
 
     注意：started_at / finished_at 用本地时间（``datetime.now()``），不带时区。
     本项目单机部署 + 单时区（Asia/Shanghai），避免 UTC 引入前端 -8h 展示偏差，
@@ -71,6 +78,9 @@ def _set_status(
     if error is not None:
         sets.append("error_message=%s")
         vals.append(error)
+    if feedback is not None:
+        sets.append("feedback_text=%s")
+        vals.append(feedback)
     if started:
         sets.append("started_at=%s")
         vals.append(datetime.now())
