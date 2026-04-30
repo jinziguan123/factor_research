@@ -11,6 +11,7 @@ import {
   NTable, NModal, NInput, NSelect, NFormItem, useMessage,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
+import { useFactorLineage } from '@/api/factors'
 import { useNegateFactor, useEvolveFactor } from '@/api/factor_assistant'
 import { usePoolNameMap, usePools } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -49,6 +50,16 @@ const evolvePoolOptions = computed(() =>
   (poolsData.value ?? []).map((p: any) => ({ label: p.pool_name, value: p.pool_id })),
 )
 const evolveMut = useEvolveFactor()
+
+// 拉同链 SOTA 信息——用户在非 SOTA 因子的评估页点🧬时给出建议
+const evolveFactorIdRef = computed(() => evalRun.value?.factor_id ?? '')
+const { data: evolveLineage } = useFactorLineage(evolveFactorIdRef)
+const sotaSuggestion = computed(() => {
+  const ln = evolveLineage.value
+  if (!ln || !ln.same_root_sota) return null
+  if (ln.same_root_sota === ln.factor_id) return null  // 当前已是 SOTA
+  return ln.same_root_sota
+})
 
 function openEvolveDialog() {
   // 预选当前评估池作为 default 评估池
@@ -315,6 +326,23 @@ const rankIcMeanDiverged = computed(() =>
         :positive-button-props="{ loading: evolveMut.isPending.value }"
         @positive-click="handleEvolveSubmit"
       >
+        <!-- SOTA 建议（仅当本链有 SOTA 且当前不是 SOTA 时显示） -->
+        <n-alert
+          v-if="sotaSuggestion"
+          type="warning"
+          :show-icon="false"
+          style="margin-bottom: 12px"
+        >
+          💡 本链 SOTA 是
+          <a
+            style="cursor: pointer; color: #5AC8FA; font-weight: 600"
+            @click="router.push(`/factors/${sotaSuggestion}`)"
+          >⭐ {{ sotaSuggestion }}</a>。
+          按 RD-Agent 思想，进化通常应**从 SOTA 出发**继承当前最优；
+          建议先去 ⭐ 因子的评估页再点 🧬。仍要从 <code>{{ evalRun?.factor_id }}</code>
+          进化也可以——下面继续生成即可（会形成分叉）。
+        </n-alert>
+
         <n-form-item label="父代评估">
           <code>{{ evalRun?.factor_id }}</code>
           <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
@@ -342,8 +370,8 @@ const rankIcMeanDiverged = computed(() =>
           />
         </n-form-item>
         <n-alert type="info" size="small" :show-icon="false" style="margin-top: 8px">
-          LLM 会拿到（父代源码 + 假设 + 评估指标 + 诊断 + 你的指令）来生成下一代。
-          factor_id 自动 = <code>&lt;root&gt;_evo&lt;N&gt;</code>，由后端按当前代数计算。
+          LLM 会拿到（父代假设 + 评估指标 + 诊断 + 你的指令）来生成下一代。
+          factor_id 自动 = <code>&lt;root&gt;_evo&lt;N&gt;</code>，由后端按同链最大代号 + 1 计算。
         </n-alert>
       </n-modal>
 

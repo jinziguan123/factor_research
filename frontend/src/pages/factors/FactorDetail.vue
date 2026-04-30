@@ -22,6 +22,7 @@ import {
 import { useEvals } from '@/api/evals'
 import type { EvalRun } from '@/api/evals'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
+import LineageTree from '@/components/factors/LineageTree.vue'
 import type { DataTableColumns } from 'naive-ui'
 
 const route = useRoute()
@@ -349,6 +350,23 @@ function confirmDelete() {
           </span>
         </n-descriptions-item>
       </n-descriptions>
+
+      <!-- 进化链路树 -->
+      <n-card
+        v-if="factor"
+        title="🌳 进化链路"
+        size="small"
+        style="margin-bottom: 24px"
+      >
+        <LineageTree
+          :current-factor-id="factor.factor_id"
+          :root-factor-id="factor.root_factor_id ?? factor.factor_id"
+        />
+        <div style="margin-top: 8px; color: #848E9C; font-size: 12px">
+          点击节点跳转因子详情；⭐ = SOTA；高亮黄底 = 当前因子。
+          多分叉时按代际从左到右、从上到下排列。
+        </div>
+      </n-card>
     </n-spin>
 
     <!-- 历史评估列表 -->
