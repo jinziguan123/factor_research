@@ -692,6 +692,9 @@ def _build_evolve_description(
 def _read_factor_meta_for_evolve(parent_factor_id: str) -> dict:
     """读 ``fr_factor_meta`` 拿 parent 的 generation / root / hypothesis。
 
+    同时查同 root 下**当前存在的最大 generation**，新代基于此 + 1，避免
+    "用户连续从 v1 进化两次都算成 evo2"撞到 409 文件已存在。
+
     Raises:
         FactorAssistantError: parent 不存在或表里没记录。
     """
@@ -703,15 +706,28 @@ def _read_factor_meta_for_evolve(parent_factor_id: str) -> dict:
                 (parent_factor_id,),
             )
             row = cur.fetchone()
-    if not row:
-        raise FactorAssistantError(
-            f"父代因子 {parent_factor_id!r} 在 fr_factor_meta 中不存在"
-        )
+            if not row:
+                raise FactorAssistantError(
+                    f"父代因子 {parent_factor_id!r} 在 fr_factor_meta 中不存在"
+                )
+            root = row.get("root_factor_id") or row["factor_id"]
+            # root 下最大 generation：root 自身 + 任何 root_factor_id == root 的子代
+            cur.execute(
+                "SELECT MAX(generation) AS max_gen FROM fr_factor_meta "
+                "WHERE factor_id=%s OR root_factor_id=%s",
+                (root, root),
+            )
+            max_row = cur.fetchone()
+    max_gen = int((max_row or {}).get("max_gen") or 1)
+
     return {
         "factor_id": row["factor_id"],
         "hypothesis": row.get("hypothesis") or "",
+        # generation：parent 自己的代号（保留语义供需要时用）
         "generation": int(row.get("generation") or 1),
-        "root_factor_id": row.get("root_factor_id") or row["factor_id"],
+        # max_generation_in_lineage：同 root 下当前最大代号；evolve 应基于此 + 1
+        "max_generation_in_lineage": max_gen,
+        "root_factor_id": root,
     }
 
 
@@ -859,7 +875,9 @@ def evolve_factor(
     del parent_source_code  # 保留接口签名但不使用，见 docstring NOTE
 
     parent_meta = _read_factor_meta_for_evolve(parent_factor_id)
-    new_generation = parent_meta["generation"] + 1
+    # 用 max_generation_in_lineage + 1 而非 parent.generation + 1：避免连续从
+    # 同一父代进化时算出重名（v1 已经进化过 v2，再点 v1 进化时应得 v3 而非 v2）
+    new_generation = parent_meta["max_generation_in_lineage"] + 1
     root = parent_meta["root_factor_id"]
     new_factor_id = f"{root}_evo{new_generation}"
 

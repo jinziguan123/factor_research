@@ -475,12 +475,14 @@ def test_evolve_factor_renames_factor_id_to_root_evo_n(tmp_path, monkeypatch):
     monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
     monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
 
-    # mock parent meta：root=foo_root, generation=2 → 期望 new_factor_id=foo_root_evo3
+    # mock parent meta：root=foo_root, max_generation_in_lineage=2 →
+    # 期望 new_factor_id=foo_root_evo3
     def _fake_meta(parent_id):
         return {
             "factor_id": parent_id,
             "hypothesis": "原假设",
             "generation": 2,
+            "max_generation_in_lineage": 2,
             "root_factor_id": "foo_root",
         }
     monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", _fake_meta)
@@ -515,7 +517,8 @@ def test_evolve_factor_includes_eval_feedback_in_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
     monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
     monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", lambda _: {
-        "factor_id": "foo", "hypothesis": "h", "generation": 1, "root_factor_id": "foo",
+        "factor_id": "foo", "hypothesis": "h", "generation": 1,
+        "max_generation_in_lineage": 1, "root_factor_id": "foo",
     })
     monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {
         "feedback_text": "📋 IC 偏弱，建议改 EMA 平滑",
@@ -543,6 +546,33 @@ def test_evolve_factor_includes_eval_feedback_in_prompt(tmp_path, monkeypatch):
     assert "想要更短窗口" in user_prompt
 
 
+def test_evolve_factor_uses_max_generation_in_lineage(tmp_path, monkeypatch):
+    """回归 409 bug：用户连续从 v1 进化时，第二次应得 evo3 而非 evo2。
+
+    场景：root=foo（generation=1），同 root 下已有 foo_evo2（max_gen=2）。
+    再次基于 foo 进化，应得 foo_evo3，而不是用 foo.generation+1=2 撞 evo2。
+    """
+    target_dir = tmp_path / "llm_generated"
+    target_dir.mkdir(parents=True)
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", lambda _: {
+        "factor_id": "foo",
+        "hypothesis": "h",
+        "generation": 1,                  # parent 自己仍是 v1
+        "max_generation_in_lineage": 2,   # 但同链已有 v2 → 新代应是 v3
+        "root_factor_id": "foo",
+    })
+    monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {})
+    monkeypatch.setattr(
+        fa, "_call_openai_compatible",
+        lambda msgs, **_kw: _good_evolve_response(),
+    )
+
+    gen = fa.evolve_factor(parent_factor_id="foo", parent_source_code="")
+    assert gen.factor_id == "foo_evo3"  # 不是 foo_evo2
+
+
 def test_evolve_factor_propagates_loop_failure(tmp_path, monkeypatch):
     """LLM 始终返回不合规代码 → evolve 抛 FactorAssistantError "反馈循环 N 轮仍失败"。"""
     target_dir = tmp_path / "llm_generated"
@@ -551,7 +581,8 @@ def test_evolve_factor_propagates_loop_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
     monkeypatch.setattr(fa, "_TRANSLATE_MAX_RETRIES", 1)  # 共 2 次尝试
     monkeypatch.setattr(fa, "_read_factor_meta_for_evolve", lambda _: {
-        "factor_id": "foo", "hypothesis": "h", "generation": 1, "root_factor_id": "foo",
+        "factor_id": "foo", "hypothesis": "h", "generation": 1,
+        "max_generation_in_lineage": 1, "root_factor_id": "foo",
     })
     monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {})
 

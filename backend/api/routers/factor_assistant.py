@@ -357,9 +357,10 @@ def evolve(body: EvolveIn, bt: BackgroundTasks) -> dict:
     # 让新因子写进 fr_factor_meta（默认 generation=1 / parent=NULL）
     reg.scan_and_register()
 
-    # 计算 root + generation：从 parent meta 沿用
+    # 计算 root + generation：用同 root 下最大 generation + 1，避免连续从
+    # 同一父代进化时撞重名（service 层已经按这个算了 new_factor_id）
     parent_meta = _read_factor_meta_for_evolve(body.parent_factor_id)
-    new_generation = parent_meta["generation"] + 1
+    new_generation = parent_meta["max_generation_in_lineage"] + 1
     new_root = parent_meta["root_factor_id"]
 
     _update_lineage_fn(
