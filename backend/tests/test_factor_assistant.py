@@ -477,8 +477,39 @@ def test_extract_class_body_falls_back_when_no_class_found():
     assert fallback.strip() != ""  # 至少返回原文
 
 
-def test_build_evolve_prompt_uses_extracted_class_only(monkeypatch):
-    """_build_evolve_user_prompt 不应把 file docstring / imports 灌进 prompt。"""
+def test_build_evolve_prompt_default_does_not_include_parent_source():
+    """默认 include_parent_source=False → user prompt 不含父代代码内容。
+
+    这是为了规避 LLM 中转（codeflow.asia 等）对"含代码内容 / 长 user message"
+    的反滥用规则导致的立即 502。父代信息靠 hypothesis + 评估指标 + feedback +
+    用户指令传达，LLM 能从这些推断该怎么改。
+    """
+    msg = fa._build_evolve_user_prompt(
+        parent_factor_id="foo_reversal",
+        parent_source_code=_FULL_FACTOR_SRC,
+        parent_hypothesis="短期反转假设",
+        new_factor_id="foo_reversal_evo2",
+        eval_ctx={
+            "feedback_text": "IC 偏弱",
+            "ic_mean": 0.012, "ic_ir": 0.31,
+            "long_short_sharpe": 0.4, "long_short_annret": 0.06,
+            "turnover_mean": 0.45,
+        },
+        extra_hint="想要更短窗口",
+    )
+    # 关键非代码内容
+    assert "短期反转假设" in msg
+    assert "想要更短窗口" in msg
+    assert "IC 偏弱" in msg
+    assert "0.0120" in msg or "0.012" in msg  # IC mean
+    # **不**应有任何代码片段
+    assert "class FooReversal" not in msg
+    assert "def compute" not in msg
+    assert "import pandas" not in msg
+
+
+def test_build_evolve_prompt_with_parent_source_includes_extracted_class():
+    """include_parent_source=True 时附带裁剪后的父代类源码。"""
     msg = fa._build_evolve_user_prompt(
         parent_factor_id="foo_reversal",
         parent_source_code=_FULL_FACTOR_SRC,
@@ -491,15 +522,37 @@ def test_build_evolve_prompt_uses_extracted_class_only(monkeypatch):
             "turnover_mean": 0.45,
         },
         extra_hint="想要更短窗口",
+        include_parent_source=True,
     )
-    # 关键内容仍在
     assert "class FooReversal(BaseFactor)" in msg
     assert "def compute" in msg
-    assert "想要更短窗口" in msg
-    assert "IC 偏弱" in msg
-    # 但 file docstring / imports 不在
+    # file docstring / imports 仍被裁掉
     assert "一段非常长的 file docstring" not in msg
     assert "import pandas as pd" not in msg
+
+
+def test_build_evolve_prompt_size_bounded_without_parent_source():
+    """默认（不发源码）时 user message 应远小于发了源码的版本。"""
+    big_src = _FULL_FACTOR_SRC * 5  # 模拟大型父代代码
+    eval_ctx = {
+        "feedback_text": "IC 偏弱",
+        "ic_mean": 0.012, "ic_ir": 0.31,
+        "long_short_sharpe": 0.4, "long_short_annret": 0.06,
+        "turnover_mean": 0.45,
+    }
+    no_src = fa._build_evolve_user_prompt(
+        parent_factor_id="foo", parent_source_code=big_src,
+        parent_hypothesis="x", new_factor_id="foo_evo2",
+        eval_ctx=eval_ctx, extra_hint="hint",
+    )
+    with_src = fa._build_evolve_user_prompt(
+        parent_factor_id="foo", parent_source_code=big_src,
+        parent_hypothesis="x", new_factor_id="foo_evo2",
+        eval_ctx=eval_ctx, extra_hint="hint",
+        include_parent_source=True,
+    )
+    assert len(no_src) < len(with_src) // 2
+    assert len(no_src) < 1500  # 默认形态应稳定 < 1.5KB（实际多在 < 1KB）
 
 
 # ---------------------------- L2.D evolve_factor ----------------------------

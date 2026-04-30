@@ -938,11 +938,17 @@ def _build_evolve_user_prompt(
     new_factor_id: str,
     eval_ctx: dict,
     extra_hint: str | None,
+    include_parent_source: bool = False,
 ) -> str:
     """组装 evolve 的 user message。
 
-    父代源码用 ``_extract_class_body`` 裁剪到只剩 BaseFactor 子类——这是
-    把 evolve 请求体压到 translate 量级的关键，避免中转方对大请求 502。
+    Args:
+        include_parent_source: 默认 ``False``——只发 hypothesis + 评估指标 +
+            feedback + 用户指令，**不发父代源码**。这是为了规避 LLM 中转
+            （codeflow.asia 等）对"长 user message"或"含 Python 代码内容"
+            的反滥用规则——实测表明 user message > 3KB 或含 ``class X(BaseFactor)``
+            模式会立即 502。
+            ``True`` 时附带裁剪后的父代类源码，prompt 更精确但触发 502 风险高。
     """
     fb = (eval_ctx.get("feedback_text") or "").strip() or "（暂无评估反馈）"
     metrics_lines: list[str] = []
@@ -965,29 +971,33 @@ def _build_evolve_user_prompt(
     metrics_block = "\n".join(metrics_lines) if metrics_lines else "（无指标）"
     extra = (extra_hint or "").strip() or "（用户没填额外指令——你完全基于反馈和指标来改）"
 
-    # 裁剪父代源码：只保留 BaseFactor 子类，去掉 file docstring / imports /
-    # 模块级常量。LLM 改写不需要看那些；prompt 体积能从 10-30KB 压到 3-8KB。
-    trimmed_src = _extract_class_body(parent_source_code)
+    parts = [
+        f"【父代因子】 {parent_factor_id}",
+        f"【父代研究假设】 {parent_hypothesis or '（未填）'}",
+        "",
+        f"【父代评估指标】\n{metrics_block}",
+        "",
+        f"【父代评估诊断 / 反馈】\n{fb}",
+        "",
+        f"【用户的额外指令】\n{extra}",
+        "",
+        f"请基于上面信息生成下一代版本（factor_id 字段后端会改写成 {new_factor_id}，你任填）。",
+        "保留父代核心思路（从 hypothesis 推断），针对评估反馈做调整。",
+    ]
 
-    # 不要用 ```python ... ``` markdown fence——某些 LLM 中转（codeflow.asia /
-    # 部分 Cloudflare 反代）对"含代码块的请求"会立即 RST 502，怀疑是上游内容
-    # 审核 / 反 prompt-injection 规则。改用"---begin/end---"明文标记，依然清晰
-    # 可读，且不触发上述拦截。
-    return (
-        f"【父代因子】 {parent_factor_id}\n"
-        f"【父代研究假设】 {parent_hypothesis or '（未填）'}\n\n"
-        f"【父代源码（仅类内部，imports 和 file docstring 已裁剪）】\n"
-        f"---begin parent class source---\n"
-        f"{trimmed_src}\n"
-        f"---end parent class source---\n\n"
-        f"【父代评估指标】\n{metrics_block}\n\n"
-        f"【父代评估诊断 / 反馈】\n{fb}\n\n"
-        f"【用户的额外指令】\n{extra}\n\n"
-        f"请生成下一代版本（factor_id 字段后端会改写成 {new_factor_id}，你任填）。"
-        f"\n\n注意：你输出的 code 仍需是**完整可 import 的 .py 文件**——必须包含"
-        f" __future__ 注解、pandas、以及 backend.factors.base 的 BaseFactor/FactorContext"
-        f" 等 import 语句；上面只是省 token 给你看的裁剪版。"
-    )
+    if include_parent_source:
+        # 仅在调用方明确要求时才发父代源码——默认不发以避中转 502。
+        # 用 ---begin/end--- 明文标记替代 ```python``` fence。
+        trimmed_src = _extract_class_body(parent_source_code)
+        parts.insert(
+            3,  # 紧接 hypothesis 之后
+            f"【父代源码（仅类内部，imports / file docstring 已裁剪）】\n"
+            f"---begin parent class source---\n"
+            f"{trimmed_src}\n"
+            f"---end parent class source---",
+        )
+
+    return "\n".join(parts)
 
 
 # ---------------------------- 反向因子 (L2.A) ----------------------------
