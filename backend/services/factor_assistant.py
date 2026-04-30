@@ -846,6 +846,51 @@ def evolve_factor(
     )
 
 
+def _extract_class_body(source_code: str) -> str:
+    """从一份完整 .py 源码里抽出 BaseFactor 子类的源码（含类定义 + 类内属性 + 方法）。
+
+    用途：evolve prompt 把"父代源码"塞给 LLM 时不需要 file docstring /
+    imports / 模块级常量——这些占用大量 token 且对 LLM 改写无帮助；只把
+    关键的类定义送过去能把请求体压到 translate 同等量级，避开中转方对
+    大请求的 502 触发（codeflow.asia 等 Cloudflare 反代尤其敏感）。
+
+    实现：
+    1. ``ast.parse`` 整个源码
+    2. 找第一个继承自 ``BaseFactor`` 的 ``ClassDef`` 节点
+    3. ``ast.unparse(node)`` 单独输出该节点
+    4. 找不到时降级返回原文（让 evolve 仍能拼出 prompt，不阻断主流程）
+
+    Returns:
+        裁剪后的源码字符串（含末尾换行）；或原文（fallback）。
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        # 解析失败（罕见，例如 LLM 生成的因子有微妙语法错却被某种缓存绕过）
+        # → 直接返回原文，让 evolve 仍可继续
+        return source_code
+
+    target_cls: ast.ClassDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                base_name = (
+                    base.id if isinstance(base, ast.Name)
+                    else (base.attr if isinstance(base, ast.Attribute) else None)
+                )
+                if base_name == "BaseFactor":
+                    target_cls = node
+                    break
+            if target_cls is not None:
+                break
+
+    if target_cls is None:
+        return source_code
+
+    snippet = ast.unparse(target_cls)
+    return snippet if snippet.endswith("\n") else snippet + "\n"
+
+
 def _build_evolve_user_prompt(
     *,
     parent_factor_id: str,
@@ -855,7 +900,11 @@ def _build_evolve_user_prompt(
     eval_ctx: dict,
     extra_hint: str | None,
 ) -> str:
-    """组装 evolve 的 user message。"""
+    """组装 evolve 的 user message。
+
+    父代源码用 ``_extract_class_body`` 裁剪到只剩 BaseFactor 子类——这是
+    把 evolve 请求体压到 translate 量级的关键，避免中转方对大请求 502。
+    """
     fb = (eval_ctx.get("feedback_text") or "").strip() or "（暂无评估反馈）"
     metrics_lines: list[str] = []
     if eval_ctx.get("ic_mean") is not None:
@@ -877,14 +926,22 @@ def _build_evolve_user_prompt(
     metrics_block = "\n".join(metrics_lines) if metrics_lines else "（无指标）"
     extra = (extra_hint or "").strip() or "（用户没填额外指令——你完全基于反馈和指标来改）"
 
+    # 裁剪父代源码：只保留 BaseFactor 子类，去掉 file docstring / imports /
+    # 模块级常量。LLM 改写不需要看那些；prompt 体积能从 10-30KB 压到 3-8KB。
+    trimmed_src = _extract_class_body(parent_source_code)
+
     return (
         f"【父代因子】 {parent_factor_id}\n"
         f"【父代研究假设】 {parent_hypothesis or '（未填）'}\n\n"
-        f"【父代源码】\n```python\n{parent_source_code}\n```\n\n"
+        f"【父代源码（仅类内部，imports 和 file docstring 已裁剪）】\n"
+        f"```python\n{trimmed_src}\n```\n\n"
         f"【父代评估指标】\n{metrics_block}\n\n"
         f"【父代评估诊断 / 反馈】\n{fb}\n\n"
         f"【用户的额外指令】\n{extra}\n\n"
         f"请生成下一代版本（factor_id 字段后端会改写成 {new_factor_id}，你任填）。"
+        f"\n\n注意：你输出的 code 仍需是**完整可 import 的 .py 文件**——必须包含"
+        f" __future__ 注解、pandas、以及 backend.factors.base 的 BaseFactor/FactorContext"
+        f" 等 import 语句；上面只是省 token 给你看的裁剪版。"
     )
 
 
