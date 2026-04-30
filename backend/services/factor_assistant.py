@@ -254,16 +254,49 @@ def _build_user_content(
 
 
 def _post_and_validate(url: str, payload: dict) -> dict:
-    """共享的 HTTP 调用 + 响应健康检查。两种协议分支都会先走这里，再各自解 body。"""
+    """共享的 HTTP 调用 + 响应健康检查。两种协议分支都会先走这里，再各自解 body。
+
+    对**网络层瞬时错误**（``RemoteProtocolError`` / ``ReadTimeout`` / ``ConnectError``）
+    做 1 次重试，间隔 1.5s——常见症状是中转代理偶发"Server disconnected without
+    sending a response"，单次失败不应让用户重新填表单。其它 HTTP 错误（4xx/5xx
+    应答头已收到）不重试，立刻抛给上层。
+    """
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
         "Content-Type": "application/json",
     }
-    try:
-        with httpx.Client(timeout=settings.openai_timeout_s) as client:
-            resp = client.post(url, headers=headers, json=payload)
-    except httpx.HTTPError as e:
-        raise FactorAssistantError(f"调用 LLM 失败（网络层）：{e}") from e
+    _TRANSIENT_EXCS = (
+        httpx.RemoteProtocolError,
+        httpx.ReadTimeout,
+        httpx.ConnectError,
+        httpx.WriteError,
+    )
+    last_exc: Exception | None = None
+    for attempt in range(2):  # 1 + 1 retry = 共 2 次
+        try:
+            with httpx.Client(timeout=settings.openai_timeout_s) as client:
+                resp = client.post(url, headers=headers, json=payload)
+            break  # 拿到响应（无论 2xx/4xx/5xx）就跳出，下面统一处理
+        except _TRANSIENT_EXCS as e:
+            last_exc = e
+            if attempt == 0:
+                import time as _time
+                logger.warning(
+                    "LLM 网络层瞬时错误 (%s)；1.5s 后重试", e,
+                )
+                _time.sleep(1.5)
+                continue
+            raise FactorAssistantError(
+                f"调用 LLM 失败（网络层，重试 2 次仍失败）：{e}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise FactorAssistantError(f"调用 LLM 失败（网络层）：{e}") from e
+    else:
+        # for-else：循环没 break 也没 raise（理论不可达）
+        assert last_exc is not None
+        raise FactorAssistantError(
+            f"调用 LLM 失败（网络层）：{last_exc}"
+        ) from last_exc
 
     if resp.status_code >= 400:
         logger.warning("LLM returned %d: %s", resp.status_code, resp.text[:500])

@@ -12,7 +12,7 @@ import { useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NGrid, NGridItem, NTag, NSpin, NEmpty,
   NButton, NModal, NInput, NForm, NFormItem, NSpace, NAlert,
-  NUpload,
+  NUpload, NSelect,
   useMessage,
   type UploadFileInfo,
 } from 'naive-ui'
