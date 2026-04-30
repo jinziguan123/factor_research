@@ -632,6 +632,50 @@ def test_translate_does_not_retry_missing_api_key(monkeypatch):
     assert call_count["n"] == 1
 
 
+def test_translate_does_not_retry_upstream_5xx(tmp_path, monkeypatch):
+    """LLM 上游 502/4xx 是中转/部署问题，不应触发反馈循环重试。
+
+    回归历史 bug：曾把 "返回错误状态" 当作可重试错，导致 retry 路径里 raw
+    没赋值 → UnboundLocalError 500。
+    """
+    target_dir = tmp_path / "llm_generated"
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+
+    call_count = {"n": 0}
+
+    def _fake_call(messages):
+        call_count["n"] += 1
+        raise FactorAssistantError("LLM 返回错误状态 502；详情请看后端日志")
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _fake_call)
+
+    with pytest.raises(FactorAssistantError, match="返回错误状态 502"):
+        fa.translate_and_save("upstream down", None)
+    assert call_count["n"] == 1  # 一次失败就抛，不重试
+
+
+def test_translate_does_not_retry_non_json_response(tmp_path, monkeypatch):
+    """LLM 返回非 JSON（base_url 漏 /v1 等）也是部署错配，不应重试。"""
+    target_dir = tmp_path / "llm_generated"
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+
+    call_count = {"n": 0}
+
+    def _fake_call(messages):
+        call_count["n"] += 1
+        raise FactorAssistantError(
+            "上游不是 JSON 响应（content-type='text/html'）..."
+        )
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _fake_call)
+
+    with pytest.raises(FactorAssistantError, match="不是 JSON"):
+        fa.translate_and_save("misconfigured base url", None)
+    assert call_count["n"] == 1
+
+
 # ---------------------------- router 错误映射 ----------------------------
 
 

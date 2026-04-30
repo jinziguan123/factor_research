@@ -1096,6 +1096,10 @@ def _run_translate_loop(
         max_retries = _TRANSLATE_MAX_RETRIES
     last_err: FactorAssistantError | None = None
     for attempt in range(max_retries + 1):
+        # 每轮重置 raw——_call_openai_compatible 失败时 raw 不会被赋值，
+        # 后面的 messages.append({"role": "assistant", "content": raw}) 会
+        # UnboundLocalError；显式置 None 先兜住。
+        raw: str | None = None
         try:
             raw = _call_openai_compatible(messages)
             obj = _parse_llm_json(raw)
@@ -1104,14 +1108,28 @@ def _run_translate_loop(
             return payload
         except FactorAssistantError as e:
             last_err = e
-            if "OPENAI_API_KEY" in str(e) or "网络层" in str(e):
+            # 不重试的错误类型——这些是环境 / 上游问题，重试无意义且浪费 token：
+            # - OPENAI_API_KEY：未配置环境变量
+            # - 网络层：httpx 连接失败 / 中转直接断流
+            # - 返回错误状态：上游 4xx/5xx（中转代理 502 / 401 token 失效等）
+            # - 上游不是 JSON 响应：base_url 漏 /v1 等部署错配
+            err_msg = str(e)
+            non_retryable = (
+                "OPENAI_API_KEY" in err_msg
+                or "网络层" in err_msg
+                or "返回错误状态" in err_msg
+                or "上游不是 JSON" in err_msg
+            )
+            if non_retryable:
                 raise
             if attempt < max_retries:
                 logger.warning(
                     "translate 第 %d/%d 次失败，喂回 LLM 重试：%s",
                     attempt + 1, max_retries + 1, e,
                 )
-                messages.append({"role": "assistant", "content": raw})
+                # raw 可能为 None（理论上 non_retryable 已经先 raise，但保险）；
+                # 用空串占位以避免 LLM 看到 "None" 被困惑
+                messages.append({"role": "assistant", "content": raw or ""})
                 messages.append({
                     "role": "user", "content": _build_retry_user_message(e),
                 })
