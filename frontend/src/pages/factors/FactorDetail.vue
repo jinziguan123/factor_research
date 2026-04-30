@@ -34,6 +34,8 @@ const factorId = computed(() => route.params.factorId as string)
 const { data: factor, isLoading } = useFactor(factorId)
 const { data: lineage } = useFactorLineage(factorId)
 const setSotaMut = useSetSota()
+// L2.D：血缘族谱 modal 显隐（默认关，主页面只放一个按钮）
+const lineageOpen = ref(false)
 
 async function handleToggleSota() {
   if (!factor.value) return
@@ -279,85 +281,113 @@ function confirmDelete() {
         </n-descriptions-item>
       </n-descriptions>
 
-      <!-- L2.D 族谱区块（借鉴 RD-Agent SOTA / lineage 概念） -->
-      <n-descriptions
+      <!-- L2.D 血缘族谱按钮：紧凑展示代际 + SOTA 徽章，详情进 modal -->
+      <n-space
         v-if="factor"
-        bordered
-        :column="2"
-        label-placement="left"
-        title="🧬 因子族谱"
+        align="center"
+        :size="12"
         style="margin-bottom: 24px"
       >
-        <n-descriptions-item label="代际">
-          v{{ factor.generation ?? 1 }}
-          <span style="color: #848E9C; margin-left: 6px">
-            （根：<code>{{ factor.root_factor_id ?? factor.factor_id }}</code>）
-          </span>
-        </n-descriptions-item>
-        <n-descriptions-item label="SOTA 标记">
-          <n-button
-            size="small"
-            :type="factor.is_sota ? 'warning' : 'default'"
-            :loading="setSotaMut.isPending.value"
-            @click="handleToggleSota"
-          >
-            {{ factor.is_sota ? '⭐ 已标记 SOTA（点击取消）' : '点击标为 SOTA' }}
-          </n-button>
-          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
-            同 root 唯一；新进化默认从 SOTA 出发
-          </span>
-        </n-descriptions-item>
-        <n-descriptions-item label="父代">
-          <span v-if="lineage && lineage.ancestors.length > 0">
-            <a
-              v-for="(a, idx) in lineage.ancestors"
-              :key="a.factor_id"
-              style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
-              @click="router.push(`/factors/${a.factor_id}`)"
-            >
-              <span v-if="idx > 0">←</span>
-              <code>{{ a.factor_id }}</code>
-              <span v-if="a.is_sota">⭐</span>
-              <span style="color: #848E9C; font-size: 11px"> v{{ a.generation }}</span>
-            </a>
-          </span>
-          <span v-else style="color: #999">（根因子，无父代）</span>
-        </n-descriptions-item>
-        <n-descriptions-item label="子代">
-          <span v-if="lineage && lineage.descendants.length > 0">
-            <a
-              v-for="d in lineage.descendants"
-              :key="d.factor_id"
-              style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
-              @click="router.push(`/factors/${d.factor_id}`)"
-            >
-              <code>{{ d.factor_id }}</code>
-              <span v-if="d.is_sota">⭐</span>
-              <span style="color: #848E9C; font-size: 11px"> v{{ d.generation }}</span>
-            </a>
-          </span>
-          <span v-else style="color: #999">（暂无子代——可在评估详情点"🧬 进化下一代"）</span>
-        </n-descriptions-item>
-        <n-descriptions-item v-if="lineage?.same_root_sota && lineage.same_root_sota !== factor.factor_id" label="同链 SOTA" :span="2">
-          <a
-            style="cursor: pointer; color: #5AC8FA"
-            @click="router.push(`/factors/${lineage!.same_root_sota}`)"
-          >
-            <code>⭐ {{ lineage!.same_root_sota }}</code>
-          </a>
-          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
-            （本链路用户标记的最优；后续进化默认从这个出发）
-          </span>
-        </n-descriptions-item>
-      </n-descriptions>
+        <n-button type="primary" size="medium" @click="lineageOpen = true">
+          🧬 查看血缘族谱
+        </n-button>
+        <n-tag size="small" :bordered="false">
+          代际 v{{ factor.generation ?? 1 }}
+        </n-tag>
+        <n-tag
+          v-if="factor.is_sota"
+          size="small" type="warning" :bordered="false"
+        >
+          ⭐ SOTA
+        </n-tag>
+        <span style="color: #848E9C; font-size: 12px">
+          点击查看父代 / 子代链 + 进化树状图
+        </span>
+      </n-space>
 
-      <!-- 进化链路树 -->
-      <n-card
+      <!-- 血缘族谱 Modal -->
+      <n-modal
         v-if="factor"
-        title="🌳 进化链路"
-        size="small"
-        style="margin-bottom: 24px"
+        v-model:show="lineageOpen"
+        preset="card"
+        title="🧬 因子族谱与进化链路"
+        style="width: 800px; max-width: 90vw"
+        :bordered="false"
       >
+        <n-descriptions
+          bordered
+          :column="2"
+          label-placement="left"
+          style="margin-bottom: 16px"
+        >
+          <n-descriptions-item label="代际">
+            v{{ factor.generation ?? 1 }}
+            <span style="color: #848E9C; margin-left: 6px">
+              （根：<code>{{ factor.root_factor_id ?? factor.factor_id }}</code>）
+            </span>
+          </n-descriptions-item>
+          <n-descriptions-item label="SOTA 标记">
+            <n-button
+              size="small"
+              :type="factor.is_sota ? 'warning' : 'default'"
+              :loading="setSotaMut.isPending.value"
+              @click="handleToggleSota"
+            >
+              {{ factor.is_sota ? '⭐ 已标记 SOTA（点击取消）' : '点击标为 SOTA' }}
+            </n-button>
+            <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+              同 root 唯一；新进化默认从 SOTA 出发
+            </span>
+          </n-descriptions-item>
+          <n-descriptions-item label="父代">
+            <span v-if="lineage && lineage.ancestors.length > 0">
+              <a
+                v-for="(a, idx) in lineage.ancestors"
+                :key="a.factor_id"
+                style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
+                @click="router.push(`/factors/${a.factor_id}`); lineageOpen = false"
+              >
+                <span v-if="idx > 0">←</span>
+                <code>{{ a.factor_id }}</code>
+                <span v-if="a.is_sota">⭐</span>
+                <span style="color: #848E9C; font-size: 11px"> v{{ a.generation }}</span>
+              </a>
+            </span>
+            <span v-else style="color: #999">（根因子，无父代）</span>
+          </n-descriptions-item>
+          <n-descriptions-item label="子代">
+            <span v-if="lineage && lineage.descendants.length > 0">
+              <a
+                v-for="d in lineage.descendants"
+                :key="d.factor_id"
+                style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
+                @click="router.push(`/factors/${d.factor_id}`); lineageOpen = false"
+              >
+                <code>{{ d.factor_id }}</code>
+                <span v-if="d.is_sota">⭐</span>
+                <span style="color: #848E9C; font-size: 11px"> v{{ d.generation }}</span>
+              </a>
+            </span>
+            <span v-else style="color: #999">（暂无子代——可在评估详情点"🧬 进化下一代"）</span>
+          </n-descriptions-item>
+          <n-descriptions-item
+            v-if="lineage?.same_root_sota && lineage.same_root_sota !== factor.factor_id"
+            label="同链 SOTA"
+            :span="2"
+          >
+            <a
+              style="cursor: pointer; color: #5AC8FA"
+              @click="router.push(`/factors/${lineage!.same_root_sota}`); lineageOpen = false"
+            >
+              <code>⭐ {{ lineage!.same_root_sota }}</code>
+            </a>
+            <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+              （本链路用户标记的最优；后续进化默认从这个出发）
+            </span>
+          </n-descriptions-item>
+        </n-descriptions>
+
+        <h4 style="margin: 16px 0 8px">🌳 进化链路</h4>
         <LineageTree
           :current-factor-id="factor.factor_id"
           :root-factor-id="factor.root_factor_id ?? factor.factor_id"
@@ -366,7 +396,7 @@ function confirmDelete() {
           点击节点跳转因子详情；⭐ = SOTA；高亮黄底 = 当前因子。
           多分叉时按代际从左到右、从上到下排列。
         </div>
-      </n-card>
+      </n-modal>
     </n-spin>
 
     <!-- 历史评估列表 -->
