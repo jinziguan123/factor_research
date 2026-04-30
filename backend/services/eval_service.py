@@ -99,11 +99,13 @@ def _set_status(
         c.commit()
 
 
-def _build_eval_feedback(structured: dict) -> str:
-    """根据评估结构化指标拼一段 LLM / 用户友好的"诊断 + 改进建议"文本。
+def _build_eval_feedback_rule_based(structured: dict) -> str:
+    """根据评估结构化指标拼一段 LLM / 用户友好的"诊断 + 改进建议"文本（规则版）。
 
     用于 fr_factor_eval_runs.feedback_text，作为 RD-Agent 借鉴的反馈三元组
-    实现。判定阈值是经验值（比 backtest_service._build_health 的红黄绿略宽
+    的**保底实现**：当 LLM 诊断（``llm_eval_diagnose.diagnose_with_llm``）
+    失败 / 超时 / 没配 API key 时，由 ``_build_eval_feedback`` catch 回落到
+    本函数。判定阈值是经验值（比 backtest_service._build_health 的红黄绿略宽
     松）：
     - |IC| < 0.02：信号弱
     - 0.02 ≤ |IC| < 0.05：信号一般
@@ -200,6 +202,39 @@ def _build_eval_feedback(structured: dict) -> str:
             )
 
     return "\n".join(lines) if lines else ""
+
+
+def _build_eval_feedback(
+    structured: dict,
+    *,
+    payload: dict | None = None,
+    hypothesis: str = "",
+    factor_id: str = "",
+) -> str:
+    """优先用 LLM 解读完整 payload，失败 catch 回落规则版（L2.C）。
+
+    LLM 比规则版能多看几件事：
+    - IC 衰减曲线的形状（规则版只看均值）
+    - 分组单调与 hypothesis 方向是否符合
+    - 健康度 / Alphalens 增强等结构化指标的综合解读
+
+    LLM 失败信号 → 回落 ``_build_eval_feedback_rule_based``。这两条路径的
+    输出都直接落 ``fr_factor_eval_runs.feedback_text``；前端无差别展示。
+    """
+    if payload is not None and (hypothesis or factor_id):
+        try:
+            from backend.services.llm_eval_diagnose import diagnose_with_llm
+
+            return diagnose_with_llm(
+                structured=structured,
+                payload=payload,
+                hypothesis=hypothesis,
+                factor_id=factor_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("LLM 诊断失败，回落规则版：%s", e)
+            log.debug("LLM 诊断失败详情", exc_info=True)
+    return _build_eval_feedback_rule_based(structured)
 
 
 def _nan_to_none(x: Any) -> Any:
@@ -748,10 +783,16 @@ def run_eval(run_id: str, body: dict) -> None:
                 )
             c.commit()
 
-        # 写 LLM / 用户友好的诊断 feedback（基于 structured 指标），与 success
-        # 终态分开调用——即便诊断逻辑出 bug，也不影响 run 落 success 终态。
+        # 写 LLM / 用户友好的诊断 feedback：优先 LLM 解读完整 payload，失败
+        # 回落规则版。与 success 终态分开调用——即便诊断逻辑出 bug，也不影响
+        # run 落 success 终态。
         try:
-            feedback_text = _build_eval_feedback(structured)
+            feedback_text = _build_eval_feedback(
+                structured,
+                payload=payload,
+                hypothesis=getattr(factor, "hypothesis", "") or "",
+                factor_id=body["factor_id"],
+            )
             if feedback_text:
                 _set_status(run_id, feedback=feedback_text)
         except Exception:  # noqa: BLE001
