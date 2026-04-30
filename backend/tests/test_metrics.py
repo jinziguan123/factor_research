@@ -408,6 +408,75 @@ def test_set_status_writes_feedback_text(monkeypatch):
     assert vals[-1] == "RUN1"
 
 
+def test_build_eval_feedback_strong_factor():
+    """显著 IC + 高 IR + 正多空 Sharpe → 三条积极结论 + 可进入回测的建议。"""
+    from backend.services.eval_service import _build_eval_feedback
+
+    out = _build_eval_feedback({
+        "ic_mean": 0.06,
+        "ic_ir": 0.8,
+        "rank_ic_mean": 0.05,
+        "long_short_sharpe": 1.5,
+        "long_short_annret": 0.18,
+        "turnover_mean": 0.3,
+    })
+    assert "IC 显著" in out
+    assert "IC_IR" in out
+    assert "多空 Sharpe" in out
+    # 不应误报负向多空 / 高换手
+    assert "多空 Sharpe={:.2f} 为负".format(1.5) not in out
+    assert "换手" not in out  # 0.3 ≤ 0.5 不触发警告
+
+
+def test_build_eval_feedback_weak_factor_with_negative_long_short():
+    """弱 IC + 反向多空 → 给出负方向警告 + 反号建议。"""
+    from backend.services.eval_service import _build_eval_feedback
+
+    out = _build_eval_feedback({
+        "ic_mean": 0.005,
+        "ic_ir": 0.1,
+        "rank_ic_mean": 0.005,
+        "long_short_sharpe": -0.5,
+        "long_short_annret": -0.05,
+        "turnover_mean": 0.2,
+    })
+    assert "IC 偏弱" in out
+    assert "IC_IR" in out and "偏低" in out
+    assert "试将因子取负号" in out
+
+
+def test_build_eval_feedback_high_turnover_warning():
+    """换手 > 0.5 时给出成本警告。"""
+    from backend.services.eval_service import _build_eval_feedback
+
+    out = _build_eval_feedback({
+        "ic_mean": 0.04,
+        "ic_ir": 0.5,
+        "rank_ic_mean": 0.04,
+        "long_short_sharpe": 0.8,
+        "long_short_annret": 0.10,
+        "turnover_mean": 0.7,
+    })
+    assert "换手 70" in out or "换手" in out
+    assert "实盘成本" in out
+
+
+def test_build_eval_feedback_all_nan_returns_actionable_message():
+    """所有指标 NaN（warmup 不足等）→ 返回包含原因 + 建议的字符串。"""
+    from backend.services.eval_service import _build_eval_feedback
+
+    out = _build_eval_feedback({
+        "ic_mean": float("nan"),
+        "ic_ir": float("nan"),
+        "rank_ic_mean": None,
+        "long_short_sharpe": float("nan"),
+        "long_short_annret": None,
+        "turnover_mean": None,
+    })
+    assert "未产生有效因子值" in out
+    assert "required_warmup" in out
+
+
 def test_set_status_omits_feedback_when_not_passed(monkeypatch):
     """不传 feedback → SQL 里不应包含 feedback_text 子句（避免无意义写空）。"""
     from unittest.mock import MagicMock

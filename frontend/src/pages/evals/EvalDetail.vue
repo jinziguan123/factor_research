@@ -196,6 +196,17 @@ const rankIcMeanDiverged = computed(() =>
         {{ evalRun.error_message || '未知错误' }}
       </n-alert>
 
+      <!-- L1.2 借鉴 RD-Agent 反馈三元组：service 写的诊断 + 改进建议（success/failed 都可能写） -->
+      <n-alert
+        v-if="evalRun?.feedback_text"
+        type="default"
+        title="📋 评估诊断"
+        :show-icon="false"
+        style="margin-bottom: 16px; white-space: pre-wrap; line-height: 1.7"
+      >
+        {{ evalRun.feedback_text }}
+      </n-alert>
+
       <!-- 任务基本信息 -->
       <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" style="margin-bottom: 24px">
         <n-descriptions-item label="因子">{{ evalRun.factor_id }}</n-descriptions-item>

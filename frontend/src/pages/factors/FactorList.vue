@@ -19,6 +19,7 @@ import {
 import { useFactors, useCreateFactor } from '@/api/factors'
 import type { Factor } from '@/api/factors'
 import { useGenerateFactor, type GenerateFactorOut } from '@/api/factor_assistant'
+import { usePools } from '@/api/pools'
 import PyCodeEditor from '@/components/forms/PyCodeEditor.vue'
 
 // 单张截图允许的原始字节上限（压缩后 / 选择后）。base64 膨胀 ~1.37x 后
@@ -59,8 +60,14 @@ const aiResult = ref<GenerateFactorOut | null>(null)
 // 上传的参考截图。NUpload 维护完整 UploadFileInfo 列表（渲染用），
 // 提交时再把每个 file 读成 base64 data URI；不预先读，避免用户频繁增删重复读。
 const aiFileList = ref<UploadFileInfo[]>([])
+// L1.1：可选自动评估池——给定时生成因子后立即派发 60 天 IC 评估。
+const aiAutoEvalPoolId = ref<number | null>(null)
 
 const { mutateAsync: generateFactor, isPending: aiPending } = useGenerateFactor()
+const { data: pools } = usePools()
+const aiPoolOptions = computed(() =>
+  (pools.value ?? []).map((p: any) => ({ label: p.pool_name, value: p.pool_id })),
+)
 
 function openAIModal() {
   aiDescription.value = ''
@@ -185,6 +192,7 @@ async function submitAI() {
       description: desc,
       hints: aiHints.value.trim() || null,
       images,
+      auto_eval_pool_id: aiAutoEvalPoolId.value,
     })
     aiResult.value = out
     message.success(`生成成功：${out.display_name}`)
@@ -386,6 +394,21 @@ async function submitTemplate() {
             />
           </n-form-item>
 
+          <n-form-item label="自动评估池（可选）">
+            <n-select
+              v-model:value="aiAutoEvalPoolId"
+              :options="aiPoolOptions"
+              placeholder="选定后会立即派发 60 天 IC 评估"
+              clearable
+              filterable
+              :disabled="aiPending"
+              style="width: 320px"
+            />
+            <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+              用 60 天 / forward_periods=[1,5] / n_groups=5 跑一次轻量评估
+            </span>
+          </n-form-item>
+
           <n-form-item label="参考截图（可选，最多 4 张）">
             <div style="width: 100%">
               <n-upload
@@ -424,6 +447,21 @@ async function submitTemplate() {
           <span style="color: #848E9C; font-size: 12px">
             热加载开启时，几秒内会自动出现在因子列表里；否则需手动在因子详情页点刷新。
           </span>
+        </n-alert>
+
+        <!-- L1.1：auto-eval 已派发时给一个跳转入口 -->
+        <n-alert
+          v-if="aiResult.auto_eval_run_id"
+          type="info"
+          :show-icon="false"
+          style="margin-bottom: 12px"
+        >
+          📊 自动 IC 评估已派发到后台（run_id
+          <code>{{ aiResult.auto_eval_run_id.slice(0, 8) }}</code>），
+          <a
+            style="cursor: pointer; color: #5AC8FA"
+            @click="router.push(`/evals/${aiResult.auto_eval_run_id}`)"
+          >点击查看进度</a>。
         </n-alert>
 
         <n-form>

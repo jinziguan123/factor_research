@@ -23,6 +23,11 @@ export interface GenerateFactorIn {
    * 让用户用 K 线截图辅助 vision 模型理解因子意图；后端同步使用、不落盘、用完即抛。
    */
   images?: string[] | null
+  /**
+   * 可选：给定 pool_id 时生成因子后自动派发一次 60 天 IC 评估（auto-eval）。
+   * 留空跳过；后端响应 auto_eval_run_id 给前端跳详情页。
+   */
+  auto_eval_pool_id?: number | null
 }
 
 export interface GenerateFactorOut {
@@ -35,6 +40,8 @@ export interface GenerateFactorOut {
   default_params: Record<string, any>
   code: string
   saved_path: string
+  /** 若 auto_eval_pool_id 传入且派发成功，返回评估 run_id；否则 null。 */
+  auto_eval_run_id?: string | null
 }
 
 /** 调 /api/factor_assistant/translate，生成并落盘一个新的 LLM 因子。 */

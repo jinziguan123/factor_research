@@ -36,6 +36,9 @@ export interface EvalRun {
   created_at: string
   finished_at?: string
   error_message?: string
+  /** L1.2 借鉴 RD-Agent 反馈三元组：跑完后 service 写入的"诊断 + 改进建议"
+   *  文本（与 error_message 互补；success / failed 都可能写）。 */
+  feedback_text?: string | null
   metrics?: EvalMetrics | null
 }
 

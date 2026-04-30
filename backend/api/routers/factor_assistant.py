@@ -11,20 +11,36 @@
 - 文件已存在 → 409 （用户层可操作：换 factor_id 或删旧文件）
 - 其它：走全局 500 handler
 
+【L1.1 自动评估】（借鉴 RD-Agent 的 Validation Agent）：
+当 ``auto_eval_pool_id`` 给定时，生成因子后自动派发一个轻量评估
+（最近 60 个交易日 + 沿用因子 default_params + n_groups=5），返回
+``auto_eval_run_id``。前端展示"📊 自动评估进行中"链接，用户可点
+进 EvalDetail 看 IC / 健康度。eval_service 跑完会把诊断写到
+fr_factor_eval_runs.feedback_text。
+
 Phase 0 不做：
 - 不触发 FactorRegistry 重扫——留给热加载 watchdog / 前端 reload 按钮；
 - 不返回 SSE 进度——单次调用 ≤ 60s，前端 loading spinner 足够。
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+import json
+import uuid
+from datetime import date, datetime, timedelta
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from backend.api.schemas import ok
+from backend.runtime.entries import eval_entry
+from backend.runtime.factor_registry import FactorRegistry
+from backend.runtime.task_pool import submit
 from backend.services.factor_assistant import (
     FactorAssistantError,
     translate_and_save,
 )
+from backend.services.params_hash import params_hash
+from backend.storage.mysql_client import mysql_conn
 
 router = APIRouter(prefix="/api/factor_assistant", tags=["factor_assistant"])
 
@@ -50,6 +66,10 @@ class TranslateIn(BaseModel):
     images: list[str] | None = Field(
         default=None,
         description="可选 data URI 列表，最多 4 张，每张 ≤ 2MB",
+    )
+    auto_eval_pool_id: int | None = Field(
+        default=None,
+        description="可选；给定 pool_id 时生成因子后自动派发一个轻量 IC 评估（60 天窗口）",
     )
 
     @model_validator(mode="after")
@@ -89,19 +109,98 @@ def _map_error_to_status(err: FactorAssistantError) -> int:
     return 400
 
 
+def _dispatch_auto_eval(
+    factor_id: str, pool_id: int, default_params: dict, bt: BackgroundTasks,
+) -> str | None:
+    """生成因子后派发一个轻量评估；返回 ``run_id``，失败时返回 None。
+
+    评估配置（L1.1 minimal）：
+    - 时间窗口：最近 60 个自然日（不严格交易日，让 service 层去对齐）
+    - 参数：用因子 default_params（不让用户挑参，先看默认值好不好）
+    - forward_periods=[1, 5]、n_groups=5（典型量化默认）
+
+    与正常 ``POST /api/evals`` 的差别：
+    - 不要求用户给完整时间区间 + forward_periods 等参数；
+    - 失败不抛 HTTP 错——auto-eval 只是"附加福利"，主流程已成功。
+    """
+    try:
+        reg = FactorRegistry()
+        reg.scan_and_register()
+        version = reg.latest_version_from_db(factor_id)
+        end_date = date.today()
+        start_date = end_date - timedelta(days=60)
+        forward_periods = [1, 5]
+        n_groups = 5
+        run_id = uuid.uuid4().hex
+        phash = params_hash(default_params)
+
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO fr_factor_eval_runs
+                    (run_id, factor_id, factor_version, params_hash, params_json,
+                     pool_id, freq, start_date, end_date, forward_periods, n_groups,
+                     split_date, status, progress, created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
+                    """,
+                    (
+                        run_id, factor_id, version, phash,
+                        json.dumps(default_params, ensure_ascii=False),
+                        pool_id, "1d", start_date, end_date,
+                        ",".join(str(x) for x in forward_periods), n_groups,
+                        None,  # split_date
+                        datetime.now(),
+                    ),
+                )
+            c.commit()
+
+        # 派发到 ProcessPool（与 POST /api/evals 同构）；body 用 dict 形式传
+        body = {
+            "factor_id": factor_id,
+            "params": default_params,
+            "pool_id": pool_id,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "freq": "1d",
+            "forward_periods": forward_periods,
+            "n_groups": n_groups,
+            "split_date": None,
+        }
+        bt.add_task(submit, eval_entry, run_id, body)
+        return run_id
+    except Exception:
+        # auto-eval 不应阻塞主流程；DB 不通 / pool 不存在等问题降级为"不派发"
+        import logging
+        logging.getLogger(__name__).exception(
+            "auto-eval dispatch failed for factor_id=%s pool_id=%s",
+            factor_id, pool_id,
+        )
+        return None
+
+
 @router.post("/translate")
-def translate(body: TranslateIn) -> dict:
+def translate(body: TranslateIn, bt: BackgroundTasks) -> dict:
     """把自然语言描述翻译成 BaseFactor 子类源码并落盘。
 
     成功返回 ``{code:0, data:{factor_id, display_name, category, description,
-    default_params, code, saved_path}}``——``code`` 字段供前端展示，``saved_path``
-    让用户知道文件落在哪里；下次 FactorRegistry 扫描（热加载 / 手动刷新）就会自动
-    注册该因子，不需要重启服务。
+    default_params, code, saved_path, auto_eval_run_id?}}``——``code`` 字段供
+    前端展示，``saved_path`` 让用户知道文件落在哪里；下次 FactorRegistry 扫描
+    （热加载 / 手动刷新）就会自动注册该因子，不需要重启服务。
+
+    若 ``auto_eval_pool_id`` 给定，会同步派发一次 60 天 IC 评估，``auto_eval_run_id``
+    供前端跳转 EvalDetail 查看进度。
     """
     try:
         gen = translate_and_save(body.description, body.hints, body.images)
     except FactorAssistantError as e:
         raise HTTPException(status_code=_map_error_to_status(e), detail=str(e))
+
+    auto_eval_run_id: str | None = None
+    if body.auto_eval_pool_id is not None:
+        auto_eval_run_id = _dispatch_auto_eval(
+            gen.factor_id, body.auto_eval_pool_id, gen.default_params, bt,
+        )
 
     return ok(
         {
@@ -113,5 +212,6 @@ def translate(body: TranslateIn) -> dict:
             "default_params": gen.default_params,
             "code": gen.code,
             "saved_path": gen.saved_path,
+            "auto_eval_run_id": auto_eval_run_id,
         }
     )

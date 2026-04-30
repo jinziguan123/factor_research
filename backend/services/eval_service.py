@@ -99,6 +99,109 @@ def _set_status(
         c.commit()
 
 
+def _build_eval_feedback(structured: dict) -> str:
+    """根据评估结构化指标拼一段 LLM / 用户友好的"诊断 + 改进建议"文本。
+
+    用于 fr_factor_eval_runs.feedback_text，作为 RD-Agent 借鉴的反馈三元组
+    实现。判定阈值是经验值（比 backtest_service._build_health 的红黄绿略宽
+    松）：
+    - |IC| < 0.02：信号弱
+    - 0.02 ≤ |IC| < 0.05：信号一般
+    - |IC| ≥ 0.05：信号显著
+    - IC_IR < 0.3：方向不稳；≥ 0.5：稳健
+    - long_short_sharpe < 0：分组单调性破坏（多空反向）
+    - long_short_sharpe ≥ 1.0：多空可用
+
+    Args:
+        structured: ``evaluate_factor_panel`` 返回的扁平指标 dict。
+
+    Returns:
+        多行诊断文本；若指标全 NaN（极端边角）返回空串，调用方会跳过写库。
+    """
+    ic_mean = structured.get("ic_mean")
+    ic_ir = structured.get("ic_ir")
+    rank_ic_mean = structured.get("rank_ic_mean")
+    long_short_sharpe = structured.get("long_short_sharpe")
+    long_short_annret = structured.get("long_short_annret")
+    turnover_mean = structured.get("turnover_mean")
+
+    # 全 NaN：因子在评估窗口内完全没产生有效输出（如 warmup 不足）
+    if all(
+        v is None or (isinstance(v, float) and not math.isfinite(v))
+        for v in (ic_mean, ic_ir, rank_ic_mean, long_short_sharpe)
+    ):
+        return (
+            "评估窗口内未产生有效因子值，所有指标都缺失。"
+            "可能原因：required_warmup 不足 / 因子 compute 返回空 / 对齐失败。"
+            "建议核对 required_warmup 与窗口长度，或换更长的评估区间。"
+        )
+
+    lines: list[str] = []
+    # IC 强度
+    if ic_mean is not None and isinstance(ic_mean, (int, float)) and math.isfinite(ic_mean):
+        abs_ic = abs(ic_mean)
+        if abs_ic < 0.02:
+            lines.append(
+                f"📉 IC 偏弱（mean={ic_mean:.4f}）——预测力不显著；"
+                "建议换公式 / 换变量族（量价 / 资金流 / 基本面交叉）。"
+            )
+        elif abs_ic < 0.05:
+            lines.append(
+                f"📊 IC 一般（mean={ic_mean:.4f}）——边际可用，可在多因子合成里"
+                "搭配其它因子放大；单独使用胜率有限。"
+            )
+        else:
+            lines.append(
+                f"✅ IC 显著（mean={ic_mean:.4f}）——预测力较强，建议进入"
+                "回测 / 多因子合成阶段。"
+            )
+
+    # IC 方向稳定性
+    if ic_ir is not None and isinstance(ic_ir, (int, float)) and math.isfinite(ic_ir):
+        abs_ir = abs(ic_ir)
+        if abs_ir < 0.3:
+            lines.append(
+                f"⚠️ IC_IR={ic_ir:.3f} 偏低，IC 方向不稳定；样本外可能反转。"
+            )
+        elif abs_ir >= 0.5:
+            lines.append(f"✅ IC_IR={ic_ir:.3f} 稳健。")
+
+    # 多空 Sharpe
+    if (
+        long_short_sharpe is not None
+        and isinstance(long_short_sharpe, (int, float))
+        and math.isfinite(long_short_sharpe)
+    ):
+        if long_short_sharpe < 0:
+            lines.append(
+                f"❌ 多空 Sharpe={long_short_sharpe:.2f} 为负——分组单调性破坏，"
+                "可能 IC 方向假设与实际相反；试将因子取负号。"
+            )
+        elif long_short_sharpe >= 1.0:
+            ann_pct = (
+                f"{long_short_annret*100:.1f}%"
+                if long_short_annret is not None and math.isfinite(long_short_annret)
+                else "NA"
+            )
+            lines.append(
+                f"✅ 多空 Sharpe={long_short_sharpe:.2f}（年化 {ann_pct}），实战可用。"
+            )
+
+    # 换手率（信息量）
+    if (
+        turnover_mean is not None
+        and isinstance(turnover_mean, (int, float))
+        and math.isfinite(turnover_mean)
+    ):
+        if turnover_mean > 0.5:
+            lines.append(
+                f"💸 换手 {turnover_mean:.1%} 偏高，实盘成本会蚕食 alpha；"
+                "考虑 EMA 平滑或拉长 forward periods。"
+            )
+
+    return "\n".join(lines) if lines else ""
+
+
 def _nan_to_none(x: Any) -> Any:
     """把 NaN / inf / -inf 转 None，以便 MySQL 存 NULL + ``json.dumps`` 不崩。"""
     if x is None:
@@ -644,6 +747,15 @@ def run_eval(run_id: str, body: dict) -> None:
                     ),
                 )
             c.commit()
+
+        # 写 LLM / 用户友好的诊断 feedback（基于 structured 指标），与 success
+        # 终态分开调用——即便诊断逻辑出 bug，也不影响 run 落 success 终态。
+        try:
+            feedback_text = _build_eval_feedback(structured)
+            if feedback_text:
+                _set_status(run_id, feedback=feedback_text)
+        except Exception:  # noqa: BLE001
+            log.exception("生成 feedback 失败 run_id=%s（不影响主流程）", run_id)
 
         _set_status(run_id, status="success", progress=100, finished=True)
     except AbortedError as exc:
