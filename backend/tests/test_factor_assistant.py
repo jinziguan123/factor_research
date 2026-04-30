@@ -539,9 +539,10 @@ def test_evolve_factor_renames_factor_id_to_root_evo_n(tmp_path, monkeypatch):
     monkeypatch.setattr(fa, "_read_eval_context", lambda _r: {})
 
     # LLM 给个故意"错"的 factor_id 看看会不会被改写
+    # **kw 兼容 evolve 路径传的 reasoning_effort kwarg
     monkeypatch.setattr(
         fa, "_call_openai_compatible",
-        lambda msgs: _good_evolve_response(factor_id="totally_wrong_name"),
+        lambda msgs, **kw: _good_evolve_response(factor_id="totally_wrong_name"),
     )
 
     gen = fa.evolve_factor(
@@ -574,7 +575,7 @@ def test_evolve_factor_includes_eval_feedback_in_prompt(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def _capture(msgs):
+    def _capture(msgs, **_kw):  # **_kw 兼容 evolve 路径的 reasoning_effort
         captured["msgs"] = msgs
         return _good_evolve_response()
 
@@ -611,7 +612,7 @@ def test_evolve_factor_propagates_loop_failure(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         fa, "_call_openai_compatible",
-        lambda msgs: _good_evolve_response(factor_id="x").replace(
+        lambda msgs, **_kw: _good_evolve_response(factor_id="x").replace(
             json.dumps(_GOOD_CODE), json.dumps(bad_code),
         ),
     )

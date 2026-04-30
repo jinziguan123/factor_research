@@ -300,7 +300,31 @@ def _post_and_validate(url: str, payload: dict) -> dict:
         ) from last_exc
 
     if resp.status_code >= 400:
-        logger.warning("LLM returned %d: %s", resp.status_code, resp.text[:500])
+        # 失败时把请求 body 元数据也打出来——便于诊断"为什么 evolve 502 但
+        # translate 不会"这种"内容差异导致中转拒绝"的问题。不打全 body 防泄漏
+        # API key 之类敏感字段；只打大小 + 角色 + 各 message 的字符数。
+        try:
+            body_summary = {
+                "url": url,
+                "model": payload.get("model"),
+                "input_size_chars": len(json.dumps(payload, ensure_ascii=False)),
+                "messages_breakdown": [
+                    {
+                        "role": m.get("role"),
+                        "content_len": len(m.get("content") or "")
+                        if isinstance(m.get("content"), str)
+                        else f"list({len(m.get('content', []))})",
+                    }
+                    for m in (payload.get("input") or payload.get("messages") or [])
+                    if isinstance(m, dict)
+                ],
+            }
+        except Exception:  # noqa: BLE001
+            body_summary = {"url": url, "summary_failed": True}
+        logger.warning(
+            "LLM returned %d: response_body[:500]=%r; request_summary=%s",
+            resp.status_code, resp.text[:500], body_summary,
+        )
         raise FactorAssistantError(
             f"LLM 返回错误状态 {resp.status_code}；详情请看后端日志"
         )
@@ -365,12 +389,19 @@ def _call_chat_completions(messages: list[dict]) -> str:
         ) from e
 
 
-def _call_responses(messages: list[dict]) -> str:
+def _call_responses(
+    messages: list[dict], reasoning_effort: str = "medium",
+) -> str:
     """新协议 ``POST /v1/responses`` —— gpt-5/o1/o3 等 reasoning 模型专用。
 
     请求里 ``input`` 允许直接复用 Chat Completions 的 ``[{role, content: str}]`` 结构
     （中转 / 官方都支持字符串 content）；返回的 ``output[]`` 里会有 reasoning 节点和
     message 节点，只提 message 的 output_text 文本。
+
+    Args:
+        reasoning_effort: ``"low"`` / ``"medium"`` / ``"high"``——reasoning 模型
+            的思考预算。``"medium"`` 是默认；evolve 等"基于现有代码改写"的任务
+            建议用 ``"low"``，避免模型过度思考导致中转方网关超时（502）。
     """
     url = settings.openai_base_url.rstrip("/") + "/responses"
     payload: dict = {
@@ -378,9 +409,9 @@ def _call_responses(messages: list[dict]) -> str:
         # messages 复用 chat 的结构；role 允许 system/user/assistant/developer。
         "input": messages,
         "stream": False,
-        # 默认 "high" 会把输出预算全烧在隐藏思考里，导致 output[] 空——
-        # "medium" 给可见回答留预算；简单任务也够用。
-        "reasoning": {"effort": "medium"},
+        # "high" 会把输出预算全烧在隐藏思考里导致 output[] 空；"medium" 是
+        # translate 默认；"low" 用于 evolve 等改写任务（思考时间敏感）。
+        "reasoning": {"effort": reasoning_effort},
     }
     # Responses API 的 JSON mode 在 ``text.format`` 下；reasoning 模型这条一般也不支持。
     if settings.openai_response_format_json:
@@ -413,10 +444,15 @@ def _call_responses(messages: list[dict]) -> str:
     )
 
 
-def _call_openai_compatible(messages: list[dict]) -> str:
+def _call_openai_compatible(
+    messages: list[dict], reasoning_effort: str = "medium",
+) -> str:
     """按 ``OPENAI_API_PROTOCOL`` 分发到老 Chat Completions 或新 Responses API。
 
     测试里会 monkeypatch 这个函数替换成桩，所以这一层只做协议分发，不做其它逻辑。
+
+    ``reasoning_effort`` 仅在 ``responses`` 协议下生效；``chat_completions``
+    协议会忽略（chat 接口没这个参数）。
     """
     if not settings.openai_api_key:
         raise FactorAssistantError(
@@ -425,7 +461,7 @@ def _call_openai_compatible(messages: list[dict]) -> str:
 
     proto = (settings.openai_api_protocol or "chat_completions").lower()
     if proto == "responses":
-        return _call_responses(messages)
+        return _call_responses(messages, reasoning_effort=reasoning_effort)
     if proto == "chat_completions":
         return _call_chat_completions(messages)
     raise FactorAssistantError(
@@ -822,7 +858,10 @@ def evolve_factor(
         (extra_hint or "")[:80],
     )
 
-    payload = _run_translate_loop(messages)
+    # evolve 用 low effort：reasoning 模型在"读懂代码 + 改写"任务上 medium 思考
+    # 时间常超 60s，触发中转方网关 502（codeflow.asia 等 Cloudflare 反代）。
+    # low 思考预算更小但完全够 evolve 任务（有父代代码当模板，不是"从零写"）。
+    payload = _run_translate_loop(messages, reasoning_effort="low")
     # 强制 factor_id：LLM 偶尔不听话给重名/不规范名字；后处理改写避免冲突
     payload["factor_id"] = new_factor_id
     payload["code"] = _force_factor_id(payload["code"], new_factor_id)
@@ -930,11 +969,17 @@ def _build_evolve_user_prompt(
     # 模块级常量。LLM 改写不需要看那些；prompt 体积能从 10-30KB 压到 3-8KB。
     trimmed_src = _extract_class_body(parent_source_code)
 
+    # 不要用 ```python ... ``` markdown fence——某些 LLM 中转（codeflow.asia /
+    # 部分 Cloudflare 反代）对"含代码块的请求"会立即 RST 502，怀疑是上游内容
+    # 审核 / 反 prompt-injection 规则。改用"---begin/end---"明文标记，依然清晰
+    # 可读，且不触发上述拦截。
     return (
         f"【父代因子】 {parent_factor_id}\n"
         f"【父代研究假设】 {parent_hypothesis or '（未填）'}\n\n"
         f"【父代源码（仅类内部，imports 和 file docstring 已裁剪）】\n"
-        f"```python\n{trimmed_src}\n```\n\n"
+        f"---begin parent class source---\n"
+        f"{trimmed_src}\n"
+        f"---end parent class source---\n\n"
         f"【父代评估指标】\n{metrics_block}\n\n"
         f"【父代评估诊断 / 反馈】\n{fb}\n\n"
         f"【用户的额外指令】\n{extra}\n\n"
@@ -1131,7 +1176,9 @@ def _build_retry_user_message(err: "FactorAssistantError") -> str:
 
 
 def _run_translate_loop(
-    messages: list[dict], max_retries: int | None = None,
+    messages: list[dict],
+    max_retries: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """LLM 调用 + JSON 解析 + payload 校验 + AST 校验，包失败自修循环。
 
@@ -1158,7 +1205,14 @@ def _run_translate_loop(
         # UnboundLocalError；显式置 None 先兜住。
         raw: str | None = None
         try:
-            raw = _call_openai_compatible(messages)
+            # reasoning_effort=None 时不传 kwarg，保持与旧的 mock 签名向后兼容
+            # （测试里 monkeypatch 的 lambda 多半只接收 messages 一个参数）
+            if reasoning_effort is None:
+                raw = _call_openai_compatible(messages)
+            else:
+                raw = _call_openai_compatible(
+                    messages, reasoning_effort=reasoning_effort,
+                )
             obj = _parse_llm_json(raw)
             payload = _validate_llm_payload(obj)
             _validate_code_ast(payload["code"])
