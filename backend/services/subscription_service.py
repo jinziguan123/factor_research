@@ -97,7 +97,9 @@ def compute_config_hash(body: dict) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def create_subscription(body: dict) -> tuple[str, bool]:
+def create_subscription(
+    body: dict, *, seed_run_id: str | None = None,
+) -> tuple[str, bool]:
     """创建订阅；跨实例去重。
 
     流程：
@@ -111,6 +113,21 @@ def create_subscription(body: dict) -> tuple[str, bool]:
 
     锁拿不到（5s 超时）走兜底：直接尝试 find_matching → 没有就 INSERT。
     极端竞态下可能产生 1 份重复（罕见，可接受）。
+
+    Args:
+        body: 订阅配置 dict。
+        seed_run_id: 可选；前端从某条 run 详情页"开启实盘监控"时传入。
+            非空时 INSERT 订阅会预填 ``last_run_id=seed_run_id`` +
+            ``last_refresh_at=NOW()``，并反向把那条 run 的 ``subscription_id``
+            指向新订阅。这样：
+            - worker 主循环不会因 ``last_refresh_at IS NULL`` 立刻判定 due
+              而再 INSERT 一条重复 run（**修复"开启实盘监控会自动新建一条
+              一模一样的信号"的关键**）；
+            - 后续刷新走"复用 run_id" 路径，订阅与种子 run 一一对应；
+            - 列表 LEFT JOIN 能拿到该 run 的订阅 is_active 状态。
+
+            订阅已存在被复用（reused=True）时本参数不生效，避免覆盖原订阅
+            的 last_run_id 链。
 
     Returns:
         ``(subscription_id, reused)``：reused=True 表示返回的是已有订阅。
@@ -140,8 +157,9 @@ def create_subscription(body: dict) -> tuple[str, bool]:
                     (subscription_id, factor_items_json, method, pool_id, n_groups,
                      ic_lookback_days, filter_price_limit, top_n,
                      refresh_interval_sec, is_active,
+                     last_refresh_at, last_run_id,
                      created_at, updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,%s)
                     """,
                     (
                         subscription_id,
@@ -153,10 +171,20 @@ def create_subscription(body: dict) -> tuple[str, bool]:
                         1 if body.get("filter_price_limit", True) else 0,
                         body.get("top_n"),
                         int(body.get("refresh_interval_sec", 300)),
+                        now if seed_run_id else None,
+                        seed_run_id,
                         now,
                         now,
                     ),
                 )
+                # 反向把 seed run 的 subscription_id 指向新订阅，让后续
+                # GET /signals 列表 LEFT JOIN 拿到订阅 is_active 状态展示。
+                if seed_run_id:
+                    cur.execute(
+                        "UPDATE fr_signal_runs SET subscription_id=%s "
+                        "WHERE run_id=%s AND subscription_id IS NULL",
+                        (subscription_id, seed_run_id),
+                    )
             c.commit()
         return subscription_id, False
 

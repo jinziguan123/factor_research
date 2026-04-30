@@ -92,30 +92,39 @@ def list_signals(
     as_of_date: str | None = None,
     limit: int = 50,
 ) -> dict:
-    """列表：只返结构化 + 轻量元数据，payload 留给详情页。"""
+    """列表：只返结构化 + 轻量元数据，payload 留给详情页。
+
+    LEFT JOIN fr_signal_subscriptions：把订阅状态（is_active）一并取回，
+    前端"实时"列据此区分 监控中 / 已暂停 / 一次性快照——和 use_realtime
+    （"该次 run 用了什么数据"）的语义解耦。
+    """
     limit = max(1, min(int(limit), 500))
     sql = (
-        "SELECT run_id, factor_items_json, method, pool_id, n_groups, "
-        "ic_lookback_days, as_of_time, as_of_date, use_realtime, "
-        "filter_price_limit, top_n, status, progress, error_message, "
-        "n_holdings_top, n_holdings_bot, "
-        "created_at, started_at, finished_at "
-        "FROM fr_signal_runs WHERE 1=1"
+        "SELECT r.run_id, r.factor_items_json, r.method, r.pool_id, r.n_groups, "
+        "r.ic_lookback_days, r.as_of_time, r.as_of_date, r.use_realtime, "
+        "r.filter_price_limit, r.top_n, r.status, r.progress, r.error_message, "
+        "r.n_holdings_top, r.n_holdings_bot, "
+        "r.created_at, r.started_at, r.finished_at, "
+        "r.subscription_id, s.is_active AS subscription_active "
+        "FROM fr_signal_runs r "
+        "LEFT JOIN fr_signal_subscriptions s "
+        "ON r.subscription_id = s.subscription_id "
+        "WHERE 1=1"
     )
     params: list = []
     if pool_id is not None:
-        sql += " AND pool_id=%s"
+        sql += " AND r.pool_id=%s"
         params.append(pool_id)
     if method:
-        sql += " AND method=%s"
+        sql += " AND r.method=%s"
         params.append(method)
     if status:
-        sql += " AND status=%s"
+        sql += " AND r.status=%s"
         params.append(status)
     if as_of_date:
-        sql += " AND as_of_date=%s"
+        sql += " AND r.as_of_date=%s"
         params.append(as_of_date)
-    sql += " ORDER BY created_at DESC, run_id DESC LIMIT %s"
+    sql += " ORDER BY r.created_at DESC, r.run_id DESC LIMIT %s"
     params.append(limit)
 
     with mysql_conn() as c:

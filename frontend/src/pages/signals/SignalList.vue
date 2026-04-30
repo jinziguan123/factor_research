@@ -164,15 +164,35 @@ const columns: DataTableColumns<SignalRun> = [
     },
   },
   {
+    // 列展示语义：把"该次 run 用了什么数据"(use_realtime) 与"订阅是否在持续
+    // 监控" (subscription_active) 解耦——之前两者混在一起导致用户关闭实盘
+    // 监控开关后列表仍显示"🔴 实盘"。优先展示订阅状态：
+    //   subscription_active=1 → 🔴 监控中（worker 仍在周期性刷新这条 run）
+    //   subscription_active=0 → ⏸ 已暂停（订阅在但被关掉了）
+    //   无订阅 + use_realtime=1 → 🔵 实时快照（一次性手动触发，未挂订阅）
+    //   否则 → —
     title: '实时',
     key: 'use_realtime',
-    width: 80,
-    render: (row) =>
-      row.use_realtime
-        ? h(NTag, { size: 'small', type: 'error', bordered: false }, {
-            default: () => '🔴 实盘',
-          })
-        : h('span', { style: 'color: #999' }, '—'),
+    width: 110,
+    render: (row) => {
+      const subActive = row.subscription_active
+      if (subActive === 1) {
+        return h(NTag, { size: 'small', type: 'error', bordered: false }, {
+          default: () => '🔴 监控中',
+        })
+      }
+      if (subActive === 0) {
+        return h(NTag, { size: 'small', type: 'warning', bordered: false }, {
+          default: () => '⏸ 已暂停',
+        })
+      }
+      if (row.use_realtime) {
+        return h(NTag, { size: 'small', type: 'info', bordered: false }, {
+          default: () => '🔵 实时快照',
+        })
+      }
+      return h('span', { style: 'color: #999' }, '—')
+    },
   },
   {
     title: 'Top',

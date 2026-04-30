@@ -55,6 +55,10 @@ export interface SignalRun {
   created_at: string
   started_at?: string
   finished_at?: string
+  /** 订阅关联：非 null 表示该 run 由某订阅创建 / 绑定。 */
+  subscription_id?: string | null
+  /** 订阅当前 is_active；0=已暂停，1=活跃中，null=该 run 不属于任何订阅。 */
+  subscription_active?: 0 | 1 | null
 }
 
 /** 创建信号任务 */
