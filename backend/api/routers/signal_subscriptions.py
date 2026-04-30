@@ -55,7 +55,12 @@ def create_subscription(
 
     # create_subscription 内部已用 MySQL advisory lock 串行化跨实例的相同配置
     # 创建（防止两台设备同时 POST 产生重复），并用 find_matching_active 复用。
-    sub_id, reused = subscription_service.create_subscription(body_dict)
+    # seed_run_id：把 from_run_id 透传，订阅落库时绑定 last_run_id + 更新 run
+    # 的 subscription_id，避免 worker 首次 tick 因 last_refresh_at=NULL 重复
+    # 新建一条同配置的 run（"开启实盘监控自动多出一条信号"的根因修复）。
+    sub_id, reused = subscription_service.create_subscription(
+        body_dict, seed_run_id=from_run_id,
+    )
     return ok({
         "subscription_id": sub_id,
         "is_active": True,
