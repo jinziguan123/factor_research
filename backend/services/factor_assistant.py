@@ -31,6 +31,7 @@ from pathlib import Path
 import httpx
 
 from backend.config import settings
+from backend.storage.mysql_client import mysql_conn
 
 logger = logging.getLogger(__name__)
 
