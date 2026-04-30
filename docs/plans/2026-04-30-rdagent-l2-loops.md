@@ -101,3 +101,88 @@
 - 前端 vue-tsc 通过
 - 路径上的旧测试 0 回归
 - 分支 push，对应 commit message 标 `[L2.A/B/C]`
+
+---
+
+## Task 4: L2.D 因子进化 + 血缘 + SOTA 选择（~1.5 天）
+
+**用户校准**：原 L2.B"代码自修 retry"是隐式安全网，跟用户真实需求"研究层面进化"
+不是一回事。L2.B 保留作为底层，新加 L2.D 显式因子进化 + 血缘可视化 + SOTA。
+
+### 关键概念
+
+- **进化（evolve）**：用户读完 v_n 的评估反馈后，点按钮让 LLM 基于
+  (原代码 + hypothesis + metrics + feedback + 用户额外指令) 生成 v_{n+1}
+- **血缘**：parent_factor_id 形成链；root_factor_id 是同链最早祖先（用于"同链
+  SOTA 唯一"和族谱查询）
+- **SOTA**：同链下用户标记一个最优因子；进一步进化默认从 SOTA 出发
+
+### Schema（migration 015）
+
+```sql
+ALTER TABLE fr_factor_meta
+  ADD COLUMN parent_factor_id   varchar(64) DEFAULT NULL,
+  ADD COLUMN parent_eval_run_id varchar(64) DEFAULT NULL,
+  ADD COLUMN generation         tinyint NOT NULL DEFAULT 1,
+  ADD COLUMN is_sota            tinyint NOT NULL DEFAULT 0,
+  ADD COLUMN root_factor_id     varchar(64) DEFAULT NULL,
+  ADD INDEX idx_root (root_factor_id),
+  ADD INDEX idx_parent (parent_factor_id);
+```
+
+- root_factor_id NULL = 自己就是根（v1 / 手写因子 / negate 出来的因子）
+- 同 root 下 is_sota=1 至多一个（应用层保证，不加 unique 约束让它柔性）
+
+### 后端（Files & Steps）
+
+**Files:**
+- Modify: `backend/services/factor_assistant.py`（加 `evolve_factor`）
+- Modify: `backend/runtime/factor_registry.py`（持久化 + list 暴露新字段）
+- Modify: `backend/api/routers/factor_assistant.py`（加 `POST /evolve`）
+- Modify: `backend/api/routers/factors.py`（加 `PUT /sota` + `GET /lineage`）
+- New: `backend/scripts/migrations/015_factor_meta_evolve_lineage.sql`
+- Test: `backend/tests/test_factor_assistant.py` / `test_factor_registry.py`
+
+**evolve_factor 流程**：
+1. 拿 parent factor 源码 + hypothesis；若给了 parent_eval_run_id，再读它的
+   structured + payload + feedback_text
+2. 决定 new factor_id = `<root>_evo<next_generation>`（root 用 parent.root 或
+   parent 自己）
+3. 构造 system prompt（保持核心思路、调整细节）+ user prompt（携带上述上下文 +
+   extra_hint）
+4. 复用现有 `_call_openai_compatible` + 反馈循环 + AST 校验链路
+5. 落盘 + 写 fr_factor_meta 时填 parent / root / generation
+6. 可选派发 auto-eval
+
+**SOTA 切换**：
+- `PUT /api/factors/{factor_id}/sota` body `{is_sota: bool}`
+- True 时把同 root 其它行 is_sota=0；False 直接清当前
+
+**lineage 查询**：
+- `GET /api/factors/{factor_id}/lineage` 返回 `{ancestors: [...], descendants: [...], same_root_sota: factor_id?}`
+- ancestors 沿 parent_factor_id 上溯到根；descendants 用 SQL `WHERE parent_factor_id = ?` 一层（MVP）
+
+### 前端
+
+**EvalDetail（success 状态）**：
+- "🧬 进化下一代"按钮 + dialog（额外指令文本框 + auto_eval_pool 下拉）
+- 触发后跳到新 factor 的 EvalDetail（auto-eval 派发后的 run_id）
+
+**FactorDetail**：
+- 族谱区块（n-descriptions）：父代链接 / 子代列表 / generation / SOTA 状态切换按钮（⭐）
+- 朴素列表渲染，不上 react-flow（YAGNI）
+
+**FactorList**：
+- 因子卡片标题旁加 ⭐ 徽章（is_sota=1 时显示）
+
+### Tests
+
+- evolve_factor mock LLM 返回新 payload，验证 parent / root / generation 写入
+- SOTA 切换：同 root 唯一性
+- lineage 查询返回正确 ancestors / descendants
+
+### 不做的事
+
+- 不上 react-flow / 树状图（FactorDetail 内文本列表足够）
+- 不做"基于 SOTA 自动选下一代探索方向"——bandit / 智能调度仍是 L3
+- 不强制 same-root SOTA unique 约束（应用层切换时 reset 旧 SOTA 即可）

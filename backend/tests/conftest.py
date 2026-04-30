@@ -106,6 +106,32 @@ def _ensure_pending_migrations() -> None:
             "ALTER TABLE fr_factor_eval_runs ADD COLUMN feedback_text TEXT "
             "DEFAULT NULL AFTER error_message",
         ),
+        # L2.D 因子进化 / 血缘 / SOTA：5 列分别检测，避免一项已存在导致整段抛错
+        (
+            "fr_factor_meta", "parent_factor_id",
+            "ALTER TABLE fr_factor_meta ADD COLUMN parent_factor_id "
+            "varchar(64) DEFAULT NULL",
+        ),
+        (
+            "fr_factor_meta", "parent_eval_run_id",
+            "ALTER TABLE fr_factor_meta ADD COLUMN parent_eval_run_id "
+            "varchar(64) DEFAULT NULL",
+        ),
+        (
+            "fr_factor_meta", "generation",
+            "ALTER TABLE fr_factor_meta ADD COLUMN generation "
+            "tinyint NOT NULL DEFAULT 1",
+        ),
+        (
+            "fr_factor_meta", "is_sota",
+            "ALTER TABLE fr_factor_meta ADD COLUMN is_sota "
+            "tinyint NOT NULL DEFAULT 0",
+        ),
+        (
+            "fr_factor_meta", "root_factor_id",
+            "ALTER TABLE fr_factor_meta ADD COLUMN root_factor_id "
+            "varchar(64) DEFAULT NULL",
+        ),
     ]
     try:
         with mysql_conn() as c:

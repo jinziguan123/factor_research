@@ -37,6 +37,7 @@ from backend.api.schemas import ok
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import reset_pool
 from backend.services import factor_assistant as fa
+from backend.storage.mysql_client import mysql_conn
 
 logger = logging.getLogger(__name__)
 
@@ -411,3 +412,115 @@ def reload_factors() -> dict:
     updated = reg.scan_and_register()
     reset_pool()
     return ok({"updated": updated})
+
+
+# ---------------------------- L2.D SOTA / Lineage ----------------------------
+
+
+class SotaIn(BaseModel):
+    is_sota: bool
+
+
+@router.put("/{factor_id}/sota")
+def set_sota(factor_id: str, body: SotaIn) -> dict:
+    """切换 SOTA 标记；同 root_factor_id 下唯一（应用层保证）。
+
+    设 True 时：先把同 root（含自己）所有 is_sota 清零，再把当前置 1。
+    设 False 时：仅把当前置 0。
+    """
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT root_factor_id FROM fr_factor_meta WHERE factor_id=%s",
+                (factor_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="factor not found")
+            root = row.get("root_factor_id") or factor_id
+
+            if body.is_sota:
+                # 同 root 全部清零（包括自己）；root 字段为 NULL 的就用 factor_id
+                cur.execute(
+                    "UPDATE fr_factor_meta SET is_sota=0 "
+                    "WHERE root_factor_id=%s OR factor_id=%s",
+                    (root, root),
+                )
+                cur.execute(
+                    "UPDATE fr_factor_meta SET is_sota=1 WHERE factor_id=%s",
+                    (factor_id,),
+                )
+            else:
+                cur.execute(
+                    "UPDATE fr_factor_meta SET is_sota=0 WHERE factor_id=%s",
+                    (factor_id,),
+                )
+        c.commit()
+    return ok({"factor_id": factor_id, "is_sota": int(body.is_sota)})
+
+
+@router.get("/{factor_id}/lineage")
+def get_lineage(factor_id: str) -> dict:
+    """返回因子族谱：祖先链 + 直接子代列表 + 同 root 的 SOTA。
+
+    祖先链：沿 parent_factor_id 上溯到根（最多 20 层防环）；
+    子代列表：``WHERE parent_factor_id = factor_id`` 一层；
+    same_root_sota：同 root 下 is_sota=1 的 factor_id（最多一个）。
+    """
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT factor_id, display_name, parent_factor_id, "
+                "generation, is_sota, root_factor_id "
+                "FROM fr_factor_meta WHERE factor_id=%s",
+                (factor_id,),
+            )
+            self_row = cur.fetchone()
+            if not self_row:
+                raise HTTPException(status_code=404, detail="factor not found")
+            root = self_row.get("root_factor_id") or factor_id
+
+            ancestors: list[dict] = []
+            cursor_id = self_row.get("parent_factor_id")
+            for _ in range(20):
+                if not cursor_id:
+                    break
+                cur.execute(
+                    "SELECT factor_id, display_name, generation, is_sota "
+                    "FROM fr_factor_meta WHERE factor_id=%s",
+                    (cursor_id,),
+                )
+                p = cur.fetchone()
+                if not p:
+                    break
+                ancestors.append(p)
+                cur.execute(
+                    "SELECT parent_factor_id FROM fr_factor_meta WHERE factor_id=%s",
+                    (cursor_id,),
+                )
+                pp = cur.fetchone()
+                cursor_id = pp.get("parent_factor_id") if pp else None
+
+            cur.execute(
+                "SELECT factor_id, display_name, generation, is_sota "
+                "FROM fr_factor_meta WHERE parent_factor_id=%s "
+                "ORDER BY generation, factor_id",
+                (factor_id,),
+            )
+            descendants = cur.fetchall() or []
+
+            cur.execute(
+                "SELECT factor_id FROM fr_factor_meta "
+                "WHERE (root_factor_id=%s OR factor_id=%s) AND is_sota=1 "
+                "LIMIT 1",
+                (root, root),
+            )
+            sota_row = cur.fetchone()
+    return ok({
+        "factor_id": factor_id,
+        "self": self_row,
+        "ancestors": ancestors,
+        "descendants": descendants,
+        "same_root_sota": sota_row.get("factor_id") if sota_row else None,
+        "root_factor_id": root,
+    })

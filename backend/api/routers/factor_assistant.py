@@ -37,6 +37,7 @@ from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import submit
 from backend.services.factor_assistant import (
     FactorAssistantError,
+    evolve_factor as _evolve_factor_service,
     negate_factor_save,
     translate_and_save,
 )
@@ -284,6 +285,111 @@ def negate(body: NegateIn, bt: BackgroundTasks) -> dict:
             "default_params": gen.default_params,
             "code": gen.code,
             "saved_path": gen.saved_path,
+            "auto_eval_run_id": auto_eval_run_id,
+        }
+    )
+
+
+# ---------------------------- L2.D 因子进化 ----------------------------
+
+
+class EvolveIn(BaseModel):
+    """``POST /api/factor_assistant/evolve`` 请求体。"""
+
+    parent_factor_id: str = Field(..., min_length=3, max_length=64)
+    parent_eval_run_id: str | None = Field(
+        default=None,
+        description="可选；指定基于哪条评估反馈进化（路由会读 feedback_text + 关键指标）",
+    )
+    extra_hint: str | None = Field(
+        default=None, max_length=500,
+        description="可选；用户额外指令，如'想要更短窗口'",
+    )
+    auto_eval_pool_id: int | None = Field(
+        default=None,
+        description="可选；给定时新因子立刻派发 60 天 IC 评估",
+    )
+
+
+@router.post("/evolve")
+def evolve(body: EvolveIn, bt: BackgroundTasks) -> dict:
+    """L2.D 因子进化：基于 parent + 评估反馈生成下一代。"""
+    import inspect
+
+    from backend.services.factor_assistant import (
+        _read_factor_meta_for_evolve,
+        _update_lineage as _update_lineage_fn,
+    )
+
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    try:
+        inst = reg.get(body.parent_factor_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"parent_factor_id={body.parent_factor_id} 未注册",
+        )
+
+    src_file = inspect.getsourcefile(inst.__class__)
+    if not src_file:
+        raise HTTPException(
+            status_code=500, detail=f"无法定位 {body.parent_factor_id} 的源文件",
+        )
+    try:
+        with open(src_file, encoding="utf-8") as f:
+            parent_src = f.read()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"读取父代源码失败：{e}") from e
+
+    try:
+        gen = _evolve_factor_service(
+            parent_factor_id=body.parent_factor_id,
+            parent_source_code=parent_src,
+            parent_eval_run_id=body.parent_eval_run_id,
+            extra_hint=body.extra_hint,
+        )
+    except FactorAssistantError as e:
+        raise HTTPException(
+            status_code=_map_error_to_status(e), detail=str(e),
+        ) from e
+
+    # 让新因子写进 fr_factor_meta（默认 generation=1 / parent=NULL）
+    reg.scan_and_register()
+
+    # 计算 root + generation：从 parent meta 沿用
+    parent_meta = _read_factor_meta_for_evolve(body.parent_factor_id)
+    new_generation = parent_meta["generation"] + 1
+    new_root = parent_meta["root_factor_id"]
+
+    _update_lineage_fn(
+        factor_id=gen.factor_id,
+        parent_factor_id=body.parent_factor_id,
+        parent_eval_run_id=body.parent_eval_run_id,
+        generation=new_generation,
+        root_factor_id=new_root,
+    )
+
+    auto_eval_run_id: str | None = None
+    if body.auto_eval_pool_id is not None:
+        auto_eval_run_id = _dispatch_auto_eval(
+            gen.factor_id, body.auto_eval_pool_id, gen.default_params, bt,
+        )
+
+    return ok(
+        {
+            "factor_id": gen.factor_id,
+            "display_name": gen.display_name,
+            "category": gen.category,
+            "description": gen.description,
+            "hypothesis": gen.hypothesis,
+            "default_params": gen.default_params,
+            "code": gen.code,
+            "saved_path": gen.saved_path,
+            "parent_factor_id": body.parent_factor_id,
+            "parent_eval_run_id": body.parent_eval_run_id,
+            "generation": new_generation,
+            "root_factor_id": new_root,
             "auto_eval_run_id": auto_eval_run_id,
         }
     )

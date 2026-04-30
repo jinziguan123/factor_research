@@ -31,8 +31,16 @@ CREATE TABLE IF NOT EXISTS `fr_factor_meta` (
   `code_hash`       char(40) NOT NULL,
   `version`         int unsigned NOT NULL DEFAULT 1,
   `is_active`       tinyint(1) NOT NULL DEFAULT 1,
+  -- L2.D 因子进化 / 血缘 / SOTA 选择
+  `parent_factor_id`   varchar(64) DEFAULT NULL,
+  `parent_eval_run_id` varchar(64) DEFAULT NULL,
+  `generation`         tinyint     NOT NULL DEFAULT 1,
+  `is_sota`            tinyint     NOT NULL DEFAULT 0,
+  `root_factor_id`     varchar(64) DEFAULT NULL,
   `updated_at`      datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`factor_id`)
+  PRIMARY KEY (`factor_id`),
+  KEY `idx_root` (`root_factor_id`),
+  KEY `idx_parent` (`parent_factor_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- 【新增】因子评估任务（run 级元数据 + 状态机）

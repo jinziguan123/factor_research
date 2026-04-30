@@ -132,7 +132,13 @@ class FactorRegistry:
         return cls()
 
     def list(self) -> list[dict[str, Any]]:
-        """列出所有已注册因子的结构化元数据（供前端 / API 展示）。"""
+        """列出所有已注册因子的结构化元数据（供前端 / API 展示）。
+
+        L2.D 借鉴 RD-Agent SOTA / lineage：每条额外带 ``is_sota`` / ``generation`` /
+        ``parent_factor_id`` / ``root_factor_id``——这些字段不来自 BaseFactor 类属性
+        （进程内缓存里没有），通过单次 ``fr_factor_meta`` SELECT enrich 进结果。
+        DB 不通时降级为默认值（0/1/None），不阻塞主路径。
+        """
         with self._lock:
             out: list[dict[str, Any]] = []
             for factor_id, cls in self._classes.items():
@@ -150,9 +156,40 @@ class FactorRegistry:
                         ),
                         "version": self._version.get(factor_id, 1),
                         "code_hash": self._code_hash.get(factor_id, ""),
+                        # L2.D 默认值——下面 enrich 时覆盖
+                        "parent_factor_id": None,
+                        "parent_eval_run_id": None,
+                        "generation": 1,
+                        "is_sota": 0,
+                        "root_factor_id": None,
                     }
                 )
-            return out
+
+        # L2.D enrich：单次 SELECT 拿所有因子的 lineage 字段
+        try:
+            lineage_map: dict[str, dict] = {}
+            with mysql_conn() as c:
+                with c.cursor() as cur:
+                    cur.execute(
+                        "SELECT factor_id, parent_factor_id, parent_eval_run_id, "
+                        "generation, is_sota, root_factor_id "
+                        "FROM fr_factor_meta WHERE is_active=1"
+                    )
+                    for row in cur.fetchall() or []:
+                        lineage_map[row["factor_id"]] = row
+            for item in out:
+                m = lineage_map.get(item["factor_id"])
+                if m:
+                    item["parent_factor_id"] = m.get("parent_factor_id")
+                    item["parent_eval_run_id"] = m.get("parent_eval_run_id")
+                    item["generation"] = int(m.get("generation") or 1)
+                    item["is_sota"] = int(m.get("is_sota") or 0)
+                    item["root_factor_id"] = m.get("root_factor_id")
+        except Exception:  # noqa: BLE001
+            # DB 不通 / 列不存在（migration 没跑）→ 降级用默认值，不阻断 list
+            logger.exception("list lineage enrich failed; 默认值兜底")
+
+        return out
 
     def current_version(self, factor_id: str) -> int:
         """返回 factor_id 当前的 **进程内缓存 version**（未注册则抛 KeyError）。

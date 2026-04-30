@@ -604,6 +604,289 @@ def _validate_code_ast(code: str) -> None:
 # ---------------------------- 落盘 ----------------------------
 
 
+# ---------------------------- 因子进化 (L2.D) ----------------------------
+
+
+_EVOLVE_SYSTEM_PROMPT = """\
+你是一位严谨的量化研究员。我会给你一个**已有因子的源码 + 研究假设 + 评估反馈**，
+请基于反馈生成**改进后的下一代版本**。
+
+【硬性约束】
+- 输出格式与翻译任务一致（严格 JSON，字段 factor_id / display_name / category /
+  description / hypothesis / default_params / code）
+- factor_id 字段你**先填一个语义化的 snake_case 名字**——后端会强制重命名为
+  `<root_factor_id>_evo<generation>`，所以你随便填别犯重就行
+- code 中 BaseFactor 子类必须带与 JSON 一致的 hypothesis 类属性
+- 只允许从 `__future__`, `pandas`, `numpy`, `math`, `typing`,
+  `backend.factors.base` 导入；其它一概不允许（exec/eval/open/import os/...）
+- 不打印、不写盘、不联网
+
+【进化原则】
+- **保留原因子的核心思路**——不要换主题（如反转 → 动量），只调细节
+- 看反馈再动：评估说"换手率高"就考虑加 EMA 平滑；说"IC 衰减快"就缩 forward 期
+- 改 hypothesis 反映你做了什么改动："基于 v_prev 反馈，现在加了 ... 以期解决 ..."
+- 改 description / display_name 让人一眼看懂这是 v_prev 的优化版
+- params_schema 可保留同名字段，default_params 可挪默认值
+
+【输出格式】
+严格 JSON（不要 Markdown 代码块包裹、不要解释文字）：
+{"factor_id": "...", "display_name": "...", "category": "...", "description": "...",
+ "hypothesis": "...", "default_params": {...}, "code": "..."}
+"""
+
+
+def _read_factor_meta_for_evolve(parent_factor_id: str) -> dict:
+    """读 ``fr_factor_meta`` 拿 parent 的 generation / root / hypothesis。
+
+    Raises:
+        FactorAssistantError: parent 不存在或表里没记录。
+    """
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT factor_id, hypothesis, generation, root_factor_id "
+                "FROM fr_factor_meta WHERE factor_id=%s",
+                (parent_factor_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise FactorAssistantError(
+            f"父代因子 {parent_factor_id!r} 在 fr_factor_meta 中不存在"
+        )
+    return {
+        "factor_id": row["factor_id"],
+        "hypothesis": row.get("hypothesis") or "",
+        "generation": int(row.get("generation") or 1),
+        "root_factor_id": row.get("root_factor_id") or row["factor_id"],
+    }
+
+
+def _read_eval_context(eval_run_id: str) -> dict:
+    """读取一条评估的 feedback + 关键指标，作为 evolve prompt 的上下文。
+
+    缺失字段（feedback_text 没写 / metrics 行不存在）用默认值；不抛错——
+    evolve 仍可在缺乏评估上下文时跑，只是 LLM 看不到反馈。
+    """
+    out: dict[str, Any] = {
+        "feedback_text": "", "ic_mean": None, "ic_ir": None,
+        "long_short_sharpe": None, "long_short_annret": None,
+        "turnover_mean": None,
+    }
+    try:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT feedback_text, status FROM fr_factor_eval_runs "
+                    "WHERE run_id=%s",
+                    (eval_run_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    out["feedback_text"] = row.get("feedback_text") or ""
+                cur.execute(
+                    "SELECT ic_mean, ic_ir, long_short_sharpe, "
+                    "long_short_annret, turnover_mean "
+                    "FROM fr_factor_eval_metrics WHERE run_id=%s",
+                    (eval_run_id,),
+                )
+                m = cur.fetchone()
+                if m:
+                    for k in (
+                        "ic_mean", "ic_ir", "long_short_sharpe",
+                        "long_short_annret", "turnover_mean",
+                    ):
+                        out[k] = m.get(k)
+    except Exception:  # noqa: BLE001
+        logger.warning("读 eval_run_id=%s 上下文失败，用空兜底", eval_run_id)
+    return out
+
+
+def _force_factor_id(code: str, new_factor_id: str) -> str:
+    """AST 改写：把代码中 BaseFactor 子类的 ``factor_id`` 类属性强制改成 ``new_factor_id``。
+
+    复用 negate_factor_source 的找类思路，仅改 factor_id 一项；不改 class
+    name（让 LLM 自己取的语义类名留着，避免 unparse 后类名变得难看）。
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        raise FactorAssistantError(f"代码语法错误，无法改写 factor_id：{e}") from e
+    target_cls: ast.ClassDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                base_name = (
+                    base.id if isinstance(base, ast.Name)
+                    else (base.attr if isinstance(base, ast.Attribute) else None)
+                )
+                if base_name == "BaseFactor":
+                    target_cls = node
+                    break
+            if target_cls is not None:
+                break
+    if target_cls is None:
+        raise FactorAssistantError("找不到 BaseFactor 子类，无法改写 factor_id")
+    found = False
+    for stmt in target_cls.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "factor_id"
+        ):
+            stmt.value = ast.Constant(value=new_factor_id)
+            found = True
+            break
+    if not found:
+        raise FactorAssistantError("BaseFactor 子类内未找到 factor_id 类属性")
+    ast.fix_missing_locations(tree)
+    new_code = ast.unparse(tree)
+    return new_code if new_code.endswith("\n") else new_code + "\n"
+
+
+def _update_lineage(
+    factor_id: str, *,
+    parent_factor_id: str,
+    parent_eval_run_id: str | None,
+    generation: int,
+    root_factor_id: str,
+) -> None:
+    """``scan_and_register`` 写完 fr_factor_meta（parent/g=1/root=NULL 默认）后，
+    调本函数把 evolve 的血缘字段补上。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "UPDATE fr_factor_meta "
+                "SET parent_factor_id=%s, parent_eval_run_id=%s, "
+                "    generation=%s, root_factor_id=%s "
+                "WHERE factor_id=%s",
+                (
+                    parent_factor_id, parent_eval_run_id, generation,
+                    root_factor_id, factor_id,
+                ),
+            )
+        c.commit()
+
+
+def evolve_factor(
+    parent_factor_id: str,
+    parent_source_code: str,
+    parent_eval_run_id: str | None = None,
+    extra_hint: str | None = None,
+) -> "GeneratedFactor":
+    """L2.D：基于 parent 因子 + 评估反馈 + 用户额外指令，让 LLM 生成下一代。
+
+    流程：
+    1. 读 parent meta 拿 generation / root_factor_id / hypothesis
+    2. 读 parent eval（若给）拿 feedback_text + 关键指标
+    3. 算 new_factor_id = ``<root>_evo<generation+1>``
+    4. 构造 evolve messages → 走 ``_run_translate_loop`` 复用 retry / AST
+    5. 强制改写 LLM 输出代码里的 factor_id 为 new_factor_id（防止 LLM 不听）
+    6. 落盘到 ``backend/factors/llm_generated/``
+    7. 调用方负责后续 ``scan_and_register`` + ``_update_lineage`` + auto-eval
+       （路由层做这些 side-effect）
+
+    Args:
+        parent_factor_id: 父代 factor_id（必须已注册）
+        parent_source_code: 父代 .py 源码（路由层用 inspect 拿好传进来——保持
+            service 层不依赖 FactorRegistry，便于单测）
+        parent_eval_run_id: 可选，给定时把那次评估的 feedback / 指标灌进 prompt
+        extra_hint: 用户额外指令（如"想要更短窗口"）
+
+    Returns:
+        GeneratedFactor，含 saved_path；调用方可立即派发 auto-eval。
+    """
+    parent_meta = _read_factor_meta_for_evolve(parent_factor_id)
+    new_generation = parent_meta["generation"] + 1
+    root = parent_meta["root_factor_id"]
+    new_factor_id = f"{root}_evo{new_generation}"
+
+    eval_ctx = _read_eval_context(parent_eval_run_id) if parent_eval_run_id else {}
+
+    user_msg = _build_evolve_user_prompt(
+        parent_factor_id=parent_factor_id,
+        parent_source_code=parent_source_code,
+        parent_hypothesis=parent_meta["hypothesis"],
+        new_factor_id=new_factor_id,
+        eval_ctx=eval_ctx,
+        extra_hint=extra_hint,
+    )
+    messages = [
+        {"role": "system", "content": _EVOLVE_SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ]
+    logger.info(
+        "factor_assistant: evolve parent=%s new_factor_id=%s eval=%s hint=%s",
+        parent_factor_id, new_factor_id, parent_eval_run_id,
+        (extra_hint or "")[:80],
+    )
+
+    payload = _run_translate_loop(messages)
+    # 强制 factor_id：LLM 偶尔不听话给重名/不规范名字；后处理改写避免冲突
+    payload["factor_id"] = new_factor_id
+    payload["code"] = _force_factor_id(payload["code"], new_factor_id)
+    # AST 二次校验（改写后再确认安全）
+    _validate_code_ast(payload["code"])
+
+    saved = _save_factor_file(new_factor_id, payload["code"])
+    logger.info(
+        "factor_assistant: evolved factor saved id=%s path=%s gen=%d root=%s",
+        new_factor_id, saved, new_generation, root,
+    )
+    return GeneratedFactor(
+        factor_id=new_factor_id,
+        display_name=payload["display_name"],
+        category=payload["category"],
+        description=payload["description"],
+        hypothesis=payload["hypothesis"],
+        default_params=payload["default_params"],
+        code=payload["code"],
+        saved_path=str(saved),
+    )
+
+
+def _build_evolve_user_prompt(
+    *,
+    parent_factor_id: str,
+    parent_source_code: str,
+    parent_hypothesis: str,
+    new_factor_id: str,
+    eval_ctx: dict,
+    extra_hint: str | None,
+) -> str:
+    """组装 evolve 的 user message。"""
+    fb = (eval_ctx.get("feedback_text") or "").strip() or "（暂无评估反馈）"
+    metrics_lines: list[str] = []
+    if eval_ctx.get("ic_mean") is not None:
+        metrics_lines.append(f"- IC mean = {eval_ctx['ic_mean']:.4f}")
+    if eval_ctx.get("ic_ir") is not None:
+        metrics_lines.append(f"- IC_IR    = {eval_ctx['ic_ir']:.3f}")
+    if eval_ctx.get("long_short_sharpe") is not None:
+        metrics_lines.append(
+            f"- 多空 Sharpe = {eval_ctx['long_short_sharpe']:.2f}"
+        )
+    if eval_ctx.get("long_short_annret") is not None:
+        metrics_lines.append(
+            f"- 多空年化 = {eval_ctx['long_short_annret']*100:.2f}%"
+        )
+    if eval_ctx.get("turnover_mean") is not None:
+        metrics_lines.append(
+            f"- 换手率 = {eval_ctx['turnover_mean']:.1%}"
+        )
+    metrics_block = "\n".join(metrics_lines) if metrics_lines else "（无指标）"
+    extra = (extra_hint or "").strip() or "（用户没填额外指令——你完全基于反馈和指标来改）"
+
+    return (
+        f"【父代因子】 {parent_factor_id}\n"
+        f"【父代研究假设】 {parent_hypothesis or '（未填）'}\n\n"
+        f"【父代源码】\n```python\n{parent_source_code}\n```\n\n"
+        f"【父代评估指标】\n{metrics_block}\n\n"
+        f"【父代评估诊断 / 反馈】\n{fb}\n\n"
+        f"【用户的额外指令】\n{extra}\n\n"
+        f"请生成下一代版本（factor_id 字段后端会改写成 {new_factor_id}，你任填）。"
+    )
+
+
 # ---------------------------- 反向因子 (L2.A) ----------------------------
 
 
@@ -789,6 +1072,57 @@ def _build_retry_user_message(err: "FactorAssistantError") -> str:
     )
 
 
+def _run_translate_loop(
+    messages: list[dict], max_retries: int | None = None,
+) -> dict:
+    """LLM 调用 + JSON 解析 + payload 校验 + AST 校验，包失败自修循环。
+
+    抽出来给 ``translate_and_save`` 与 L2.D ``evolve_factor`` 共用——两者只
+    区别在 ``messages`` 的 system / user 内容。
+
+    ``max_retries=None`` 时**动态读** ``_TRANSLATE_MAX_RETRIES`` 模块级变量
+    （而不是用默认参数绑定 import 时刻的值）——便于测试用 monkeypatch.setattr
+    修改默认重试次数。
+
+    成功返回 ``_validate_llm_payload`` 的标准化字段 dict（含 factor_id /
+    display_name / category / description / hypothesis / default_params / code）。
+    所有重试用尽抛 FactorAssistantError "反馈循环 N 轮仍失败"。
+
+    OPENAI_API_KEY / 网络层错误立刻向上抛（不重试）—— 它们是环境问题，
+    重试浪费 token / 增加中转怒气。
+    """
+    if max_retries is None:
+        max_retries = _TRANSLATE_MAX_RETRIES
+    last_err: FactorAssistantError | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            raw = _call_openai_compatible(messages)
+            obj = _parse_llm_json(raw)
+            payload = _validate_llm_payload(obj)
+            _validate_code_ast(payload["code"])
+            return payload
+        except FactorAssistantError as e:
+            last_err = e
+            if "OPENAI_API_KEY" in str(e) or "网络层" in str(e):
+                raise
+            if attempt < max_retries:
+                logger.warning(
+                    "translate 第 %d/%d 次失败，喂回 LLM 重试：%s",
+                    attempt + 1, max_retries + 1, e,
+                )
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                    "role": "user", "content": _build_retry_user_message(e),
+                })
+                continue
+            raise FactorAssistantError(
+                f"反馈循环 {max_retries + 1} 轮仍失败，最后一次错误：{e}"
+            ) from e
+    # 理论不可达
+    assert last_err is not None
+    raise last_err
+
+
 def translate_and_save(
     description: str,
     hints: str | None = None,
@@ -833,42 +1167,7 @@ def translate_and_save(
         protocol,
     )
 
-    last_err: FactorAssistantError | None = None
-    payload: dict = {}
-    for attempt in range(_TRANSLATE_MAX_RETRIES + 1):  # 0..N，共 N+1 次
-        try:
-            raw = _call_openai_compatible(messages)
-            obj = _parse_llm_json(raw)
-            payload = _validate_llm_payload(obj)
-            _validate_code_ast(payload["code"])
-            break  # 全过 → 退出循环
-        except FactorAssistantError as e:
-            last_err = e
-            # OpenAI key / 网络层错误属于环境问题，不应重试 LLM 调用
-            if "OPENAI_API_KEY" in str(e) or "网络层" in str(e):
-                raise
-            if attempt < _TRANSLATE_MAX_RETRIES:
-                logger.warning(
-                    "translate 第 %d/%d 次失败，喂回 LLM 重试：%s",
-                    attempt + 1, _TRANSLATE_MAX_RETRIES + 1, e,
-                )
-                # 把上一次 raw 当作 assistant 消息（即便 LLM 抛错前已经返回过文本）；
-                # 然后再追加一个 user 消息要求修正。注意 raw 在 _parse_llm_json /
-                # _validate_* 失败前已经赋过值；如果 _call_openai_compatible 自己
-                # 直接抛（网络层），上面那个分支已经 raise，到不了这里。
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user", "content": _build_retry_user_message(e),
-                })
-                continue
-            # 用尽重试 → 包一层错误措辞抛出
-            raise FactorAssistantError(
-                f"反馈循环 {_TRANSLATE_MAX_RETRIES + 1} 轮仍失败，最后一次错误：{e}"
-            ) from e
-    else:
-        # for-else：理论上 break 或 raise 已经覆盖；防御性
-        assert last_err is not None
-        raise last_err
+    payload = _run_translate_loop(messages)
 
     saved = _save_factor_file(payload["factor_id"], payload["code"])
     logger.info(
