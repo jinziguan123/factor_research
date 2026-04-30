@@ -37,6 +37,7 @@ from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import submit
 from backend.services.factor_assistant import (
     FactorAssistantError,
+    negate_factor_save,
     translate_and_save,
 )
 from backend.services.params_hash import params_hash
@@ -195,6 +196,77 @@ def translate(body: TranslateIn, bt: BackgroundTasks) -> dict:
         gen = translate_and_save(body.description, body.hints, body.images)
     except FactorAssistantError as e:
         raise HTTPException(status_code=_map_error_to_status(e), detail=str(e))
+
+    auto_eval_run_id: str | None = None
+    if body.auto_eval_pool_id is not None:
+        auto_eval_run_id = _dispatch_auto_eval(
+            gen.factor_id, body.auto_eval_pool_id, gen.default_params, bt,
+        )
+
+    return ok(
+        {
+            "factor_id": gen.factor_id,
+            "display_name": gen.display_name,
+            "category": gen.category,
+            "description": gen.description,
+            "hypothesis": gen.hypothesis,
+            "default_params": gen.default_params,
+            "code": gen.code,
+            "saved_path": gen.saved_path,
+            "auto_eval_run_id": auto_eval_run_id,
+        }
+    )
+
+
+class NegateIn(BaseModel):
+    """``POST /api/factor_assistant/negate`` 请求体。"""
+
+    factor_id: str = Field(..., min_length=3, max_length=48)
+    auto_eval_pool_id: int | None = Field(
+        default=None,
+        description="可选；给定时反向因子落盘后自动派发 60 天 IC 评估",
+    )
+
+
+@router.post("/negate")
+def negate(body: NegateIn, bt: BackgroundTasks) -> dict:
+    """L2.A 反向因子：对一个已存在因子做"取负"得到镜像版本。
+
+    用于评估诊断显示"多空 Sharpe 为负——试将因子取负号"时的"反向"按钮。
+    流程：
+    1. 用 FactorRegistry 找到原因子源码（必须可读）；
+    2. 调 ``negate_factor_save`` 做 AST 改写（factor_id 加 ``_neg``、类名带
+       ``Neg``、display_name 加"（取负）"、hypothesis 加"已取负"前缀、
+       compute 方法所有 return 包 USub）；
+    3. 落盘到 ``backend/factors/llm_generated/<orig>_neg.py``；
+    4. 若 ``auto_eval_pool_id`` 给定，立即派发一次 IC 评估。
+
+    错误：
+    - 原因子不存在 / 源码读不到 → 404
+    - 反转后文件已存在（重复点） → 409
+    - 反转后代码 AST 校验失败（罕见——原源码用了非白名单特性） → 400
+    """
+    import inspect
+
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    try:
+        inst = reg.get(body.factor_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"factor_id={body.factor_id} 未注册")
+
+    src_file = inspect.getsourcefile(inst.__class__)
+    if not src_file:
+        raise HTTPException(status_code=500, detail=f"无法定位 {body.factor_id} 的源文件")
+    try:
+        orig_code = open(src_file, encoding="utf-8").read()
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"读取原源码失败：{e}") from e
+
+    try:
+        gen = negate_factor_save(body.factor_id, orig_code)
+    except FactorAssistantError as e:
+        raise HTTPException(status_code=_map_error_to_status(e), detail=str(e)) from e
 
     auto_eval_run_id: str | None = None
     if body.auto_eval_pool_id is not None:

@@ -8,9 +8,10 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NGrid, NGridItem, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NEmpty, NAlert, NCard, NTag,
-  NTable,
+  NTable, useMessage,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
+import { useNegateFactor } from '@/api/factor_assistant'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 import ChartCard from '@/components/charts/ChartCard.vue'
@@ -27,9 +28,35 @@ const router = useRouter()
 
 const runId = computed(() => route.params.runId as string)
 const { data: evalRun, isLoading } = useEval(runId)
+const message = useMessage()
 
 // 池名映射：详情页把 pool_id 渲染成池名，查不到退化成 #<id>（软删池）。
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+// L2.A：诊断里出现"取负号"建议时，给一键反向按钮
+const negateMut = useNegateFactor()
+const showNegateAction = computed(() => {
+  const fb = evalRun.value?.feedback_text
+  return !!fb && (fb.includes('取负号') || fb.includes('试将因子取负'))
+})
+
+async function handleNegateFactor() {
+  if (!evalRun.value) return
+  try {
+    const res = await negateMut.mutateAsync({
+      factor_id: evalRun.value.factor_id,
+      auto_eval_pool_id: evalRun.value.pool_id,  // 沿用当前评估池跑反向版
+    })
+    message.success(`已生成反向因子 ${res.factor_id}，跳转查看`)
+    if (res.auto_eval_run_id) {
+      router.push(`/evals/${res.auto_eval_run_id}`)
+    } else {
+      router.push(`/factors/${res.factor_id}`)
+    }
+  } catch (e: any) {
+    message.error(e?.response?.data?.detail || e?.message || '反向因子生成失败')
+  }
+}
 
 // metrics 表整行嵌在 run["metrics"]，payload 又从 payload_json 解嵌到 metrics.payload
 const metrics = computed(() => evalRun.value?.metrics ?? null)
@@ -202,9 +229,24 @@ const rankIcMeanDiverged = computed(() =>
         type="default"
         title="📋 评估诊断"
         :show-icon="false"
-        style="margin-bottom: 16px; white-space: pre-wrap; line-height: 1.7"
+        style="margin-bottom: 16px; line-height: 1.7"
       >
-        {{ evalRun.feedback_text }}
+        <div style="white-space: pre-wrap">{{ evalRun.feedback_text }}</div>
+
+        <!-- L2.A：诊断里建议"取负号"时给一键反向按钮 -->
+        <div v-if="showNegateAction" style="margin-top: 12px">
+          <n-button
+            type="primary"
+            size="small"
+            :loading="negateMut.isPending.value"
+            @click="handleNegateFactor"
+          >
+            🔄 一键生成反向因子（{{ evalRun!.factor_id }}_neg）并自动评估
+          </n-button>
+          <span style="color: #848E9C; font-size: 12px; margin-left: 8px">
+            AST 改写、不调 LLM；新因子在同一池子立即跑 60 天 IC
+          </span>
+        </div>
       </n-alert>
 
       <!-- 任务基本信息 -->

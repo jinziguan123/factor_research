@@ -251,6 +251,113 @@ def test_save_factor_file_appends_newline(tmp_path, monkeypatch):
     assert p.read_text(encoding="utf-8").endswith("\n")
 
 
+# ---------------------------- negate_factor ----------------------------
+
+
+_SAMPLE_REVERSAL_SRC = '''\
+"""示例反转因子。"""
+from __future__ import annotations
+
+import pandas as pd
+
+from backend.factors.base import BaseFactor, FactorContext
+
+
+class ExampleReversal20(BaseFactor):
+    factor_id = "example_reversal_20"
+    display_name = "20日反转"
+    category = "reversal"
+    description = "过去 20 日累计收益率的负值。"
+    hypothesis = "短期反转假设——值越大未来 1 日收益越正。"
+    default_params = {"window": 20}
+    params_schema = {"window": {"type": "int", "default": 20, "min": 5, "max": 60}}
+    supported_freqs = ("1d",)
+
+    def required_warmup(self, params: dict) -> int:
+        return int(params.get("window", 20)) + 5
+
+    def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
+        window = int(params.get("window", 20))
+        close = ctx.data.load_panel(
+            ctx.symbols, ctx.start_date.date(), ctx.end_date.date(),
+            freq="1d", field="close", adjust="qfq",
+        )
+        if close.empty:
+            return pd.DataFrame()
+        return -close.pct_change(window).loc[ctx.start_date:]
+'''
+
+
+def test_negate_factor_renames_factor_id_and_class(tmp_path, monkeypatch):
+    """negate 后 factor_id / 类名带 _neg 后缀；原文件不动；新文件落盘。
+
+    断言不绑定 ast.unparse 的引号风格：只要"新 factor_id 字面量"出现即可。
+    """
+    target_dir = tmp_path / "llm_generated"
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    target_dir.mkdir(parents=True)
+
+    new_factor_id, new_code = fa.negate_factor_source(
+        "example_reversal_20", _SAMPLE_REVERSAL_SRC,
+    )
+    assert new_factor_id == "example_reversal_20_neg"
+    # ast.unparse 用单引号；不绑定具体引号风格，只断关键字符串
+    assert "example_reversal_20_neg" in new_code
+    # 类名也变
+    assert "class ExampleReversal20Neg(BaseFactor)" in new_code
+    # display_name 加"（取负）"标记
+    assert "（取负）" in new_code
+    # hypothesis 加方向反转说明
+    assert "已取负" in new_code or "方向反转" in new_code
+
+
+def test_negate_factor_wraps_compute_returns():
+    """compute 方法里所有 return 表达式被包了一层 USub；其它方法 return 不动。
+
+    ast.unparse 会把 ``UnaryOp(USub, X)`` 渲染成 ``-X``（去掉冗余括号），
+    所以"原本 ``return X``"变成 ``return -X``、"原本 ``return -X``"变成
+    ``return --X``（语义=X，正是反向因子的设计）。required_warmup 等其它
+    方法的 return 不在 compute 内不会被包。
+    """
+    _, new_code = fa.negate_factor_source(
+        "example_reversal_20", _SAMPLE_REVERSAL_SRC,
+    )
+    # 原本 `return pd.DataFrame()` 被包 → `return -pd.DataFrame()`
+    assert "return -pd.DataFrame()" in new_code
+    # 原本 `return -close.pct_change(...)` 被再次包 → `return --close.pct_change(...)`
+    assert "return --close.pct_change" in new_code
+    # required_warmup 的 `return int(params...) + 5` 不应被包（不在 compute 里）
+    assert "return int(params" in new_code  # 原样保留
+    assert "return -int(params" not in new_code
+
+
+def test_negate_factor_rejects_existing_target(tmp_path, monkeypatch):
+    """落盘时新文件已存在 → 抛 FactorAssistantError。"""
+    target_dir = tmp_path / "llm_generated"
+    target_dir.mkdir(parents=True)
+    (target_dir / "example_reversal_20_neg.py").write_text("# placeholder\n")
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+
+    with pytest.raises(FactorAssistantError, match="已存在"):
+        fa.negate_factor_save("example_reversal_20", _SAMPLE_REVERSAL_SRC)
+
+
+def test_negate_factor_save_writes_file(tmp_path, monkeypatch):
+    """end-to-end：保存到 _LLM_FACTORS_DIR 并返回 GeneratedFactor。"""
+    target_dir = tmp_path / "llm_generated"
+    target_dir.mkdir(parents=True)
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+
+    gen = fa.negate_factor_save("example_reversal_20", _SAMPLE_REVERSAL_SRC)
+    assert gen.factor_id == "example_reversal_20_neg"
+    saved = target_dir / "example_reversal_20_neg.py"
+    assert saved.exists()
+    content = saved.read_text()
+    assert "example_reversal_20_neg" in content
+    # 落盘的代码必须能通过 AST 校验（保证可 import）
+    fa._validate_code_ast(content)
+
+
 # ---------------------------- translate_and_save (mock LLM) ----------------------------
 
 

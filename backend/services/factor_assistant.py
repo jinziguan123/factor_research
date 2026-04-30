@@ -604,6 +604,153 @@ def _validate_code_ast(code: str) -> None:
 # ---------------------------- 落盘 ----------------------------
 
 
+# ---------------------------- 反向因子 (L2.A) ----------------------------
+
+
+def _wrap_class_name(name: str) -> str:
+    """``ExampleReversal20`` → ``ExampleReversal20Neg``（保留 PascalCase 风格）。"""
+    return name + "Neg"
+
+
+def negate_factor_source(orig_factor_id: str, orig_code: str) -> tuple[str, str]:
+    """对一个因子源码做"全方向反转"——仅做 AST 改写，不调 LLM。
+
+    应用场景：评估诊断显示"多空 Sharpe 为负——试将因子取负号"时，用户点
+    "反向"按钮，本函数生成镜像版本因子源码（factor_id 加 ``_neg`` 后缀）。
+
+    改写策略：
+    1. 找 ``BaseFactor`` 子类（源码里只允许有一个）。改类名为 ``<Orig>Neg``；
+    2. 改 ``factor_id`` 类属性为 ``<orig>_neg``；
+    3. 改 ``display_name`` 加"（取负）"后缀；
+    4. 改 ``hypothesis`` 类属性，前面加"【已取负，方向反转】"标识；
+    5. 找 ``compute`` 方法的所有 ``Return`` 节点，把 ``return X`` 改成
+       ``return -(X)``（pandas DataFrame / Series 都支持一元负号；空 DF 取负
+       仍是空 DF，行为无副作用）。required_warmup 等其它方法的 return 不动。
+
+    Returns:
+        ``(new_factor_id, new_code)`` —— new_factor_id 形如 ``orig_neg``；
+        new_code 已带末尾换行，可直接落盘。
+    """
+    new_factor_id = f"{orig_factor_id}_neg"
+    if not _FACTOR_ID_RE.match(new_factor_id):
+        raise FactorAssistantError(
+            f"反转后的 factor_id={new_factor_id!r} 长度超限或非法字符"
+        )
+
+    try:
+        tree = ast.parse(orig_code)
+    except SyntaxError as e:
+        raise FactorAssistantError(f"原因子源码语法错误：{e}") from e
+
+    # 找到 BaseFactor 子类（继承 BaseFactor / 直接的）
+    target_cls: ast.ClassDef | None = None
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                base_name = (
+                    base.id if isinstance(base, ast.Name)
+                    else (base.attr if isinstance(base, ast.Attribute) else None)
+                )
+                if base_name == "BaseFactor":
+                    target_cls = node
+                    break
+            if target_cls is not None:
+                break
+    if target_cls is None:
+        raise FactorAssistantError(
+            "原因子源码里找不到 BaseFactor 子类，无法反转"
+        )
+
+    # 改类名
+    target_cls.name = _wrap_class_name(target_cls.name)
+
+    # 改 factor_id / display_name / hypothesis 三个类属性 + 包 compute 的 return
+    for stmt in target_cls.body:
+        # 类属性赋值（factor_id / display_name / hypothesis）
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            tgt = stmt.targets[0]
+            if isinstance(tgt, ast.Name) and isinstance(stmt.value, ast.Constant):
+                if tgt.id == "factor_id":
+                    stmt.value = ast.Constant(value=new_factor_id)
+                elif tgt.id == "display_name":
+                    stmt.value = ast.Constant(
+                        value=str(stmt.value.value) + "（取负）"
+                    )
+                elif tgt.id == "hypothesis":
+                    stmt.value = ast.Constant(
+                        value="【已取负，方向反转】"
+                        + str(stmt.value.value or "")
+                    )
+
+        # compute 方法：包所有 return 表达式
+        if isinstance(stmt, ast.FunctionDef) and stmt.name == "compute":
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Return) and sub.value is not None:
+                    sub.value = ast.UnaryOp(op=ast.USub(), operand=sub.value)
+
+    # 修复行号 / 列号让 unparse 输出干净
+    ast.fix_missing_locations(tree)
+    new_code = ast.unparse(tree)
+    if not new_code.endswith("\n"):
+        new_code += "\n"
+    return new_factor_id, new_code
+
+
+def negate_factor_save(orig_factor_id: str, orig_code: str) -> "GeneratedFactor":
+    """``negate_factor_source`` + 落盘 + 返回 GeneratedFactor。
+
+    用于路由层的 ``POST /api/factor_assistant/negate``——不直接接收 factor_id
+    然后自己 inspect 源码，是为了便于单测 + 让路由层负责"找到原源码"这件事
+    （需要 FactorRegistry / inspect.getsourcefile 等运行时依赖）。
+    """
+    new_factor_id, new_code = negate_factor_source(orig_factor_id, orig_code)
+    # 校验生成的代码仍合规（white-list import / 禁用调用 / 仅 backend.factors.base）
+    _validate_code_ast(new_code)
+    saved = _save_factor_file(new_factor_id, new_code)
+
+    # 从 new_code 解析回类属性（factor_id / display_name / category / hypothesis）
+    # 用最简方案：再次 ast 解析；不复用 negate_factor_source 内部 cls 引用避免双向耦合
+    parsed = ast.parse(new_code)
+    cls_node = next(
+        (n for n in parsed.body if isinstance(n, ast.ClassDef)), None,
+    )
+    cls_attrs: dict[str, Any] = {}
+    if cls_node:
+        for stmt in cls_node.body:
+            if (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and isinstance(stmt.value, ast.Constant)
+            ):
+                cls_attrs[stmt.targets[0].id] = stmt.value.value
+            # default_params 是 dict 字面量
+            if (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == "default_params"
+            ):
+                try:
+                    cls_attrs["default_params"] = ast.literal_eval(stmt.value)
+                except Exception:  # noqa: BLE001
+                    cls_attrs["default_params"] = {}
+
+    return GeneratedFactor(
+        factor_id=new_factor_id,
+        display_name=cls_attrs.get("display_name", new_factor_id),
+        category=cls_attrs.get("category", "custom"),
+        description=cls_attrs.get("description", ""),
+        hypothesis=cls_attrs.get("hypothesis", ""),
+        default_params=cls_attrs.get("default_params") or {},
+        code=new_code,
+        saved_path=str(saved),
+    )
+
+
+# ---------------------------- 落盘 ----------------------------
+
+
 def _save_factor_file(factor_id: str, code: str) -> Path:
     """把 code 写到 ``backend/factors/llm_generated/<factor_id>.py``；
     文件已存在则 **拒绝覆盖**，让用户显式改 factor_id 或手动删旧文件。

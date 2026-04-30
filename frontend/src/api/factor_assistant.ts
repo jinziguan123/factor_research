@@ -60,3 +60,26 @@ export function useGenerateFactor() {
     },
   })
 }
+
+
+export interface NegateFactorIn {
+  factor_id: string
+  auto_eval_pool_id?: number | null
+}
+
+/** L2.A 反向因子：调 /api/factor_assistant/negate，AST 改写一个 negated 版本。
+ *
+ * 用于 EvalDetail 诊断卡片"反向"按钮——评估显示多空 Sharpe 为负时一键
+ * 生成 ``<orig>_neg`` 因子并自动派发 60 天评估。AST 改写路径不调 LLM，
+ * 失败可能性低；用 axios 默认 30s timeout。
+ */
+export function useNegateFactor() {
+  const qc = useQueryClient()
+  return useMutation<GenerateFactorOut, any, NegateFactorIn>({
+    mutationFn: (body) =>
+      client.post('/factor_assistant/negate', body).then(r => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['factors'] })
+    },
+  })
+}
