@@ -402,6 +402,118 @@ def test_translate_and_save_missing_api_key_raises(monkeypatch):
         fa.translate_and_save("some factor", None)
 
 
+# ---------------------------- L2.B 反馈循环 ----------------------------
+
+
+def _good_payload_json(code: str = _GOOD_CODE) -> str:
+    """构造一份合规的 LLM 响应字符串。"""
+    return json.dumps({
+        "factor_id": "loop_factor_test",
+        "display_name": "loop test",
+        "category": "momentum",
+        "description": "loop test",
+        "hypothesis": "test 循环",
+        "default_params": {},
+        "code": code,
+    }, ensure_ascii=False)
+
+
+def test_translate_retries_after_ast_failure_then_succeeds(tmp_path, monkeypatch):
+    """第 1 轮 LLM 返回坏 import（AST fail），第 2 轮返回好代码 → 成功落盘。"""
+    target_dir = tmp_path / "llm_generated"
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+
+    # 第 1 轮坏代码：插入 `import os`（白名单外）
+    bad_code = _GOOD_CODE.replace(
+        "from __future__ import annotations",
+        "from __future__ import annotations\n\nimport os",
+        1,
+    )
+    bad_response = _good_payload_json(bad_code)
+    good_response = _good_payload_json(_GOOD_CODE)
+
+    call_log: list[list[dict]] = []
+
+    def _fake_call(messages):
+        call_log.append([{"role": m["role"]} for m in messages])
+        return bad_response if len(call_log) == 1 else good_response
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _fake_call)
+
+    gen = fa.translate_and_save("循环测试", None)
+    assert gen.factor_id == "loop_factor_test"
+    # 至少 2 次调用：第一次失败、第二次成功
+    assert len(call_log) >= 2
+    # 第二次的 messages 必含 assistant + user 重试消息（system + user + asst + user_retry）
+    assert len(call_log[1]) >= 4
+    assert call_log[1][2]["role"] == "assistant"
+    assert call_log[1][3]["role"] == "user"
+
+
+def test_translate_gives_up_after_max_retries(tmp_path, monkeypatch):
+    """LLM 始终返回坏代码 → 超过 max_retries 后抛 FactorAssistantError。"""
+    target_dir = tmp_path / "llm_generated"
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(fa, "_TRANSLATE_MAX_RETRIES", 2)  # 共 3 次尝试
+
+    bad_code = _GOOD_CODE.replace(
+        "from __future__ import annotations",
+        "from __future__ import annotations\n\nimport os",
+        1,
+    )
+    bad_response = _good_payload_json(bad_code)
+
+    call_count = {"n": 0}
+
+    def _fake_call(messages):
+        call_count["n"] += 1
+        return bad_response
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _fake_call)
+
+    with pytest.raises(FactorAssistantError, match="反馈循环.*仍失败"):
+        fa.translate_and_save("循环测试 fail", None)
+    assert call_count["n"] == 3  # max_retries=2 + 1 = 3 次尝试
+
+
+def test_translate_does_not_retry_network_error(tmp_path, monkeypatch):
+    """网络层错误不应触发重试（节省 token + 避免对环境问题盲目放大调用）。"""
+    target_dir = tmp_path / "llm_generated"
+    monkeypatch.setattr(fa, "_LLM_FACTORS_DIR", target_dir)
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+
+    call_count = {"n": 0}
+
+    def _fake_call(messages):
+        call_count["n"] += 1
+        raise FactorAssistantError("调用 LLM 失败（网络层）：mock")
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _fake_call)
+
+    with pytest.raises(FactorAssistantError, match="网络层"):
+        fa.translate_and_save("net error", None)
+    assert call_count["n"] == 1  # 只调一次，不重试
+
+
+def test_translate_does_not_retry_missing_api_key(monkeypatch):
+    """OPENAI_API_KEY 缺失也是环境问题，不应重试。"""
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+
+    call_count = {"n": 0}
+
+    def _fake_call(messages):
+        call_count["n"] += 1
+        raise FactorAssistantError("OPENAI_API_KEY 未设置")
+
+    monkeypatch.setattr(fa, "_call_openai_compatible", _fake_call)
+
+    with pytest.raises(FactorAssistantError, match="OPENAI_API_KEY"):
+        fa.translate_and_save("key missing", None)
+    assert call_count["n"] == 1
+
+
 # ---------------------------- router 错误映射 ----------------------------
 
 

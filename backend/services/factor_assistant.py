@@ -770,6 +770,25 @@ def _save_factor_file(factor_id: str, code: str) -> Path:
 # ---------------------------- Public API ----------------------------
 
 
+# L2.B 反馈循环最大重试轮数。每轮把"上次原始响应 + 错误诊断"喂回 LLM 让它修。
+# 经验值：JSON 解析 / 字段缺失 / AST 校验类错误大部分一次重试就能修复；3 次不修
+# 通常说明 LLM 已经卡在某个错误模式（如把 ``import os`` 当合法），加再多轮没用。
+_TRANSLATE_MAX_RETRIES = 3
+
+
+def _build_retry_user_message(err: "FactorAssistantError") -> str:
+    """根据错误类型给 LLM 一段精确的修正指引。
+
+    错误信息已经在 service 层措辞成"哪一步出问题"——这里在前面加一句明确
+    的语气指令（"请修正以下问题"），让 LLM 知道要"修而不是重答"。
+    """
+    return (
+        "你上一轮的输出有问题，请**仅修正以下问题**并重新输出 JSON："
+        f"\n\n{err}\n\n"
+        "保持原 factor 设计意图不变，只修上面具体说的那个错。"
+    )
+
+
 def translate_and_save(
     description: str,
     hints: str | None = None,
@@ -780,12 +799,18 @@ def translate_and_save(
     ``images`` 为 data URI 列表（前端把截图转成 base64 data URI 传进来），
     用来让 vision-capable 的模型"看"到用户心里的 K 线形态；router 层已校验大小和张数。
 
+    【L2.B 反馈循环】（借鉴 RD-Agent Co-STEER 的失败重试机制）：
+    LLM 输出在 JSON 解析 / 字段校验 / AST 安全校验三阶段任一阶段失败时，
+    把上次原始响应 + 错误诊断喂回 LLM，最多 ``_TRANSLATE_MAX_RETRIES`` 轮。
+    每轮 messages 累加形如 ``[..., assistant=last_raw, user=fix_request]``，
+    让模型像调试一样逐步修正。所有重试都失败才抛错给上层。
+
     会抛 ``FactorAssistantError`` 的已知失败点：
 
     - .env 没配 OPENAI_API_KEY → 503 级
     - LLM 调用超时 / 5xx → 502 级
-    - 返回不是 JSON / 缺字段 / category 非法 → 400 级（模型输出问题）
-    - 代码 AST 校验失败 → 400 级
+    - 返回不是 JSON / 缺字段 / category 非法 → 400 级（重试 N 次仍失败）
+    - 代码 AST 校验失败 → 400 级（重试 N 次仍失败）
     - 落盘文件已存在 → 409 级
 
     router 层据此映射 HTTP status。
@@ -795,7 +820,7 @@ def translate_and_save(
 
     protocol = (settings.openai_api_protocol or "chat_completions").lower()
     user_content = _build_user_content(description, hints, images, protocol)
-    messages = [
+    messages: list[dict] = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
@@ -808,10 +833,42 @@ def translate_and_save(
         protocol,
     )
 
-    raw = _call_openai_compatible(messages)
-    obj = _parse_llm_json(raw)
-    payload = _validate_llm_payload(obj)
-    _validate_code_ast(payload["code"])
+    last_err: FactorAssistantError | None = None
+    payload: dict = {}
+    for attempt in range(_TRANSLATE_MAX_RETRIES + 1):  # 0..N，共 N+1 次
+        try:
+            raw = _call_openai_compatible(messages)
+            obj = _parse_llm_json(raw)
+            payload = _validate_llm_payload(obj)
+            _validate_code_ast(payload["code"])
+            break  # 全过 → 退出循环
+        except FactorAssistantError as e:
+            last_err = e
+            # OpenAI key / 网络层错误属于环境问题，不应重试 LLM 调用
+            if "OPENAI_API_KEY" in str(e) or "网络层" in str(e):
+                raise
+            if attempt < _TRANSLATE_MAX_RETRIES:
+                logger.warning(
+                    "translate 第 %d/%d 次失败，喂回 LLM 重试：%s",
+                    attempt + 1, _TRANSLATE_MAX_RETRIES + 1, e,
+                )
+                # 把上一次 raw 当作 assistant 消息（即便 LLM 抛错前已经返回过文本）；
+                # 然后再追加一个 user 消息要求修正。注意 raw 在 _parse_llm_json /
+                # _validate_* 失败前已经赋过值；如果 _call_openai_compatible 自己
+                # 直接抛（网络层），上面那个分支已经 raise，到不了这里。
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                    "role": "user", "content": _build_retry_user_message(e),
+                })
+                continue
+            # 用尽重试 → 包一层错误措辞抛出
+            raise FactorAssistantError(
+                f"反馈循环 {_TRANSLATE_MAX_RETRIES + 1} 轮仍失败，最后一次错误：{e}"
+            ) from e
+    else:
+        # for-else：理论上 break 或 raise 已经覆盖；防御性
+        assert last_err is not None
+        raise last_err
 
     saved = _save_factor_file(payload["factor_id"], payload["code"])
     logger.info(
