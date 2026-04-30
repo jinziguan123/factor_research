@@ -644,32 +644,49 @@ def _validate_code_ast(code: str) -> None:
 # ---------------------------- 因子进化 (L2.D) ----------------------------
 
 
-_EVOLVE_SYSTEM_PROMPT = """\
-你是一位严谨的量化研究员。我会给你一个**已有因子的源码 + 研究假设 + 评估反馈**，
-请基于反馈生成**改进后的下一代版本**。
+def _build_evolve_description(
+    parent_factor_id: str,
+    parent_hypothesis: str,
+    eval_ctx: dict,
+    extra_hint: str | None,
+) -> str:
+    """把"基于 v_n 进化下一代"的请求拼成一段自然语言**因子描述**。
 
-【硬性约束】
-- 输出格式与翻译任务一致（严格 JSON，字段 factor_id / display_name / category /
-  description / hypothesis / default_params / code）
-- factor_id 字段你**先填一个语义化的 snake_case 名字**——后端会强制重命名为
-  `<root_factor_id>_evo<generation>`，所以你随便填别犯重就行
-- code 中 BaseFactor 子类必须带与 JSON 一致的 hypothesis 类属性
-- 只允许从 `__future__`, `pandas`, `numpy`, `math`, `typing`,
-  `backend.factors.base` 导入；其它一概不允许（exec/eval/open/import os/...）
-- 不打印、不写盘、不联网
+    设计动机：复用 ``translate`` 的完整请求结构（``_SYSTEM_PROMPT`` + 自然
+    语言 user description），让 LLM 中转看到的 evolve 请求 = 已知能跑通的
+    translate 请求模板，直接绕开"含 Python 代码内容/长 user message"等
+    立即 502 触发条件。LLM 看不到父代源码，但能从 hypothesis + 评估指标 +
+    feedback + 用户指令推断"前一代干了啥 + 怎么改"。
 
-【进化原则】
-- **保留原因子的核心思路**——不要换主题（如反转 → 动量），只调细节
-- 看反馈再动：评估说"换手率高"就考虑加 EMA 平滑；说"IC 衰减快"就缩 forward 期
-- 改 hypothesis 反映你做了什么改动："基于 v_prev 反馈，现在加了 ... 以期解决 ..."
-- 改 description / display_name 让人一眼看懂这是 v_prev 的优化版
-- params_schema 可保留同名字段，default_params 可挪默认值
+    Returns:
+        拼好的中文描述，直接当 ``translate_and_save`` 的 ``description`` 用。
+    """
+    metrics: list[str] = []
+    if eval_ctx.get("ic_mean") is not None:
+        metrics.append(f"IC mean={eval_ctx['ic_mean']:.4f}")
+    if eval_ctx.get("ic_ir") is not None:
+        metrics.append(f"IC_IR={eval_ctx['ic_ir']:.3f}")
+    if eval_ctx.get("long_short_sharpe") is not None:
+        metrics.append(f"多空 Sharpe={eval_ctx['long_short_sharpe']:.2f}")
+    if eval_ctx.get("long_short_annret") is not None:
+        metrics.append(f"多空年化={eval_ctx['long_short_annret']*100:.2f}%")
+    if eval_ctx.get("turnover_mean") is not None:
+        metrics.append(f"换手率={eval_ctx['turnover_mean']:.1%}")
+    metrics_str = "、".join(metrics) if metrics else "（无）"
 
-【输出格式】
-严格 JSON（不要 Markdown 代码块包裹、不要解释文字）：
-{"factor_id": "...", "display_name": "...", "category": "...", "description": "...",
- "hypothesis": "...", "default_params": {...}, "code": "..."}
-"""
+    fb = (eval_ctx.get("feedback_text") or "").strip() or "（无）"
+    extra = (extra_hint or "").strip() or "（无）"
+
+    return (
+        f"基于已有因子 {parent_factor_id} 的评估反馈，生成改进版的下一代因子。"
+        f"父代研究假设：{parent_hypothesis or '（未填）'}。"
+        f"父代评估指标：{metrics_str}。"
+        f"父代评估诊断：{fb}。"
+        f"用户额外指令：{extra}。"
+        f"请保留父代的核心思路（从研究假设推断），"
+        f"针对评估反馈和用户指令调整公式细节（如调窗口、加 EMA 平滑、改"
+        f"forward 期等），输出一个新的 BaseFactor 子类。"
+    )
 
 
 def _read_factor_meta_for_evolve(parent_factor_id: str) -> dict:
@@ -807,32 +824,40 @@ def _update_lineage(
 
 def evolve_factor(
     parent_factor_id: str,
-    parent_source_code: str,
+    parent_source_code: str,  # 保留参数以兼容路由层调用，但不再使用（见下方 NOTE）
     parent_eval_run_id: str | None = None,
     extra_hint: str | None = None,
 ) -> "GeneratedFactor":
     """L2.D：基于 parent 因子 + 评估反馈 + 用户额外指令，让 LLM 生成下一代。
 
-    流程：
-    1. 读 parent meta 拿 generation / root_factor_id / hypothesis
-    2. 读 parent eval（若给）拿 feedback_text + 关键指标
-    3. 算 new_factor_id = ``<root>_evo<generation+1>``
-    4. 构造 evolve messages → 走 ``_run_translate_loop`` 复用 retry / AST
-    5. 强制改写 LLM 输出代码里的 factor_id 为 new_factor_id（防止 LLM 不听）
-    6. 落盘到 ``backend/factors/llm_generated/``
-    7. 调用方负责后续 ``scan_and_register`` + ``_update_lineage`` + auto-eval
-       （路由层做这些 side-effect）
+    **设计变更（2026-04-30 修正）**：早期版本用独立 ``_EVOLVE_SYSTEM_PROMPT``
+    + 父代源码直接灌 user message——实测被中转（codeflow.asia 等）立即 RST
+    502，估计是"含 Python class 代码内容 + 长 user message"触发反滥用规则。
+    现在改为**复用 translate 的完整请求结构**：
+    1. 把"基于父代进化"的需求拼成一段**自然语言** description（含 hypothesis +
+       评估指标 + feedback + 用户指令，**不含代码**）
+    2. 调 ``_translate_to_payload`` 走和 translate 完全相同的请求路径
+       （system prompt = ``_SYSTEM_PROMPT``、user content = description）
+    3. 拿到 LLM 输出后，把 factor_id 强制改写为 ``<root>_evo<N>``（LLM 自己
+       起的名字会被覆盖）
+
+    上游中转看到的 evolve 请求 = 已知能跑通的 translate 请求模板，直接绕开
+    "evolve 立即 502"问题。LLM 看不到父代代码，但能从 hypothesis + 评估反馈
+    + 用户指令推断"父代干了啥 + 怎么改"——前提是父代 hypothesis 写得准。
 
     Args:
         parent_factor_id: 父代 factor_id（必须已注册）
-        parent_source_code: 父代 .py 源码（路由层用 inspect 拿好传进来——保持
-            service 层不依赖 FactorRegistry，便于单测）
+        parent_source_code: **不再使用**——保留参数仅为路由层调用兼容；
+            可传空字符串。如果将来需要"代码级深度改写"，可以增加一个
+            ``include_parent_source`` 参数把它塞进 description 里。
         parent_eval_run_id: 可选，给定时把那次评估的 feedback / 指标灌进 prompt
         extra_hint: 用户额外指令（如"想要更短窗口"）
 
     Returns:
         GeneratedFactor，含 saved_path；调用方可立即派发 auto-eval。
     """
+    del parent_source_code  # 保留接口签名但不使用，见 docstring NOTE
+
     parent_meta = _read_factor_meta_for_evolve(parent_factor_id)
     new_generation = parent_meta["generation"] + 1
     root = parent_meta["root_factor_id"]
@@ -840,29 +865,25 @@ def evolve_factor(
 
     eval_ctx = _read_eval_context(parent_eval_run_id) if parent_eval_run_id else {}
 
-    user_msg = _build_evolve_user_prompt(
+    description = _build_evolve_description(
         parent_factor_id=parent_factor_id,
-        parent_source_code=parent_source_code,
         parent_hypothesis=parent_meta["hypothesis"],
-        new_factor_id=new_factor_id,
         eval_ctx=eval_ctx,
         extra_hint=extra_hint,
     )
-    messages = [
-        {"role": "system", "content": _EVOLVE_SYSTEM_PROMPT},
-        {"role": "user", "content": user_msg},
-    ]
+
     logger.info(
         "factor_assistant: evolve parent=%s new_factor_id=%s eval=%s hint=%s",
         parent_factor_id, new_factor_id, parent_eval_run_id,
         (extra_hint or "")[:80],
     )
 
-    # evolve 用 low effort：reasoning 模型在"读懂代码 + 改写"任务上 medium 思考
-    # 时间常超 60s，触发中转方网关 502（codeflow.asia 等 Cloudflare 反代）。
-    # low 思考预算更小但完全够 evolve 任务（有父代代码当模板，不是"从零写"）。
-    payload = _run_translate_loop(messages, reasoning_effort="low")
-    # 强制 factor_id：LLM 偶尔不听话给重名/不规范名字；后处理改写避免冲突
+    # 走 translate 等价路径——同一个 _SYSTEM_PROMPT + 自然语言 user content
+    # 上游中转分不出 evolve 和 translate
+    payload = _translate_to_payload(description, hints=None, images=None)
+
+    # 强制 factor_id：LLM 自己起的名字（按 description 语义）会被覆盖为
+    # <root>_evo<gen>，保证血缘命名一致
     payload["factor_id"] = new_factor_id
     payload["code"] = _force_factor_id(payload["code"], new_factor_id)
     # AST 二次校验（改写后再确认安全）
@@ -883,121 +904,6 @@ def evolve_factor(
         code=payload["code"],
         saved_path=str(saved),
     )
-
-
-def _extract_class_body(source_code: str) -> str:
-    """从一份完整 .py 源码里抽出 BaseFactor 子类的源码（含类定义 + 类内属性 + 方法）。
-
-    用途：evolve prompt 把"父代源码"塞给 LLM 时不需要 file docstring /
-    imports / 模块级常量——这些占用大量 token 且对 LLM 改写无帮助；只把
-    关键的类定义送过去能把请求体压到 translate 同等量级，避开中转方对
-    大请求的 502 触发（codeflow.asia 等 Cloudflare 反代尤其敏感）。
-
-    实现：
-    1. ``ast.parse`` 整个源码
-    2. 找第一个继承自 ``BaseFactor`` 的 ``ClassDef`` 节点
-    3. ``ast.unparse(node)`` 单独输出该节点
-    4. 找不到时降级返回原文（让 evolve 仍能拼出 prompt，不阻断主流程）
-
-    Returns:
-        裁剪后的源码字符串（含末尾换行）；或原文（fallback）。
-    """
-    try:
-        tree = ast.parse(source_code)
-    except SyntaxError:
-        # 解析失败（罕见，例如 LLM 生成的因子有微妙语法错却被某种缓存绕过）
-        # → 直接返回原文，让 evolve 仍可继续
-        return source_code
-
-    target_cls: ast.ClassDef | None = None
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                base_name = (
-                    base.id if isinstance(base, ast.Name)
-                    else (base.attr if isinstance(base, ast.Attribute) else None)
-                )
-                if base_name == "BaseFactor":
-                    target_cls = node
-                    break
-            if target_cls is not None:
-                break
-
-    if target_cls is None:
-        return source_code
-
-    snippet = ast.unparse(target_cls)
-    return snippet if snippet.endswith("\n") else snippet + "\n"
-
-
-def _build_evolve_user_prompt(
-    *,
-    parent_factor_id: str,
-    parent_source_code: str,
-    parent_hypothesis: str,
-    new_factor_id: str,
-    eval_ctx: dict,
-    extra_hint: str | None,
-    include_parent_source: bool = False,
-) -> str:
-    """组装 evolve 的 user message。
-
-    Args:
-        include_parent_source: 默认 ``False``——只发 hypothesis + 评估指标 +
-            feedback + 用户指令，**不发父代源码**。这是为了规避 LLM 中转
-            （codeflow.asia 等）对"长 user message"或"含 Python 代码内容"
-            的反滥用规则——实测表明 user message > 3KB 或含 ``class X(BaseFactor)``
-            模式会立即 502。
-            ``True`` 时附带裁剪后的父代类源码，prompt 更精确但触发 502 风险高。
-    """
-    fb = (eval_ctx.get("feedback_text") or "").strip() or "（暂无评估反馈）"
-    metrics_lines: list[str] = []
-    if eval_ctx.get("ic_mean") is not None:
-        metrics_lines.append(f"- IC mean = {eval_ctx['ic_mean']:.4f}")
-    if eval_ctx.get("ic_ir") is not None:
-        metrics_lines.append(f"- IC_IR    = {eval_ctx['ic_ir']:.3f}")
-    if eval_ctx.get("long_short_sharpe") is not None:
-        metrics_lines.append(
-            f"- 多空 Sharpe = {eval_ctx['long_short_sharpe']:.2f}"
-        )
-    if eval_ctx.get("long_short_annret") is not None:
-        metrics_lines.append(
-            f"- 多空年化 = {eval_ctx['long_short_annret']*100:.2f}%"
-        )
-    if eval_ctx.get("turnover_mean") is not None:
-        metrics_lines.append(
-            f"- 换手率 = {eval_ctx['turnover_mean']:.1%}"
-        )
-    metrics_block = "\n".join(metrics_lines) if metrics_lines else "（无指标）"
-    extra = (extra_hint or "").strip() or "（用户没填额外指令——你完全基于反馈和指标来改）"
-
-    parts = [
-        f"【父代因子】 {parent_factor_id}",
-        f"【父代研究假设】 {parent_hypothesis or '（未填）'}",
-        "",
-        f"【父代评估指标】\n{metrics_block}",
-        "",
-        f"【父代评估诊断 / 反馈】\n{fb}",
-        "",
-        f"【用户的额外指令】\n{extra}",
-        "",
-        f"请基于上面信息生成下一代版本（factor_id 字段后端会改写成 {new_factor_id}，你任填）。",
-        "保留父代核心思路（从 hypothesis 推断），针对评估反馈做调整。",
-    ]
-
-    if include_parent_source:
-        # 仅在调用方明确要求时才发父代源码——默认不发以避中转 502。
-        # 用 ---begin/end--- 明文标记替代 ```python``` fence。
-        trimmed_src = _extract_class_body(parent_source_code)
-        parts.insert(
-            3,  # 紧接 hypothesis 之后
-            f"【父代源码（仅类内部，imports / file docstring 已裁剪）】\n"
-            f"---begin parent class source---\n"
-            f"{trimmed_src}\n"
-            f"---end parent class source---",
-        )
-
-    return "\n".join(parts)
 
 
 # ---------------------------- 反向因子 (L2.A) ----------------------------
@@ -1263,6 +1169,46 @@ def _run_translate_loop(
     raise last_err
 
 
+def _translate_to_payload(
+    description: str,
+    hints: str | None = None,
+    images: list[str] | None = None,
+    reasoning_effort: str | None = None,
+) -> dict:
+    """LLM 调用 + payload 校验 + AST 校验，返回 validated payload（**不落盘**）。
+
+    抽出来给 ``translate_and_save`` 与 ``evolve_factor`` 共用——上游中转
+    （codeflow.asia 等）对"和已知通过的 translate 请求结构相同"的请求
+    最稳；让 evolve 走同一条路径能直接复用稳定性。
+
+    Args:
+        description: 自然语言描述（translate=用户描述；evolve=拼好的进化描述）
+        hints / images: translate 透传给 ``_build_user_content``
+        reasoning_effort: 透传 ``_run_translate_loop``
+
+    Returns:
+        validated payload dict（含 factor_id / hypothesis / code 等）
+    """
+    if not description or not description.strip():
+        raise FactorAssistantError("description 不能为空")
+
+    protocol = (settings.openai_api_protocol or "chat_completions").lower()
+    user_content = _build_user_content(description, hints, images, protocol)
+    messages: list[dict] = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    logger.info(
+        "factor_assistant: LLM call desc=%r hints=%r images=%d model=%s protocol=%s",
+        description[:100],
+        (hints or "")[:100],
+        len(images or []),
+        settings.openai_model,
+        protocol,
+    )
+    return _run_translate_loop(messages, reasoning_effort=reasoning_effort)
+
+
 def translate_and_save(
     description: str,
     hints: str | None = None,
@@ -1289,26 +1235,7 @@ def translate_and_save(
 
     router 层据此映射 HTTP status。
     """
-    if not description or not description.strip():
-        raise FactorAssistantError("description 不能为空")
-
-    protocol = (settings.openai_api_protocol or "chat_completions").lower()
-    user_content = _build_user_content(description, hints, images, protocol)
-    messages: list[dict] = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    logger.info(
-        "factor_assistant: translate desc=%r hints=%r images=%d model=%s protocol=%s",
-        description[:100],
-        (hints or "")[:100],
-        len(images or []),
-        settings.openai_model,
-        protocol,
-    )
-
-    payload = _run_translate_loop(messages)
-
+    payload = _translate_to_payload(description, hints, images)
     saved = _save_factor_file(payload["factor_id"], payload["code"])
     logger.info(
         "factor_assistant: saved factor_id=%s path=%s",

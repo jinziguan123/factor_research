@@ -402,157 +402,54 @@ def test_translate_and_save_missing_api_key_raises(monkeypatch):
         fa.translate_and_save("some factor", None)
 
 
-# ---------------------------- L2.D evolve prompt 裁剪 ----------------------------
+# ---------------------------- L2.D _build_evolve_description ----------------------------
 
 
-_FULL_FACTOR_SRC = '''\
-"""一段非常长的 file docstring 占位
-解释这个因子的来源、参考论文、调试历史等等等等等等等等等等。
-"""
-from __future__ import annotations
-
-import math  # noqa: F401 - 测试 import 也应被裁掉
-
-import numpy as np  # noqa: F401
-import pandas as pd
-
-from backend.factors.base import BaseFactor, FactorContext
-
-
-class FooReversal(BaseFactor):
-    factor_id = "foo_reversal"
-    display_name = "示例反转"
-    category = "reversal"
-    description = "过去 N 日反转。"
-    hypothesis = "短期超买回调假设。"
-    default_params = {"window": 20}
-    params_schema = {"window": {"type": "int", "default": 20}}
-    supported_freqs = ("1d",)
-
-    def required_warmup(self, params: dict) -> int:
-        return int(params.get("window", 20)) + 5
-
-    def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
-        window = int(params.get("window", 20))
-        close = ctx.data.load_panel(
-            ctx.symbols, ctx.start_date.date(), ctx.end_date.date(),
-            field="close", adjust="qfq",
-        )
-        return -close.pct_change(window).loc[ctx.start_date:]
-'''
-
-
-def test_extract_class_body_keeps_class_attrs_and_methods():
-    """裁剪后保留：class 定义 + factor_id / hypothesis / default_params / compute。"""
-    out = fa._extract_class_body(_FULL_FACTOR_SRC)
-    assert "class FooReversal(BaseFactor)" in out
-    assert 'factor_id =' in out and "foo_reversal" in out
-    assert "hypothesis" in out
-    assert "def compute" in out
-    assert "def required_warmup" in out
-
-
-def test_extract_class_body_drops_file_docstring_and_imports():
-    """裁剪后不含：file 顶层 docstring / 顶层 import / 多余文本。"""
-    out = fa._extract_class_body(_FULL_FACTOR_SRC)
-    assert "一段非常长的 file docstring" not in out
-    assert "import math" not in out
-    assert "import numpy as np" not in out
-    assert "import pandas as pd" not in out
-    assert "from backend.factors.base" not in out
-
-
-def test_extract_class_body_significantly_smaller_than_full_src():
-    """裁剪后字节数应明显小于原文件（让 evolve prompt 不至于把中转挤崩）。"""
-    full_size = len(_FULL_FACTOR_SRC)
-    out = fa._extract_class_body(_FULL_FACTOR_SRC)
-    assert len(out) < full_size  # 至少要小一些
-    # 实际上典型因子 file docstring + imports 占 30%+，裁完应该更小
-    assert len(out) < int(full_size * 0.85)
-
-
-def test_extract_class_body_falls_back_when_no_class_found():
-    """源码里找不到 BaseFactor 子类 → 退化返回原文（不抛错，让 prompt 仍能拼出来）。"""
-    fallback = fa._extract_class_body("# 没有任何类的代码片段\nx = 1\n")
-    assert fallback.strip() != ""  # 至少返回原文
-
-
-def test_build_evolve_prompt_default_does_not_include_parent_source():
-    """默认 include_parent_source=False → user prompt 不含父代代码内容。
-
-    这是为了规避 LLM 中转（codeflow.asia 等）对"含代码内容 / 长 user message"
-    的反滥用规则导致的立即 502。父代信息靠 hypothesis + 评估指标 + feedback +
-    用户指令传达，LLM 能从这些推断该怎么改。
-    """
-    msg = fa._build_evolve_user_prompt(
-        parent_factor_id="foo_reversal",
-        parent_source_code=_FULL_FACTOR_SRC,
+def test_build_evolve_description_includes_metrics_and_feedback():
+    """评估指标 + feedback + extra_hint 都应进 description（自然语言）。"""
+    desc = fa._build_evolve_description(
+        parent_factor_id="foo",
         parent_hypothesis="短期反转假设",
-        new_factor_id="foo_reversal_evo2",
         eval_ctx={
-            "feedback_text": "IC 偏弱",
+            "feedback_text": "📋 IC 偏弱",
             "ic_mean": 0.012, "ic_ir": 0.31,
             "long_short_sharpe": 0.4, "long_short_annret": 0.06,
             "turnover_mean": 0.45,
         },
         extra_hint="想要更短窗口",
     )
-    # 关键非代码内容
-    assert "短期反转假设" in msg
-    assert "想要更短窗口" in msg
-    assert "IC 偏弱" in msg
-    assert "0.0120" in msg or "0.012" in msg  # IC mean
-    # **不**应有任何代码片段
-    assert "class FooReversal" not in msg
-    assert "def compute" not in msg
-    assert "import pandas" not in msg
+    assert "foo" in desc
+    assert "短期反转假设" in desc
+    assert "0.012" in desc or "0.0120" in desc
+    assert "IC 偏弱" in desc
+    assert "想要更短窗口" in desc
 
 
-def test_build_evolve_prompt_with_parent_source_includes_extracted_class():
-    """include_parent_source=True 时附带裁剪后的父代类源码。"""
-    msg = fa._build_evolve_user_prompt(
-        parent_factor_id="foo_reversal",
-        parent_source_code=_FULL_FACTOR_SRC,
-        parent_hypothesis="假设 X",
-        new_factor_id="foo_reversal_evo2",
-        eval_ctx={
-            "feedback_text": "IC 偏弱",
-            "ic_mean": 0.012, "ic_ir": 0.31,
-            "long_short_sharpe": 0.4, "long_short_annret": 0.06,
-            "turnover_mean": 0.45,
-        },
-        extra_hint="想要更短窗口",
-        include_parent_source=True,
+def test_build_evolve_description_no_code_content():
+    """description 是纯自然语言，绝不应含 ``class X(BaseFactor)`` 等代码片段
+    （这是 evolve 立即 502 的诊断重点——含代码的请求会被中转拒）。"""
+    desc = fa._build_evolve_description(
+        parent_factor_id="foo",
+        parent_hypothesis="x",
+        eval_ctx={"feedback_text": "y"},
+        extra_hint=None,
     )
-    assert "class FooReversal(BaseFactor)" in msg
-    assert "def compute" in msg
-    # file docstring / imports 仍被裁掉
-    assert "一段非常长的 file docstring" not in msg
-    assert "import pandas as pd" not in msg
+    assert "class " not in desc
+    assert "def " not in desc
+    assert "import " not in desc
+    assert "```" not in desc
 
 
-def test_build_evolve_prompt_size_bounded_without_parent_source():
-    """默认（不发源码）时 user message 应远小于发了源码的版本。"""
-    big_src = _FULL_FACTOR_SRC * 5  # 模拟大型父代代码
-    eval_ctx = {
-        "feedback_text": "IC 偏弱",
-        "ic_mean": 0.012, "ic_ir": 0.31,
-        "long_short_sharpe": 0.4, "long_short_annret": 0.06,
-        "turnover_mean": 0.45,
-    }
-    no_src = fa._build_evolve_user_prompt(
-        parent_factor_id="foo", parent_source_code=big_src,
-        parent_hypothesis="x", new_factor_id="foo_evo2",
-        eval_ctx=eval_ctx, extra_hint="hint",
+def test_build_evolve_description_handles_missing_fields():
+    """父代 hypothesis / eval_ctx / extra_hint 全空时也不抛错，给降级文案。"""
+    desc = fa._build_evolve_description(
+        parent_factor_id="foo",
+        parent_hypothesis="",
+        eval_ctx={},
+        extra_hint=None,
     )
-    with_src = fa._build_evolve_user_prompt(
-        parent_factor_id="foo", parent_source_code=big_src,
-        parent_hypothesis="x", new_factor_id="foo_evo2",
-        eval_ctx=eval_ctx, extra_hint="hint",
-        include_parent_source=True,
-    )
-    assert len(no_src) < len(with_src) // 2
-    assert len(no_src) < 1500  # 默认形态应稳定 < 1.5KB（实际多在 < 1KB）
+    assert "foo" in desc
+    assert "未填" in desc or "（无）" in desc
 
 
 # ---------------------------- L2.D evolve_factor ----------------------------
