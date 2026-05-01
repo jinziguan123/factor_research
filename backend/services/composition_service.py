@@ -374,6 +374,128 @@ def _build_future_return_label(
     return ranked * 2.0 - 1.0
 
 
+# LightGBM 默认超参——保守起点防过拟合（量化数据信噪比低）
+_DEFAULT_LGB_PARAMS = {
+    "n_estimators": 100,
+    "max_depth": 4,            # 浅树
+    "num_leaves": 15,          # 2^4 - 1
+    "learning_rate": 0.05,
+    "reg_alpha": 0.1,          # L1 正则
+    "reg_lambda": 0.1,         # L2 正则
+    "min_child_samples": 20,   # 叶节点至少 20 样本
+    "verbose": -1,             # 静默
+    "random_state": 42,        # 可重现
+    "n_jobs": -1,              # 多核
+}
+
+
+def _combine_lightgbm(
+    z_frames: list[pd.DataFrame],
+    label_panel: pd.DataFrame,
+    factor_ids: list[str],
+    *,
+    forward_period: int = 5,
+    warmup_days: int = 60,
+    lgb_params: dict | None = None,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """walk-forward expanding window 训 LightGBM 学非线性因子合成。
+
+    Args:
+        z_frames: 已 cross-section z-score 化的 N 个因子面板（同 (date×symbol) 形态）
+        label_panel: 同形 label（每日 cross-section rank 化的未来 forward_period 日收益）
+        factor_ids: factor_id 列表（顺序与 z_frames 对应）
+        forward_period: label 是 future_N_return；训练集要 [start, t-N] 防泄漏
+        warmup_days: 前 N 天 cold start 跳过
+        lgb_params: 覆盖默认超参；None 用 _DEFAULT_LGB_PARAMS
+
+    Returns:
+        (pred, feature_importance):
+        - pred: (date × symbol) 预测值面板，前 warmup + forward 天为 NaN
+        - feature_importance: {factor_id: mean_gain_across_walk_forward_models}
+    """
+    from lightgbm import LGBMRegressor
+
+    params = {**_DEFAULT_LGB_PARAMS, **(lgb_params or {})}
+
+    # 1. stack 每个 z 面板成 Series，concat 成 (date, symbol) MultiIndex DataFrame
+    X_panel = pd.concat(
+        [z.stack(future_stack=True).rename(fid) for fid, z in zip(factor_ids, z_frames)],
+        axis=1,
+    )
+    # X_panel 索引 = MultiIndex (date, symbol)，列 = factor_ids
+
+    # 2. label 对齐到同索引
+    y_series = label_panel.stack(future_stack=True).reindex(X_panel.index)
+
+    # 索引排序，便于后面用 .loc[:date_end] 高效切训练集（依赖 MultiIndex level=0 单调）
+    X_panel = X_panel.sort_index()
+    y_series = y_series.sort_index()
+
+    # 3. 准备输出 + walk-forward
+    pred = pd.DataFrame(
+        index=label_panel.index, columns=label_panel.columns, dtype=float,
+    )
+    importances: list[dict[str, float]] = []
+    all_dates = sorted(X_panel.index.get_level_values(0).unique())
+
+    for i, date_t in enumerate(all_dates):
+        if i < warmup_days:
+            continue                                 # cold start
+        train_end_idx = i - forward_period           # 防 label 跨日泄漏
+        if train_end_idx < warmup_days:
+            continue
+        train_end_date = all_dates[train_end_idx]
+        # MultiIndex sort 后用 .loc[:date] 直接切第一层（date），比 isin 快很多
+        X_train = X_panel.loc[:train_end_date]
+        y_train = y_series.loc[:train_end_date]
+
+        # 删除 X 或 y 含 NaN 的行
+        valid = X_train.notna().all(axis=1) & y_train.notna()
+        X_train = X_train[valid]
+        y_train = y_train[valid]
+        if len(X_train) < 100:
+            continue                                 # 样本太少跳过
+
+        # 训练失败（数据 NaN/inf、LightGBM 内部错等）→ log warn + 跳过当日，不阻断后续
+        try:
+            model = LGBMRegressor(**params)
+            model.fit(X_train, y_train)
+        except Exception as e:  # noqa: BLE001 - LightGBM 抛任意异常都跳过
+            log.warning(
+                "ml_lgb 训练失败 date=%s: %s（跳过当日）", date_t, e,
+            )
+            continue
+        importances.append(
+            dict(zip(factor_ids, model.feature_importances_.astype(float)))
+        )
+
+        # 预测 date_t 当天截面
+        try:
+            X_today = X_panel.xs(date_t, level=0)
+        except KeyError:
+            continue
+        valid_today = X_today.notna().all(axis=1)
+        if not valid_today.any():
+            continue
+        try:
+            pred_vals = model.predict(X_today.loc[valid_today])
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ml_lgb 预测失败 date=%s: %s（跳过当日）", date_t, e,
+            )
+            continue
+        pred.loc[date_t, X_today.index[valid_today]] = pred_vals
+
+    # 4. 聚合 importance 取 mean（每个因子在所有 walk-forward 模型里的平均 gain）
+    fi_mean: dict[str, float] = {fid: 0.0 for fid in factor_ids}
+    if importances:
+        for fid in factor_ids:
+            # imp 是用 factor_ids 构的 dict（见上文 dict(zip(factor_ids, ...))），key 必然存在
+            fi_mean[fid] = float(np.mean([imp[fid] for imp in importances]))
+
+    return pred, fi_mean
+
+
 def _load_or_compute_factor(
     data: DataService,
     reg: FactorRegistry,
