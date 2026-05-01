@@ -1142,26 +1142,28 @@ git commit -m "feat(factor): gp_margin_stability 毛利率稳定性（-rolling_s
 
 ---
 
-## Task 7: low_turnover（低换手反向）
+## Task 7: max_anomaly（MAX 异象 / 彩票股反转）
+
+> **设计修正**：原 Task 7 是 `low_turnover = -turnover_ratio`，被发现与现有 turnover_ratio 100% 共线（树模型对 negate 不敏感，feature_importance 会归零）。改为 MAX 异象——与 turnover/IVOL 真正不共线的 A 股异象。详见 design doc §C1 修正记录。
 
 **Files:**
-- Create: `backend/factors/volume/low_turnover.py`
-- Test: `backend/tests/test_factors_low_turnover.py`
+- Create: `backend/factors/volatility/max_anomaly.py`
+- Test: `backend/tests/test_factors_max_anomaly.py`
 
-**公式**：`-1 * (rolling_mean(amount_k, 20) / rolling_mean(close, 20))`（即 negate 现 turnover_ratio）
+**公式**：`factor = -1 * rolling_max(close.pct_change(), 20)` —— 取过去 N 日单日最高收益的负值（高 MAX = 彩票股 → 未来收益更低 → 取负后高分长仓）。
 
 **Step 1: Write failing test**
 
-创建 `backend/tests/test_factors_low_turnover.py`：
+创建 `backend/tests/test_factors_max_anomaly.py`：
 
 ```python
-"""低换手因子单测：直接 negate turnover_ratio 公式。"""
+"""MAX 异象因子单测：-rolling_max(returns, 20)。"""
 from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from backend.engine.base_factor import FactorContext
-from backend.factors.volume.low_turnover import LowTurnover
+from backend.factors.volatility.max_anomaly import MaxAnomaly
 
 
 @dataclass
@@ -1175,93 +1177,101 @@ class FakeDataService:
         return df[cols].loc[pd.Timestamp(start) : pd.Timestamp(end)].copy()
 
 
-def test_low_turnover_happy_path():
-    """因子 = -rolling_mean(amount,20) / rolling_mean(close,20)。"""
+def test_max_anomaly_happy_path():
+    """因子 = -rolling_max(close.pct_change(), 20)，全表与手算对齐。"""
     n = 40
     idx = pd.bdate_range("2024-01-02", periods=n)
-    symbols = ["A", "B"]
+    symbols = ["A", "B", "C"]
     rng = np.random.default_rng(0)
-    amt = pd.DataFrame({s: rng.uniform(1e5, 1e7, n) for s in symbols}, index=idx)
-    close = pd.DataFrame({s: 10 + rng.normal(0, 0.5, n).cumsum() for s in symbols}, index=idx)
-    panels = {"amount_k": amt, "close": close}
-    ctx = FactorContext(
-        data=FakeDataService(panels=panels), symbols=symbols,
-        start_date=idx[20], end_date=idx[-1], warmup_days=20,
+    close = pd.DataFrame(
+        {s: 10 + rng.normal(0, 0.5, n).cumsum() for s in symbols}, index=idx,
     )
-    factor = LowTurnover().compute(ctx, {})
-    expected = -(amt.rolling(20).mean() / close.rolling(20).mean())
-    target = factor.index[5]
-    pd.testing.assert_series_equal(
-        factor.loc[target].sort_index(),
-        expected.loc[target].sort_index(),
+    ctx = FactorContext(
+        data=FakeDataService(panels={"close": close}), symbols=symbols,
+        start_date=idx[25], end_date=idx[-1], warmup_days=25,
+    )
+    factor = MaxAnomaly().compute(ctx, {})
+    # 手算同口径
+    ret = close.pct_change(fill_method=None)
+    expected = -ret.rolling(20).max()
+    pd.testing.assert_frame_equal(
+        factor.sort_index(axis=1),
+        expected.loc[ctx.start_date :].sort_index(axis=1),
         check_names=False,
     )
 
 
-def test_low_turnover_nan_robust():
+def test_max_anomaly_nan_robust():
     n = 40
     idx = pd.bdate_range("2024-01-02", periods=n)
     rng = np.random.default_rng(1)
-    amt = pd.DataFrame({"A": rng.uniform(1e5, 1e7, n), "B": rng.uniform(1e5, 1e7, n)}, index=idx)
-    close = pd.DataFrame({"A": 10 + rng.normal(0, 0.5, n).cumsum(), "B": 10 + rng.normal(0, 0.5, n).cumsum()}, index=idx)
-    amt.iloc[10:13, 0] = np.nan
-    close.iloc[10:13, 0] = np.nan
-    ctx = FactorContext(
-        data=FakeDataService(panels={"amount_k": amt, "close": close}),
-        symbols=["A","B"], start_date=idx[20], end_date=idx[-1], warmup_days=20,
+    symbols = ["A", "B"]
+    close = pd.DataFrame(
+        {s: 10 + rng.normal(0, 0.5, n).cumsum() for s in symbols}, index=idx,
     )
-    factor = LowTurnover().compute(ctx, {})
+    close.iloc[15:18, 0] = np.nan
+    ctx = FactorContext(
+        data=FakeDataService(panels={"close": close}), symbols=symbols,
+        start_date=idx[25], end_date=idx[-1], warmup_days=25,
+    )
+    factor = MaxAnomaly().compute(ctx, {})
     assert not factor.empty
+    # B 列末段非 NaN
     assert factor["B"].iloc[-5:].notna().all()
 
 
-def test_low_turnover_col_order_invariance():
+def test_max_anomaly_col_order_invariance():
     n = 40
     idx = pd.bdate_range("2024-01-02", periods=n)
     rng = np.random.default_rng(2)
-    symbols = ["A","B","C"]
-    amt = pd.DataFrame({s: rng.uniform(1e5, 1e7, n) for s in symbols}, index=idx)
-    close = pd.DataFrame({s: 10 + rng.normal(0, 0.5, n).cumsum() for s in symbols}, index=idx)
-
+    symbols = ["A", "B", "C"]
+    close = pd.DataFrame(
+        {s: 10 + rng.normal(0, 0.5, n).cumsum() for s in symbols}, index=idx,
+    )
     ctx_a = FactorContext(
-        data=FakeDataService(panels={"amount_k": amt, "close": close}),
-        symbols=symbols, start_date=idx[20], end_date=idx[-1], warmup_days=20,
+        data=FakeDataService(panels={"close": close}), symbols=symbols,
+        start_date=idx[25], end_date=idx[-1], warmup_days=25,
     )
-    fa = LowTurnover().compute(ctx_a, {})
+    fa = MaxAnomaly().compute(ctx_a, {})
 
-    shuffled = ["C","A","B"]
+    shuffled = ["C", "A", "B"]
     ctx_s = FactorContext(
-        data=FakeDataService(panels={"amount_k": amt[shuffled], "close": close[shuffled]}),
-        symbols=shuffled, start_date=idx[20], end_date=idx[-1], warmup_days=20,
+        data=FakeDataService(panels={"close": close[shuffled]}), symbols=shuffled,
+        start_date=idx[25], end_date=idx[-1], warmup_days=25,
     )
-    fs = LowTurnover().compute(ctx_s, {})
+    fs = MaxAnomaly().compute(ctx_s, {})
 
     target = fa.index[5]
     for c in symbols:
-        assert abs(fa.loc[target, c] - fs.loc[target, c]) < 1e-12
+        a, s = fa.loc[target, c], fs.loc[target, c]
+        if pd.isna(a):
+            assert pd.isna(s)
+        else:
+            assert abs(a - s) < 1e-12
 ```
 
 **Step 2: Run failing**
 ```bash
-/Users/jinziguan/Desktop/quantitativeTradeProject/factor_research/.claude/worktrees/factors-batch1/backend/.venv/bin/python -m pytest backend/tests/test_factors_low_turnover.py -v
+/Users/jinziguan/Desktop/quantitativeTradeProject/factor_research/.claude/worktrees/factors-batch1/backend/.venv/bin/python -m pytest backend/tests/test_factors_max_anomaly.py -v
 ```
 
 **Step 3: Implement**
 
-创建 `backend/factors/volume/low_turnover.py`：
+创建 `backend/factors/volatility/max_anomaly.py`：
 
 ```python
-"""LowTurnover：低换手率溢价（Liu-Stambaugh-Yuan 2019 A 股异象）。
+"""MaxAnomaly：MAX 异象（彩票股反转）。
 
-公式：``factor_t = -1 * (rolling_mean(amount_k, window) / rolling_mean(close, window))``
+公式：``factor_t = -1 * rolling_max(close.pct_change(), window)``。
 
-实现等同于现有 ``turnover_ratio_proxy`` 末尾乘以 -1——保留独立因子方便
-LightGBM 合成器同时看到两个 sign 方向，且语义直观（低换手 → 长仓）。
+直觉：Bali-Cakici-Whitelaw (RFS 2011) "Maxing Out: Stocks as Lotteries" 提出
+MAX 异象——过去 N 日单日最高收益（"彩票特征"）越大的股票未来表现越差。
+A 股 Han-Hu-Yang (PBFJ 2018) 等多篇论文确认有效。Negate 后大值 → 低 MAX → 长仓信号。
 
-直觉：A 股低换手率长期跑赢高换手（顶刊 RFS 验证）。这是与美股价值不同的
-A 股专属异象之一。
+与 IVOL 的区别（同样基于 returns）：IVOL 是 60 日**残差波动**度量"持续紊乱程度"，
+MAX 是 20 日**单日最大**度量"瞬时极端程度"，两者在因子空间正交。
 
-预热 = ``int(window * 1.5) + 10`` 自然日。
+预热 = ``int(window * 1.5) + 10`` 自然日（pct_change 1 + rolling window-1 + 节假 buffer）。
 """
 from __future__ import annotations
 
@@ -1270,15 +1280,15 @@ import pandas as pd
 from backend.factors.base import BaseFactor, FactorContext
 
 
-class LowTurnover(BaseFactor):
-    factor_id = "low_turnover"
-    display_name = "低换手反向（-amount/close 均值）"
-    category = "volume"
-    description = "-1 * (rolling_mean(amount_k, 20) / rolling_mean(close, 20))。"
-    hypothesis = "A 股低换手长期跑赢高换手（Liu-Stambaugh-Yuan 2019 RFS 异象）。"
+class MaxAnomaly(BaseFactor):
+    factor_id = "max_anomaly"
+    display_name = "MAX 异象（-rolling_max(returns, 20)）"
+    category = "volatility"
+    description = "过去 20 日单日最高收益取负——高 MAX 股票（彩票特征）未来收益更低。"
+    hypothesis = "Bali-Cakici-Whitelaw 2011 / Han-Hu-Yang 2018：高 MAX 股未来跑输；取负使高分→长仓。"
     params_schema: dict = {
-        "window": {"type": "int", "default": 20, "min": 5, "max": 252,
-                   "desc": "rolling 窗口（交易日）"},
+        "window": {"type": "int", "default": 20, "min": 5, "max": 60,
+                   "desc": "rolling max 窗口（交易日，20 ≈ 1 月）"},
     }
     default_params: dict = {"window": 20}
     supported_freqs = ("1d",)
@@ -1291,29 +1301,26 @@ class LowTurnover(BaseFactor):
         window = int(params.get("window", self.default_params["window"]))
         warmup = self.required_warmup(params)
         data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        amt = ctx.data.load_panel(
-            ctx.symbols, data_start, ctx.end_date.date(),
-            freq="1d", field="amount_k", adjust="none",
-        )
         close = ctx.data.load_panel(
             ctx.symbols, data_start, ctx.end_date.date(),
             freq="1d", field="close", adjust="qfq",
         )
-        if amt.empty or close.empty:
+        if close.empty:
             return pd.DataFrame()
-        factor = -(amt.rolling(window).mean() / close.rolling(window).mean())
+        ret = close.pct_change(fill_method=None)
+        factor = -ret.rolling(window).max()
         return factor.loc[ctx.start_date :]
 ```
 
 **Step 4: Run passing**
 ```bash
-/Users/jinziguan/Desktop/quantitativeTradeProject/factor_research/.claude/worktrees/factors-batch1/backend/.venv/bin/python -m pytest backend/tests/test_factors_low_turnover.py -v
+/Users/jinziguan/Desktop/quantitativeTradeProject/factor_research/.claude/worktrees/factors-batch1/backend/.venv/bin/python -m pytest backend/tests/test_factors_max_anomaly.py -v
 ```
 
 **Step 5: Commit**
 ```bash
-git add backend/factors/volume/low_turnover.py backend/tests/test_factors_low_turnover.py
-git commit -m "feat(factor): low_turnover 低换手反向（-amount/close 均值，A 股异象）"
+git add backend/factors/volatility/max_anomaly.py backend/tests/test_factors_max_anomaly.py
+git commit -m "feat(factor): max_anomaly MAX 异象（-rolling_max(returns, 20)，A 股彩票股反转）"
 ```
 
 ---
@@ -1541,7 +1548,7 @@ from backend.engine.base_factor import BaseFactor
 _BATCH1_FACTOR_IDS = {
     "alpha101_6", "alpha101_12", "alpha101_101",
     "earnings_yield", "roe_yoy", "gp_margin_stability",
-    "low_turnover", "idio_vol_reversal",
+    "idio_vol_reversal", "max_anomaly",
 }
 
 
@@ -1549,8 +1556,7 @@ def test_all_batch1_factor_modules_import_cleanly():
     """8 个因子模块全部成功 import（不抛异常）。"""
     from backend.factors.alpha101 import alpha101_6, alpha101_12, alpha101_101
     from backend.factors.fundamental import earnings_yield, roe_yoy, gp_margin_stability
-    from backend.factors.volume import low_turnover
-    from backend.factors.volatility import idio_vol_reversal
+    from backend.factors.volatility import idio_vol_reversal, max_anomaly
 
 
 def test_factor_registry_finds_all_batch1_factors():
@@ -1571,12 +1577,12 @@ def test_each_batch1_factor_has_required_classvars():
     from backend.factors.fundamental.earnings_yield import EarningsYield
     from backend.factors.fundamental.roe_yoy import RoeYoy
     from backend.factors.fundamental.gp_margin_stability import GpMarginStability
-    from backend.factors.volume.low_turnover import LowTurnover
     from backend.factors.volatility.idio_vol_reversal import IdioVolReversal
+    from backend.factors.volatility.max_anomaly import MaxAnomaly
 
     cls_list = [Alpha101_6, Alpha101_12, Alpha101_101,
                 EarningsYield, RoeYoy, GpMarginStability,
-                LowTurnover, IdioVolReversal]
+                IdioVolReversal, MaxAnomaly]
     for cls in cls_list:
         assert isinstance(cls.factor_id, str) and cls.factor_id
         assert isinstance(cls.display_name, str) and cls.display_name

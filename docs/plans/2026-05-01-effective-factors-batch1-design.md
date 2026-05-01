@@ -32,10 +32,9 @@ backend/factors/
 │   ├── earnings_yield.py     (NEW)  EP = eps_ttm/close
 │   ├── roe_yoy.py            (NEW)  ROE 同比
 │   └── gp_margin_stability.py(NEW)  毛利率稳定性
-└── volume/
-    └── low_turnover.py       (NEW)  低换手反向
 └── volatility/
-    └── idio_vol_reversal.py  (NEW)  特质波动率反转
+    ├── idio_vol_reversal.py  (NEW)  特质波动率反转
+    └── max_anomaly.py        (NEW)  MAX 异象（彩票股反转）
 ```
 
 每个因子文件 ~70-100 行（公式 + warmup + compute + docstring）。
@@ -153,23 +152,30 @@ factor_t = -1 * rolling_std(gp_margin, window=252)
 
 ### C. A 股专属异象 2 因子
 
-#### C1. `low_turnover` — 低换手溢价
+#### C1. `max_anomaly` — MAX 异象（彩票股反转）
+
+> **设计修正记录**（2026-05-01）：原设计用 `low_turnover = -turnover_ratio` 作为 C1，被 quality reviewer 抓出方法论错误：树模型（LightGBM）的 split 选择对单调变换（含 negate）天然不变，`x` 与 `-x` 划分出完全相同的子集，模型只会随机选一个用，另一个 feature_importance 归零。两个共线因子既浪费 slot 又干扰 importance 排名。修正方案：换成与 turnover/IVOL 真正不共线的 A 股异象——MAX 异象（高单日"彩票"特征股票未来收益更低）。
 
 **公式**：
 ```
-factor_t = -1 * turnover_proxy(window=20)
-        = -1 * (rolling_mean(amount_k, 20) / rolling_mean(close, 20))
+ret_t = close_t.pct_change()
+factor_t = -1 * rolling_max(ret_t, window=20)
 ```
 
-**直觉**：A 股低换手率长期跑赢高换手（Liu-Stambaugh-Yuan 2019 顶刊验证），与美股价值不同的特色异象。Negate 现成 turnover_ratio_proxy 即得长仓信号。
+**直觉**：Bali-Cakici-Whitelaw (RFS 2011) "Maxing Out: Stocks as Lotteries" 提出 MAX 异象——过去 N 日单日最高收益（"彩票特征"）越大的股票未来表现越差。A 股 Han-Hu-Yang (PBFJ 2018) 等论文确认有效。Negate 后大值 → 低 MAX → 长仓信号。
 
-**数据**：`amount_k`（不复权）+ `close`（qfq）。
+**数据**：`close`（qfq）。
 
-**参数**：`window=20`。
+**参数**：`window=20`（≈1 月）。
 
-**预热**：30 自然日（同 turnover_ratio）。
+**预热**：`int(window * 1.5) + 5` 自然日（pct_change 1 + rolling 19 + 节假 buffer）。
 
-**实现关键**：与现有 `turnover_ratio` 100% 相同 + 末尾 `* -1`。**为何不在现因子加 sign 参数**：保留两个独立因子让 LightGBM 自己决定要哪个 sign（不耦合现有因子），且语义命名清晰（`low_turnover` 直接告诉读者方向）。
+**实现关键**：
+1. 算 returns：`close.pct_change(fill_method=None)`（停牌 NaN 不传染）
+2. 算 rolling max：`ret.rolling(window).max()`
+3. 取负
+
+**与 IVOL 的区别**（C2 也用 returns）：IVOL 是 60 日**残差波动**，MAX 是 20 日**单日最大**——前者度量"持续紊乱程度"，后者度量"瞬时极端程度"。两者在因子空间正交（IVOL ≈ rolling_std，MAX ≈ rolling_max；不同的统计量），不构成共线。
 
 #### C2. `idio_vol_reversal` — 特质波动率反转
 
@@ -205,7 +211,7 @@ factor_t,s = -1 * rolling_std(residual_{,s}, window=60)
 | BP / 小市值是否做？ | 不做 | 现有数据缺 net_assets / total_share，留批次 2 |
 | 财报字段扩展？ | 不扩 | YAGNI；批次 1 用现有 6 字段就够 |
 | 指数基准导入？ | 不做 | IVOL / Beta 用横截面均值近似 |
-| 改既有 turnover_ratio 加 sign 参数？ | 不改 | 新建 low_turnover 独立因子，方向命名直观 |
+| C1 用 low_turnover (= -turnover_ratio) 还是 max_anomaly？ | max_anomaly | 树模型对 negate 不敏感，-turnover_ratio 与 turnover_ratio 100% 共线（split 选择不变），feature_importance 会归零。换 MAX 异象（rolling_max(returns)）真正与 turnover/IVOL 正交 |
 | ROE 同比 shift 的精度？ | 252 交易日（不严格对齐 announcement） | 简单；偏差不损显著性 |
 | 因子值取负在哪一层？ | 因子内部 negate | 让因子分数与"长仓信号方向"对齐，便于读者直觉 |
 
@@ -228,7 +234,7 @@ factor_t,s = -1 * rolling_std(residual_{,s}, window=60)
 新建测试文件分布：
 - `backend/tests/test_alpha101_factors.py`（覆盖 alpha101_6 / 12 / 101，共 9 测试）
 - `backend/tests/test_fundamental_factors.py`（覆盖 earnings_yield / roe_yoy / gp_margin_stability，共 9 测试）
-- `backend/tests/test_anomaly_factors.py`（覆盖 low_turnover / idio_vol_reversal，共 6 测试）
+- `backend/tests/test_anomaly_factors.py`（覆盖 idio_vol_reversal / max_anomaly，共 6 测试）
 
 ## API & 前端
 
@@ -260,8 +266,7 @@ factor_t,s = -1 * rolling_std(residual_{,s}, window=60)
 新增 8 个 vs 现有 14 个，目录变化：
 - `alpha101/` 1 → **4** （从单点变体系雏形）
 - `fundamental/` 0 → **3** （新建目录）
-- `volume/` 1 → **2**
-- `volatility/` 2 → **3**
+- `volatility/` 2 → **4**（含 idio_vol_reversal + max_anomaly）
 
 整体 14 → **22** 因子，且分布从"侧重量价 / 震荡器"扩到"量价 + 基本面 + A 股异象"三足鼎立。
 
