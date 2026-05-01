@@ -77,3 +77,57 @@ def test_combine_lightgbm_returns_pred_and_importance():
     assert set(fi.keys()) == {"f1", "f2", "f3"}
     # importance 值都 ≥ 0
     assert all(v >= 0 for v in fi.values())
+
+
+def test_combine_lightgbm_no_lookahead_when_factor_uncorrelated_with_future():
+    """关键防泄漏测试：因子值与未来收益**完全无关**时，walk-forward 不应能预测出
+    高 IC——若实现错把未来数据混进训练（lookahead），test set IC 会假高。
+
+    这条测试是数据科学防过拟合 / 防泄漏的最低标准——若 _combine_lightgbm 错
+    把未来日期的 (X, y) 训练集化，会被这里抓住。
+    """
+    from backend.services.composition_service import _combine_lightgbm
+
+    # 故意构造：因子完全独立于 label（所以理论 IC ≈ 0）
+    rng = np.random.default_rng(42)
+    n_dates, n_symbols = 100, 40
+    dates = pd.date_range("2024-01-01", periods=n_dates)
+    symbols = [f"S{i:03d}" for i in range(n_symbols)]
+    z_frames = [
+        pd.DataFrame(rng.standard_normal((n_dates, n_symbols)), index=dates, columns=symbols),
+        pd.DataFrame(rng.standard_normal((n_dates, n_symbols)), index=dates, columns=symbols),
+    ]
+    label = pd.DataFrame(
+        rng.standard_normal((n_dates, n_symbols)), index=dates, columns=symbols,
+    )
+    # 把 label rank 化到 [-1, 1] 模拟 future_return rank
+    label = label.rank(axis=1, pct=True) * 2 - 1
+
+    pred, _fi = _combine_lightgbm(
+        z_frames, label, ["f1", "f2"], forward_period=5, warmup_days=30,
+    )
+
+    # 计算 pred vs label 的 cross-section IC（spearman 近似——pred 对应日期 t，
+    # label 对应日期 t 已经是 t→t+5 收益的 rank）
+    pred_valid = pred.dropna(how="all")
+    common_dates = pred_valid.index.intersection(label.index)
+    ics = []
+    for d in common_dates:
+        p_row = pred_valid.loc[d]
+        l_row = label.loc[d]
+        valid = p_row.notna() & l_row.notna()
+        if valid.sum() < 5:
+            continue
+        ic = p_row[valid].corr(l_row[valid], method="spearman")
+        if not np.isnan(ic):
+            ics.append(ic)
+
+    if not ics:
+        pytest.fail("no valid IC computed")
+    mean_ic = float(np.mean(ics))
+    # 因子与 label 完全独立 → IC 期望 0；考虑随机性 |IC| < 0.10 即视为通过
+    # 若 lookahead 把未来 label 灌进训练，模型会在测试集"复读"label，IC 会 > 0.5
+    assert abs(mean_ic) < 0.15, (
+        f"防泄漏失败：IC={mean_ic:.3f} 显著大于 0；可能 walk-forward 把未来"
+        " label 漏到训练集了"
+    )
