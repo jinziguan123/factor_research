@@ -356,6 +356,24 @@ def _combine_orthogonal_equal(z_frames: list[pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(out, index=z_frames[0].index, columns=z_frames[0].columns)
 
 
+def _build_future_return_label(
+    close: pd.DataFrame, forward_period: int = 5,
+) -> pd.DataFrame:
+    """每日 cross-section rank 化的未来 N 日收益（label for ml_lgb）。
+
+    1. ``future_return = close.shift(-N) / close - 1``——日期 t 的 label 是 t→t+N 收益
+    2. 每日横截面 ``rank(pct=True)`` → [0, 1]
+    3. 线性映射到 [-1, 1]：``rank * 2 - 1``
+    4. 最末 N 天没未来收益 → NaN（自然丢失）
+
+    rank 化的目的：去噪 + 与项目"rank IC"评估口径一致——LightGBM 学的是
+    "模型版 rank IC"，比直接学绝对收益更稳。
+    """
+    fwd_return = close.shift(-forward_period) / close - 1
+    ranked = fwd_return.rank(axis=1, pct=True)  # [0, 1] pct rank（NaN 保留）
+    return ranked * 2.0 - 1.0
+
+
 def _load_or_compute_factor(
     data: DataService,
     reg: FactorRegistry,
