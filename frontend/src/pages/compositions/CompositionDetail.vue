@@ -108,6 +108,35 @@ const icColumns: DataTableColumns<IcRow> = [
       return fmtPct(r.ic_contribution, 1)
     },
   },
+  {
+    // LGB 特征重要度：仅 ml_lgb 方法且 payload.feature_importance 有该 factor_id 时显示。
+    // 归一化条形图（max=100%）+ 原始数值，方便横向比较各子因子在 LightGBM 模型中的相对贡献。
+    title: 'LGB Importance',
+    key: 'lgb_importance',
+    width: 130,
+    render: (r) => {
+      if (run.value?.method !== 'ml_lgb') return '-'
+      const fi = (payload.value?.feature_importance ?? {}) as Record<string, number>
+      const vals = Object.values(fi)
+      if (vals.length === 0) return '-'
+      const v = fi[r.factor_id]
+      if (v == null) return '-'
+      const max = Math.max(...vals, 1)
+      const pct = ((v / max) * 100).toFixed(0)
+      return h('div', { style: 'display:flex;align-items:center;gap:6px' }, [
+        h(
+          'div',
+          {
+            style: 'width:60px;height:8px;background:#eee;border-radius:2px;overflow:hidden',
+          },
+          h('div', {
+            style: `width:${pct}%;height:100%;background:#F0B90B`,
+          }),
+        ),
+        h('span', { style: 'color:#848E9C;font-size:11px' }, v.toFixed(1)),
+      ])
+    },
+  },
 ]
 
 // 权重表（ic_weighted 才有）
