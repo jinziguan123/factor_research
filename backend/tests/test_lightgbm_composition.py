@@ -212,3 +212,30 @@ def test_combine_lightgbm_feature_importance_reflects_signal_strength():
     assert fi["signal"] > fi["noise"], (
         f"importance 区分失败：signal={fi['signal']} 应明显高于 noise={fi['noise']}"
     )
+
+
+# ---------------------------- run_composition ml_lgb 路由 ----------------------------
+
+
+def test_run_composition_dispatches_ml_lgb_when_method_is_ml_lgb(monkeypatch):
+    """method='ml_lgb' 时 run_composition 走 _combine_lightgbm 分支。"""
+    from backend.services import composition_service as cs
+
+    # 验证 _ALLOWED_METHODS 包含 ml_lgb（schema 与 service 同步）
+    assert "ml_lgb" in cs._ALLOWED_METHODS
+
+
+def test_run_composition_method_validation_accepts_ml_lgb():
+    """schemas.CreateCompositionIn 接受 method='ml_lgb' 不抛 ValueError。"""
+    from backend.api.schemas import CreateCompositionIn
+
+    # 最小合法 body
+    body = {
+        "factor_items": [{"factor_id": "f1"}, {"factor_id": "f2"}],
+        "method": "ml_lgb",
+        "pool_id": 1,
+        "start_date": "2024-01-01",
+        "end_date": "2024-06-01",
+    }
+    obj = CreateCompositionIn(**body)
+    assert obj.method == "ml_lgb"

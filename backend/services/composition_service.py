@@ -374,6 +374,11 @@ def _build_future_return_label(
     return ranked * 2.0 - 1.0
 
 
+# 受支持的 method 枚举——schema 与 service 必须同步。
+# 测试通过 import 此常量反查保证两处不漂移。
+_ALLOWED_METHODS = ("equal", "ic_weighted", "orthogonal_equal", "ml_lgb")
+
+
 # LightGBM 默认超参——保守起点防过拟合（量化数据信噪比低）
 _DEFAULT_LGB_PARAMS = {
     "n_estimators": 100,
@@ -551,7 +556,7 @@ def run_composition(run_id: str, body: dict) -> None:
             - ``pool_id``（int）
             - ``start_date`` / ``end_date``（ISO 字符串或日期对象）
             - ``factor_items``：list[{"factor_id": str, "params": dict | None}]
-            - ``method``：``equal`` / ``ic_weighted`` / ``orthogonal_equal``
+            - ``method``：``equal`` / ``ic_weighted`` / ``orthogonal_equal`` / ``ml_lgb``
             - ``n_groups``（int，默认 5）
             - ``forward_periods``（list[int]，默认 [1,5,10]）
             - ``ic_weight_period``（int，默认 1；仅 ic_weighted 用）
@@ -571,8 +576,11 @@ def run_composition(run_id: str, body: dict) -> None:
             # 单因子合成等同于评估，应走 /evals。
             raise ValueError("factor_items 至少需要 2 个因子")
         method = str(body.get("method") or "equal")
-        if method not in ("equal", "ic_weighted", "orthogonal_equal"):
-            raise ValueError(f"method={method!r} 不支持，仅接受 equal/ic_weighted/orthogonal_equal")
+        if method not in _ALLOWED_METHODS:
+            raise ValueError(
+                f"method={method!r} 不支持，"
+                f"仅接受 {'/'.join(_ALLOWED_METHODS)}"
+            )
 
         reg = FactorRegistry()
         reg.scan_and_register()
@@ -644,6 +652,9 @@ def run_composition(run_id: str, body: dict) -> None:
         # 5. 按 method 合成。
         z_frames = [_zscore_per_day(f) for f in aligned]
         weights: dict[str, float] | None = None
+        # ml_lgb 才会赋值，其它分支保留 None；payload 写入处仅在非 None 时落库，
+        # 避免污染线性方法的输出结构。
+        feature_importance: dict[str, float] | None = None
         if method == "equal":
             F_combined = _combine_equal(z_frames)
         elif method == "ic_weighted":
@@ -651,6 +662,23 @@ def run_composition(run_id: str, body: dict) -> None:
                 z_frames, close, factor_ids, period=ic_weight_period
             )
             F_combined = _combine_weighted(z_frames, weights, factor_ids)
+        elif method == "ml_lgb":
+            # LightGBM 非线性合成：用因子横截面 z-score 预测 forward_period 的 rank-pct
+            # 标签（[-1, 1]），walk-forward 训练防穿越。
+            #
+            # design doc 决定 forward_period 固定 5，不暴露给 UI 也不复用
+            # ic_weight_period（后者默认 1，语义是单日 IC 加权，不是 ml_lgb 的"未来 N 日 rank"）。
+            LGB_FORWARD_PERIOD = 5
+            label_panel = _build_future_return_label(
+                close, forward_period=LGB_FORWARD_PERIOD,
+            )
+            F_combined, feature_importance = _combine_lightgbm(
+                z_frames,
+                label_panel,
+                factor_ids,
+                forward_period=LGB_FORWARD_PERIOD,
+                warmup_days=60,  # design doc 默认；与 IC 加权 lookback 语义一致
+            )
         else:  # orthogonal_equal
             F_combined = _combine_orthogonal_equal(z_frames)
 
@@ -666,6 +694,11 @@ def run_composition(run_id: str, body: dict) -> None:
             forward_periods=fwd_periods,
             n_groups=n_groups_req,
         )
+
+        # 6.1 ml_lgb 把 LightGBM 跨折平均 feature importance 塞进 payload（仅 ml_lgb
+        #     有这个字段；其它方法不写入，避免污染前端展示结构）。
+        if feature_importance is not None:
+            payload["feature_importance"] = feature_importance
 
         # 7. 每个原始因子的 IC 汇总（base_period 上），方便前端对比"合成 vs. 单因子"。
         base_period = fwd_periods[0] if fwd_periods else 1

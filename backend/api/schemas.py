@@ -174,7 +174,7 @@ class CreateCompositionIn(BaseModel):
     - ``factor_items`` 至少 2 个，最多 8 个：
       < 2 退化为单因子评估，应走 /evals；> 8 相关性矩阵已经很难看清，
       且 orthogonal_equal 在高维下数值稳定性变差。
-    - ``method`` 限制 3 种，避免拼写错误静默跑出奇怪结果。
+    - ``method`` 限制 4 种，避免拼写错误静默跑出奇怪结果。
     - ``ic_weight_period`` 只对 ic_weighted 有用，放这里是为了 schema 统一。
     """
 
@@ -190,9 +190,10 @@ class CreateCompositionIn(BaseModel):
 
     @model_validator(mode="after")
     def _check_fields(self) -> "CreateCompositionIn":
-        if self.method not in ("equal", "ic_weighted", "orthogonal_equal"):
+        if self.method not in ("equal", "ic_weighted", "orthogonal_equal", "ml_lgb"):
             raise ValueError(
-                f"method={self.method!r} 不支持，仅接受 equal/ic_weighted/orthogonal_equal"
+                f"method={self.method!r} 不支持，"
+                "仅接受 equal/ic_weighted/orthogonal_equal/ml_lgb"
             )
         if self.start_date >= self.end_date:
             raise ValueError(
