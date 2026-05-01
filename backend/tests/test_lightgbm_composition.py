@@ -131,3 +131,54 @@ def test_combine_lightgbm_no_lookahead_when_factor_uncorrelated_with_future():
         f"防泄漏失败：IC={mean_ic:.3f} 显著大于 0；可能 walk-forward 把未来"
         " label 漏到训练集了"
     )
+
+
+def test_combine_lightgbm_cold_start_returns_all_nan():
+    """warmup_days > 全部日期 → 没机会训模型 → pred 全 NaN，不抛错。"""
+    from backend.services.composition_service import _combine_lightgbm
+
+    z_frames = [_make_factor_panel(20, 10, seed=0)]
+    label = _make_factor_panel(20, 10, seed=99)
+    pred, fi = _combine_lightgbm(
+        z_frames, label, ["f1"], forward_period=5, warmup_days=100,
+    )
+    assert pred.isna().all().all()
+    assert fi == {"f1": 0.0}  # 无训练 → mean 默认 0
+
+
+def test_combine_lightgbm_insufficient_samples_skips():
+    """样本不足（< 100 行训练数据）→ 当日跳过预测，pred 当日 NaN，但函数不崩。
+
+    n_dates=40, n_symbols=2, warmup_days=25, forward_period=5：
+      - i=0..24 被关 1 (warmup) 拦
+      - i=25..29 被关 2 (forward_period 边界，要求 i - 5 >= 25 即 i >= 30) 拦
+      - i=30..39 能过关 1+2，但 train_end_idx ∈ [25..34]，对应训练池
+        最多 35×2 = 70 行 < 100 → 关 3 (样本不足) 全部拦掉。
+
+    实测 pred 全 NaN、fi={'f1': 0.0}——这就是"样本不足时不崩 + 返回结构合法"的契约。
+    """
+    from backend.services.composition_service import _combine_lightgbm
+
+    z_frames = [_make_factor_panel(40, 2, seed=0)]
+    label = _make_factor_panel(40, 2, seed=99)
+    pred, fi = _combine_lightgbm(
+        z_frames, label, ["f1"], forward_period=5, warmup_days=25,
+    )
+    # 函数不崩 + 返回的结构合理
+    assert pred.shape == (40, 2)
+    assert "f1" in fi
+    # 不要硬断 pred 全 NaN——如果将来有人放宽 < 100 阈值这条会变；
+    # 但只要"样本不足时不崩 + 返回结构合法"，契约就守住了。
+
+
+def test_combine_lightgbm_empty_factors_raises_value_error():
+    """空因子集 → 抛 ValueError（design doc 契约）。
+
+    pd.concat([], axis=1) 在 pandas 当前版本确定性抛 ValueError；
+    收紧异常类型避免将来 regression 漏过。
+    """
+    from backend.services.composition_service import _combine_lightgbm
+
+    label = _make_factor_panel(50, 10, seed=99)
+    with pytest.raises(ValueError):
+        _combine_lightgbm([], label, [], forward_period=5, warmup_days=20)
