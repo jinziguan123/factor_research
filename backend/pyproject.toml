@@ -37,6 +37,7 @@ dependencies = [
     "cryptography>=46.0.7",
     "alphalens-reloaded>=0.4.6",
     "akshare>=1.13.0",
+    "lightgbm>=4.0",
 ]
 
 [tool.setuptools.packages.find]
