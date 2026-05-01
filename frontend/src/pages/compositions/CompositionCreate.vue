@@ -74,11 +74,12 @@ function getFactorSchema(fid: string): Record<string, any> | null {
   return f.params_schema
 }
 
-const method = ref<'equal' | 'ic_weighted' | 'orthogonal_equal'>('equal')
+const method = ref<'equal' | 'ic_weighted' | 'orthogonal_equal' | 'ml_lgb'>('equal')
 const methodOptions = [
   { label: '等权 (equal) — 每个因子 z-score 后算术平均', value: 'equal' },
   { label: 'IC 加权 (ic_weighted) — 按全窗口 IC 自动加权', value: 'ic_weighted' },
   { label: '正交等权 (orthogonal_equal) — Gram-Schmidt 去共线后等权', value: 'orthogonal_equal' },
+  { label: 'LightGBM 合成 (ml_lgb) — walk-forward 学非线性权重，耗时 3-10 分钟', value: 'ml_lgb' },
 ]
 
 const poolId = ref<number | null>(null)
