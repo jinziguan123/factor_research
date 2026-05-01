@@ -182,3 +182,33 @@ def test_combine_lightgbm_empty_factors_raises_value_error():
     label = _make_factor_panel(50, 10, seed=99)
     with pytest.raises(ValueError):
         _combine_lightgbm([], label, [], forward_period=5, warmup_days=20)
+
+
+def test_combine_lightgbm_feature_importance_reflects_signal_strength():
+    """构造一个因子真带信号（与 label 相关）+ 一个噪声因子，importance 应区分。"""
+    from backend.services.composition_service import _combine_lightgbm
+
+    rng = np.random.default_rng(7)
+    n_dates, n_symbols = 80, 30
+    dates = pd.date_range("2024-01-01", periods=n_dates)
+    symbols = [f"S{i:03d}" for i in range(n_symbols)]
+
+    # signal_factor：与 label 高度相关
+    label_raw = rng.standard_normal((n_dates, n_symbols))
+    signal_factor = label_raw + rng.standard_normal((n_dates, n_symbols)) * 0.3
+    noise_factor = rng.standard_normal((n_dates, n_symbols))
+
+    z_frames = [
+        pd.DataFrame(signal_factor, index=dates, columns=symbols),
+        pd.DataFrame(noise_factor, index=dates, columns=symbols),
+    ]
+    label = pd.DataFrame(label_raw, index=dates, columns=symbols)
+    label = label.rank(axis=1, pct=True) * 2 - 1
+
+    _pred, fi = _combine_lightgbm(
+        z_frames, label, ["signal", "noise"],
+        forward_period=5, warmup_days=20,
+    )
+    assert fi["signal"] > fi["noise"], (
+        f"importance 区分失败：signal={fi['signal']} 应明显高于 noise={fi['noise']}"
+    )
