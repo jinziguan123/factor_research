@@ -30,6 +30,7 @@ class BBIC(BaseFactor):
         "BBIC = BBI(n1,n2,n3,n4) / close；BBI 为 4 条均线均值，"
         "BBIC > 1 表示价格低于多空均线（潜在超卖），< 1 表示价格高于均线（强势）。"
     )
+    hypothesis = "多周期均线共识（BBI）与当前价之比——价低于多空均线视为超卖，均值回归信号。"
     params_schema: dict = {
         "n1": {"type": "int", "default": 3, "min": 2, "max": 60, "desc": "MA 周期 1（短）"},
         "n2": {"type": "int", "default": 6, "min": 2, "max": 120, "desc": "MA 周期 2"},
@@ -50,23 +51,12 @@ class BBIC(BaseFactor):
         )
 
     def required_warmup(self, params: dict) -> int:
-        # 最长 MA 决定 warmup；1.5x 折自然日 + 10 天 buffer。
-        return int(max(self._windows(params)) * 1.5) + 10
+        return self._calc_warmup(max(self._windows(params)))
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n1, n2, n3, n4 = self._windows(params)
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-
-        close = ctx.data.load_panel(
-            ctx.symbols,
-            data_start,
-            ctx.end_date.date(),
-            freq="1d",
-            field="close",
-            adjust="qfq",
-        )
-        if close.empty:
+        close = self._load_close_panel(ctx, params)
+        if close is None:
             return pd.DataFrame()
 
         # rolling 默认 min_periods=window，前 window-1 行 NaN，符合预热语义。

@@ -39,17 +39,12 @@ class MaxAnomaly(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        return int(window * 1.5) + 10
+        return self._calc_warmup(window)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        close = ctx.data.load_panel(
-            ctx.symbols, data_start, ctx.end_date.date(),
-            freq="1d", field="close", adjust="qfq",
-        )
-        if close.empty:
+        close = self._load_close_panel(ctx, params)
+        if close is None:
             return pd.DataFrame()
         ret = close.pct_change(fill_method=None)
         factor = -ret.rolling(window).max()

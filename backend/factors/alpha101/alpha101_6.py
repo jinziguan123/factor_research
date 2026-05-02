@@ -29,7 +29,7 @@ class Alpha101_6(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        return int(window * 1.5) + 5
+        return self._calc_warmup(window, buffer_days=5)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))

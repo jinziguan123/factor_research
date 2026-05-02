@@ -15,12 +15,15 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import ClassVar
 
 import pandas as pd
 
 from backend.storage.data_service import DataService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -77,6 +80,114 @@ class BaseFactor:
     params_schema: ClassVar[dict] = {}
     default_params: ClassVar[dict] = {}
     supported_freqs: ClassVar[tuple[str, ...]] = ("1d",)
+
+    # -- helpers for subclasses ------------------------------------------------
+
+    @staticmethod
+    def _calc_warmup(trading_days: int, buffer_days: int = 10) -> int:
+        """交易日 → 自然日 warmup 折算。
+
+        通用公式 ``int(trading_days * 1.5) + buffer_days``：
+        - × 1.5 覆盖周末（每周去掉 2 天，约 × 1.4）并留余量；
+        - buffer_days 兜住春节 / 国庆等长假（默认 10 天）。
+        """
+        return int(trading_days * 1.5) + buffer_days
+
+    def _get_param(self, params: dict, key: str) -> int | float:
+        """从 params 取参数值，缺失时回退到 default_params。
+
+        根据 params_schema 中的 type 自动转换（int / float）。
+        """
+        schema = self.params_schema.get(key, {})
+        ptype = schema.get("type", "int")
+        default = self.default_params.get(key)
+        if default is None:
+            raise KeyError(
+                f"参数 {key!r} 不在 default_params 中，无法回退"
+            )
+        raw = params.get(key, default)
+        if ptype == "int":
+            return int(raw)
+        elif ptype == "float":
+            return float(raw)
+        return raw
+
+    def validate_params(self, params: dict) -> dict:
+        """校验并补全 params，返回规范化后的参数字典。
+
+        - 对 ``params_schema`` 中声明的每个参数检查类型和范围；
+        - 缺失的参数用 ``default_params`` 回退；
+        - 不在 schema 中的未知参数会被移除并告警。
+
+        Returns:
+            补全后的 params dict（仅包含 schema 声明的 key）。
+        """
+        validated: dict = {}
+        for key, meta in self.params_schema.items():
+            val = params.get(key, self.default_params.get(key))
+            if val is None:
+                raise ValueError(
+                    f"因子 {self.factor_id} 缺少参数 {key!r} 且无默认值"
+                )
+            ptype = meta.get("type", "int")
+            try:
+                if ptype == "int":
+                    val = int(val)
+                elif ptype == "float":
+                    val = float(val)
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"因子 {self.factor_id} 参数 {key!r} 类型应为 {ptype}，"
+                    f"收到 {val!r}"
+                ) from e
+            lo = meta.get("min")
+            hi = meta.get("max")
+            if lo is not None and val < lo:
+                raise ValueError(
+                    f"因子 {self.factor_id} 参数 {key!r}={val} < min={lo}"
+                )
+            if hi is not None and val > hi:
+                raise ValueError(
+                    f"因子 {self.factor_id} 参数 {key!r}={val} > max={hi}"
+                )
+            validated[key] = val
+
+        extra = set(params) - set(self.params_schema)
+        if extra:
+            logger.warning(
+                "因子 %s 收到未知参数 %s，已忽略", self.factor_id, extra
+            )
+        return validated
+
+    def _load_close_panel(
+        self,
+        ctx: FactorContext,
+        params: dict,
+        field: str = "close",
+        adjust: str = "qfq",
+        freq: str = "1d",
+    ) -> pd.DataFrame | None:
+        """加载 close（或同类价格）面板的便捷方法。
+
+        自动计算 data_start = start_date - warmup，调用 load_panel，
+        空数据时返回 None。约 70% 的因子只需 close 数据，此方法消除重复样板。
+
+        Returns:
+            宽表 DataFrame 或 None（数据为空时）。
+        """
+        warmup = self.required_warmup(params)
+        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
+        panel = ctx.data.load_panel(
+            ctx.symbols,
+            data_start,
+            ctx.end_date.date(),
+            freq=freq,
+            field=field,
+            adjust=adjust,
+        )
+        if panel.empty:
+            return None
+        return panel
 
     def required_warmup(self, params: dict) -> int:
         """给定参数需要多少天预热数据。

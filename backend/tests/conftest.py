@@ -8,15 +8,20 @@
 2. 集成测试（带 ``@pytest.mark.integration``）需要连接真实本地测试库，
    通过 ``_integration_db_settings`` 把测试库凭据直接灌进模块级 ``settings`` 单例。
 3. 提供 ClickHouse / MySQL 的 clean / seed fixture，供 DataService 集成测试使用。
-
-后续 Task 会在此继续追加任务 / 临时目录等 fixture。
+4. 共享 ``FakeDataService`` + ``factor_context`` fixture，供因子单测复用。
+   历史原因各测试文件各自 copy 了一份 FakeDataService——新增测试请直接 import 本
+   conftest 中的版本或使用 ``factor_context`` fixture。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 import numpy as np
+import pandas as pd
 import pytest
+
+from backend.engine.base_factor import FactorContext
 
 # Settings 关心的所有环境变量别名；autouse fixture 会在每个用例开始前清理它们，
 # 避免宿主机实际配置（如部署机上的 CLICKHOUSE_HOST=172.x）影响单测断言。
@@ -325,3 +330,64 @@ def seed_qfq_factor(clean_qfq_factor):
             )
         c.commit()
     return rows
+
+
+# --------------------- 因子单测共享工具 ---------------------
+
+
+@dataclass
+class FakeDataService:
+    """只实现 ``load_panel`` 的最小 ``DataService`` 替身，供因子单测复用。
+
+    把 ``{field: DataFrame}`` 预置到 ``panels`` 字段，``load_panel`` 按 field key
+    查并过滤列。
+
+    >>> ds = FakeDataService({"close": some_df})
+    >>> ctx = FactorContext(data=ds, symbols=["A"], start_date=..., end_date=..., warmup_days=0)
+    """
+
+    panels: dict[str, pd.DataFrame]
+
+    def load_panel(
+        self,
+        symbols,
+        start,
+        end,
+        freq: str = "1d",
+        field: str = "close",
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        df = self.panels.get(field)
+        if df is None:
+            return pd.DataFrame()
+        cols = [s for s in symbols if s in df.columns]
+        return df[cols].copy()
+
+
+@pytest.fixture
+def factor_context():
+    """构造一个最小 ``FactorContext``，用 ``FakeDataService`` 注入面板数据。
+
+    使用方式：
+
+    .. code-block:: python
+
+        def test_my_factor(factor_context):
+            close = make_test_close_panel()  # 你的测试数据
+            ctx = factor_context(close=close)
+            result = MyFactor().compute(ctx, params={"window": 5})
+            assert not result.empty
+    """
+
+    def _build(**panels: pd.DataFrame) -> FactorContext:
+        ds = FakeDataService(panels=panels)
+        symbols = list(next(iter(panels.values())).columns)
+        return FactorContext(
+            data=ds,
+            symbols=symbols,
+            start_date=pd.Timestamp("2024-01-10"),
+            end_date=pd.Timestamp("2024-02-28"),
+            warmup_days=10,
+        )
+
+    return _build

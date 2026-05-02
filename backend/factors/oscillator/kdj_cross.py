@@ -23,6 +23,7 @@ class KdjCross(BaseFactor):
     display_name = "KDJ 金叉强度"
     category = "oscillator"
     description = "factor = K - D；金叉越强（K 高于 D）看多，趋势跟随信号。"
+    hypothesis = "K 上穿 D 线（金叉）指示短期动能转强，趋势跟随信号。"
     params_schema = {
         "n": {
             "type": "int",
@@ -37,7 +38,7 @@ class KdjCross(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         n = int(params.get("n", self.default_params["n"]))
-        return int(n * 3 * 1.5) + 10
+        return self._calc_warmup(n * 3)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n = int(params.get("n", self.default_params["n"]))

@@ -25,6 +25,7 @@ class KdjJOversold(BaseFactor):
     display_name = "J 超卖深度"
     category = "oscillator"
     description = "factor = -J；J 是 KDJ 最灵敏线，因子值越高表示越超卖，越看多。"
+    hypothesis = "J 线极端超卖后均值回归（J 可跌破 0）——KDJ 系最灵敏的反转信号。"
     params_schema = {
         "n": {
             "type": "int",
@@ -39,9 +40,7 @@ class KdjJOversold(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         n = int(params.get("n", self.default_params["n"]))
-        # K/D 是 alpha=1/3 的 EMA，衰减系数 2/3，3n 样本后残余 ~5%（(2/3)^27≈5%）；
-        # 1.5× 交易日→自然日折算，+10 兜春节 / 国庆长假。
-        return int(n * 3 * 1.5) + 10
+        return self._calc_warmup(n * 3)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n = int(params.get("n", self.default_params["n"]))

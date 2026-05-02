@@ -11,6 +11,7 @@ class UptrendSidewaysFlashDrop(BaseFactor):
     display_name = "上升震荡急杀反转"
     category = "reversal"
     description = "过去较长周期上升、近一月高低价窄幅震荡、近3日快速下杀的连续反转因子。因子值越大（三分量百分位秩之积越大），预期未来5日收益越正（反转假设）。"
+    hypothesis = "上涨震荡后的急杀——上升趋势中短期恐慌提供反转买点。"
     default_params = {
         "trend_window": 60,
         "sideways_window": 20,
@@ -39,7 +40,7 @@ class UptrendSidewaysFlashDrop(BaseFactor):
         sideways_window = int(params.get("sideways_window", self.default_params["sideways_window"]))
         drop_window = int(params.get("drop_window", self.default_params["drop_window"]))
         total_window = trend_window + sideways_window + drop_window
-        return int(total_window * 1.5) + 10
+        return self._calc_warmup(total_window)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         trend_window = int(params.get("trend_window", self.default_params["trend_window"]))

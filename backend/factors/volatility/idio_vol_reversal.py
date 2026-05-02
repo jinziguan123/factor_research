@@ -44,17 +44,12 @@ class IdioVolReversal(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         w = int(params.get("ret_window", self.default_params["ret_window"]))
-        return int(w * 1.5) + 10
+        return self._calc_warmup(w)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         w = int(params.get("ret_window", self.default_params["ret_window"]))
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        close = ctx.data.load_panel(
-            ctx.symbols, data_start, ctx.end_date.date(),
-            freq="1d", field="close", adjust="qfq",
-        )
-        if close.empty:
+        close = self._load_close_panel(ctx, params)
+        if close is None:
             return pd.DataFrame()
         ret = close.pct_change(fill_method=None)
         mkt = ret.mean(axis=1)                  # cross-section mean

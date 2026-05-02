@@ -28,6 +28,7 @@ class BollDown(BaseFactor):
         "(MA(close, window) - 2*STD(close, window)) / close；"
         "值越大表示收盘价越贴近下轨，超跌反弹信号。"
     )
+    hypothesis = "收盘价靠近布林下轨表示过度悲观，均值回归预期支撑反弹——布林带统计套利。"
     params_schema = {
         "window": {
             "type": "int",
@@ -42,24 +43,13 @@ class BollDown(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        # 1.5× 折算交易日到自然日 + 10 天长假 buffer。
-        return int(window * 1.5) + 10
+        return self._calc_warmup(window)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        close = ctx.data.load_panel(
-            ctx.symbols,
-            data_start,
-            ctx.end_date.date(),
-            freq="1d",
-            field="close",
-            adjust="qfq",
-        )
-        if close.empty:
+        close = self._load_close_panel(ctx, params)
+        if close is None:
             return pd.DataFrame()
-        # ddof=1（样本标准差）与 pandas 默认一致，保持与 realized_vol 同款约定。
         ma = close.rolling(window).mean()
         std = close.rolling(window).std()
         lower = ma - 2.0 * std

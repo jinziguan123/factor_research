@@ -27,6 +27,7 @@ class RoePit(BaseFactor):
     description = (
         "baostock fr_fundamental_profit.roe_avg，按 announcement_date 在交易日维度 ffill。"
     )
+    hypothesis = "ROE 越高盈利能力越强——Fama-French 盈利因子（RMW）的基础构件。"
     params_schema = {}
     default_params = {}
     supported_freqs = ("1d",)

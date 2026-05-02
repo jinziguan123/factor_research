@@ -103,6 +103,55 @@ def _nan_to_none(x: Any) -> Any:
     return x
 
 
+def _benchmark_metrics(
+    equity: pd.Series, close: pd.DataFrame
+) -> dict:
+    """计算相对基准（等权市场组合）的超额指标。
+
+    Args:
+        equity: 策略净值 Series（index=date, value=equity）。
+        close: qfq close 宽表（index=date, columns=symbol）。
+
+    Returns:
+        dict with ``excess_return``, ``information_ratio``, ``tracking_error``,
+        ``benchmark_annret``。
+    """
+    if equity.empty or close.empty:
+        return {
+            "excess_return": 0.0, "information_ratio": 0.0,
+            "tracking_error": 0.0, "benchmark_annret": 0.0,
+        }
+    bmk_ret = close.pct_change(fill_method=None).mean(axis=1).dropna()
+    common_dates = equity.index.intersection(bmk_ret.index)
+    if len(common_dates) < 5:
+        return {
+            "excess_return": 0.0, "information_ratio": 0.0,
+            "tracking_error": 0.0, "benchmark_annret": 0.0,
+        }
+    bmk_aligned = bmk_ret.loc[common_dates]
+    strategy_ret = equity.loc[common_dates].pct_change().dropna()
+    common2 = strategy_ret.index.intersection(bmk_aligned.index)
+    strategy_ret = strategy_ret.loc[common2]
+    bmk_ret_final = bmk_aligned.loc[common2]
+    excess = strategy_ret - bmk_ret_final
+    n = len(excess)
+    if n < 5:
+        return {
+            "excess_return": 0.0, "information_ratio": 0.0,
+            "tracking_error": 0.0, "benchmark_annret": 0.0,
+        }
+    ann_excess = float(excess.mean() * 252)
+    te = float(excess.std(ddof=1)) if n > 1 else 0.0
+    ir = ann_excess / te if te > 1e-12 else 0.0
+    bmk_ann = float(bmk_ret_final.mean() * 252)
+    return {
+        "excess_return": ann_excess,
+        "information_ratio": ir,
+        "tracking_error": float(te * np.sqrt(252)),
+        "benchmark_annret": bmk_ann,
+    }
+
+
 def _stats_to_payload(stats: pd.Series) -> dict:
     """把 ``pf.stats()`` 的异构 Series 转成 JSON 可序列化的 dict。
 
@@ -134,39 +183,40 @@ def _stats_to_payload(stats: pd.Series) -> dict:
     return out
 
 
+def _get_price_limit_threshold(symbol: str) -> float:
+    """根据股票代码返回对应板块的涨跌停幅度阈值。"""
+    code = symbol.split(".")[0] if "." in symbol else symbol
+    if code.startswith("8") or code.startswith("4"):
+        return 0.297  # 北交所 30%
+    if code.startswith("688"):
+        return 0.197  # 科创板 20%
+    if code.startswith("300") or code.startswith("301"):
+        return 0.197  # 创业板 20%
+    if "ST" in symbol.upper():
+        return 0.048  # ST/*ST 5%
+    return 0.097  # 主板 10%
+
+
 def _compute_price_limit_mask(
     close: pd.DataFrame,
-    threshold: float = 0.097,
 ) -> pd.DataFrame:
-    """近似计算"当日是否触及涨跌停板"的 bool 宽表（True = 触板，应剔除）。
+    """按板块精确计算"当日是否触及涨跌停板"的 bool 宽表。
 
-    口径：``|pct_change| ≥ threshold`` → 触板。``threshold=0.097`` 兜住 10% 板的
-    浮点误差（A 股涨跌停价对前收按 4 舍 5 入到 0.01 取整，pct 落在 9.7%~10.05%
-    都可能命中）。
-
-    简化与已知误差方向：
-    - **未分板块**：科创板 / 创业板（2020-08-24 后）板幅是 20%，按本口径
-      pct=10% 时会被误判为触板。这是"误剔合法交易"，方向保守（不会保留无法
-      成交的票）；要做精确版需要按 symbol 前缀 + 历史日期分情况判断。
-    - **未区分 ST**：ST/*ST 板幅 5%，本口径 10% 会漏判（pct=5% 触板没识别）。
-      暂时接受漏判——绝对量影响小，YAGNI。
-    - **代理时间错配**：使用"今日触板"作为"明日不可成交"的代理（连板假设），
-      未来可改为用"次日触板"（``shift(-1)``）做更严格判断。
+    科创板 / 创业板用 20%，北交所 30%，ST 用 5%，主板用 10%。
+    True = 触板，应剔除。
 
     Args:
         close: qfq close 宽表，index=trade_date，columns=symbol。
-        threshold: 触板阈值，默认 0.097。
 
     Returns:
-        bool 宽表，shape 同 close，第一行（无 prev_close）整行 False。
-        非数值（NaN pct_change）也按 False 处理（停牌日不视为触板）。
+        bool 宽表，shape 同 close。每列使用其对��板块的阈值独立判断。
     """
-    # fill_method=None：停牌日不向前填充，pct=NaN → 不视为触板。pandas 2.x 的
-    # 默认（pad）会把停牌日按上一非空价计算 pct，反而对停牌后复牌的票产出
-    # 错误的"暴涨"判定。
     pct = close.pct_change(fill_method=None)
-    # NaN（停牌、首行）→ False；用 ge 直接走 numpy 不会传播 NaN 到 bool。
-    return pct.abs().ge(threshold).fillna(False)
+    mask = pd.DataFrame(False, index=pct.index, columns=pct.columns)
+    for col in pct.columns:
+        thr = _get_price_limit_threshold(str(col))
+        mask[col] = pct[col].abs().ge(thr).fillna(False)
+    return mask
 
 
 def _build_weights(
@@ -524,6 +574,8 @@ def run_backtest(run_id: str, body: dict) -> None:
         # 7) 指标 + JSON payload
         stats = pf.stats()
         stats_payload = _stats_to_payload(stats)
+        # 基准对比：等权市场组合
+        stats_payload["benchmark"] = _benchmark_metrics(equity, close)
 
         # 核心结构化指标：尽量从 stats payload 里取，字段名按 VectorBT 约定；
         # stats 里 "Total Return [%]" 是百分数，换成小数更通用。

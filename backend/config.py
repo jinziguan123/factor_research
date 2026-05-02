@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -30,6 +31,14 @@ class Settings(BaseSettings):
     clickhouse_database: str = Field(default="quant_data", alias="CLICKHOUSE_DATABASE")
     clickhouse_user: str = Field(default="default", alias="CLICKHOUSE_USER")
     clickhouse_password: str = Field(default="", alias="CLICKHOUSE_PASSWORD")
+    # ClickHouse 连接超时（秒）
+    clickhouse_timeout_s: float = Field(
+        default=30.0, alias="CLICKHOUSE_TIMEOUT_S"
+    )
+    # ClickHouse 查询最大执行时间（秒）；0=不限制
+    clickhouse_max_execution_time_s: int = Field(
+        default=300, alias="CLICKHOUSE_MAX_EXECUTION_TIME_S"
+    )
 
     # ---------- MySQL（元数据 / 任务 / 指标） ----------
     mysql_host: str = Field(default="127.0.0.1", alias="MYSQL_HOST")
@@ -37,6 +46,13 @@ class Settings(BaseSettings):
     mysql_user: str = Field(default="myuser", alias="MYSQL_USER")
     mysql_password: str = Field(default="mypassword", alias="MYSQL_PASSWORD")
     mysql_database: str = Field(default="quant_data", alias="MYSQL_DATABASE")
+    # MySQL 连接超时（秒）和读写超时
+    mysql_connect_timeout_s: float = Field(
+        default=5.0, alias="MYSQL_CONNECT_TIMEOUT_S"
+    )
+    mysql_read_timeout_s: float = Field(
+        default=30.0, alias="MYSQL_READ_TIMEOUT_S"
+    )
 
     # ---------- 复权因子 Parquet 路径 ----------
     qfq_factor_path: str = Field(
@@ -54,6 +70,8 @@ class Settings(BaseSettings):
     # 任务进程池大小；设为 >=1 以保证至少串行执行一个任务。
     task_workers: int = Field(default=2, ge=1, alias="FR_TASK_WORKERS")
     log_level: str = Field(default="INFO", alias="FR_LOG_LEVEL")
+    # 是否输出 JSON 格式日志（适合 ELK/Loki 等集中式日志系统）
+    log_json: bool = Field(default=False, alias="FR_LOG_JSON")
     # 是否开启因子热加载（watchdog 监听 factors 目录）。
     hot_reload: bool = Field(default=True, alias="FR_HOT_RELOAD")
     # factor_meta.owner 的默认归属，区分本平台与外部系统写入的因子。

@@ -19,6 +19,7 @@ class MomentumN(BaseFactor):
     display_name = "N 日动量（跳过近 skip 日）"
     category = "momentum"
     description = "跳过近 skip 日，计算再往前 window 日的涨幅。"
+    hypothesis = "中期赢家续强、输家续弱——Jegadeesh-Titman 1993 动量效应，跳过近期反转噪声。"
     params_schema = {
         "window": {
             "type": "int",
@@ -41,24 +42,13 @@ class MomentumN(BaseFactor):
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
         skip = int(params.get("skip", self.default_params["skip"]))
-        # (window + skip) 是总回看的交易日跨度；× 1.5 + 10 折算自然日并覆盖长假。
-        return int((window + skip) * 1.5) + 10
+        return self._calc_warmup(window + skip)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))
         skip = int(params.get("skip", self.default_params["skip"]))
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        close = ctx.data.load_panel(
-            ctx.symbols,
-            data_start,
-            ctx.end_date.date(),
-            freq="1d",
-            field="close",
-            adjust="qfq",
-        )
-        if close.empty:
+        close = self._load_close_panel(ctx, params)
+        if close is None:
             return pd.DataFrame()
-        # 基准价：skip 天前；参照价：skip + window 天前。
         factor = close.shift(skip) / close.shift(skip + window) - 1
         return factor.loc[ctx.start_date :]

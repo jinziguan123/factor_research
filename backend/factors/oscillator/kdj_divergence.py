@@ -40,6 +40,7 @@ class KdjDivergence(BaseFactor):
         "(J - rolling_min(J, lb)) - scale * (close - rolling_min(close, lb))；"
         "J 已反弹距离 - 价格已反弹距离（归一化后），正值=底背离看多。"
     )
+    hypothesis = "J 线先行反弹而价格未跟（底背离）预示反转——技术分析经典背离策略。"
     params_schema = {
         "n": {
             "type": "int", "default": 9, "min": 3, "max": 60,
@@ -56,7 +57,7 @@ class KdjDivergence(BaseFactor):
     def required_warmup(self, params: dict) -> int:
         n = int(params.get("n", self.default_params["n"]))
         lookback = int(params.get("lookback", self.default_params["lookback"]))
-        return int((n * 3 + lookback) * 1.5) + 10
+        return self._calc_warmup(n * 3 + lookback)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n = int(params.get("n", self.default_params["n"]))

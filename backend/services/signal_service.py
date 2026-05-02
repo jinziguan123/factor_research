@@ -54,8 +54,24 @@ log = logging.getLogger(__name__)
 
 # 当 spot 数据距 NOW > 此秒数 → 自动降级 use_realtime=False
 _SPOT_STALE_THRESHOLD_SEC = 600
-# 涨跌停阈值（与 backtest_service._compute_price_limit_mask 一致）
-_PRICE_LIMIT_THRESHOLD = 0.097
+# 涨跌停阈值——按板块精确区分
+# 科创板（688）: 20%，创业板（300/301）: 20%（2020-08-24 起），
+# 北交所（8/4）: 30%，ST（含 *ST）: 5%，主板其他: 10%
+# 阈值用 0.097 兜 10% 板的浮点取整误差（pct 落在 9.7%~10.05% 都可能触板）。
+
+
+def _get_price_limit_threshold(symbol: str) -> float:
+    """根据股票代码返回涨跌停幅度阈值（pct_chg 绝对值 ≥ 该值视为触板）。"""
+    code = symbol.split(".")[0] if "." in symbol else symbol
+    if code.startswith("8") or code.startswith("4"):
+        return 0.297  # 北交所 30%
+    if code.startswith("688"):
+        return 0.197  # 科创板 20%
+    if code.startswith("300") or code.startswith("301"):
+        return 0.197  # 创业板 20%（2020-08-24 改革后）
+    if "ST" in symbol.upper():
+        return 0.048  # ST/*ST 5%
+    return 0.097  # 主板 10%
 # 历史窗口最小 buffer（自然日）：兜节假日，让因子至少有几天有效输出
 _MIN_NATURAL_DAYS_BUFFER = 7
 # IC 加权回看窗口的自然日折算系数：trading days × 1.5 ≈ natural days
@@ -386,7 +402,7 @@ def _build_top_bottom(
             sym = r["symbol"]
             if int(r.get("is_suspended", 0)):
                 ban.add(sym)
-            elif abs(float(r.get("pct_chg", 0))) >= _PRICE_LIMIT_THRESHOLD:
+            elif abs(float(r.get("pct_chg", 0))) >= _get_price_limit_threshold(sym):
                 ban.add(sym)
         last_row = last_row[~last_row.index.isin(ban)]
 

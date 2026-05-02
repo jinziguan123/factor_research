@@ -25,6 +25,7 @@ class TurnoverRatio(BaseFactor):
         "用 rolling window 上的日成交额均值 / 前复权 close 均值做流动性代理。"
         "数值高代表该股近期活跃。"
     )
+    hypothesis = "高换手反映市场参与热度与流动性溢价，短期关注度信号。"
     params_schema = {
         "window": {
             "type": "int",
@@ -39,8 +40,7 @@ class TurnoverRatio(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        # 1.5× 折算交易日到自然日 + 10 天长假 buffer。
-        return int(window * 1.5) + 10
+        return self._calc_warmup(window)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))

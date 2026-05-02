@@ -391,3 +391,248 @@ def value_histogram(values: pd.DataFrame, bins: int = 50) -> dict:
         return {"bins": [], "counts": []}
     counts, edges = np.histogram(arr, bins=bins)
     return {"bins": edges.tolist(), "counts": counts.tolist()}
+
+
+# ------------------- 高级评估指标 -------------------
+
+
+def sector_neutral_ic(
+    factor: pd.DataFrame,
+    forward_ret: pd.DataFrame,
+    sector: pd.DataFrame,
+) -> pd.Series:
+    """行业中性化后的截面 Pearson IC。
+
+    对每个交易日，将因子值对行业哑变量做 OLS 回归，取残差作为行业中性的因子值，
+    再计算残差与 forward_ret 的 Pearson 相关系数。
+
+    这排除了"因子靠行业暴露赚 beta"的可能，衡量的是纯选股 alpha。
+
+    Args:
+        factor: 因子宽表 ``index=date, columns=symbol``。
+        forward_ret: 同结构的前向收益。
+        sector: 行业分类宽表 ``index=date, columns=symbol``，值为行业代码（str/int）。
+            行业信息缺失的 symbol 对应的值为 NaN/None，该行会被跳过。
+
+    Returns:
+        ``pd.Series(index=date, value=corr)``——行业中性化的每日 IC。
+    """
+    aligned_f, aligned_r = factor.align(forward_ret, join="inner")
+    _, aligned_s = aligned_f.align(sector, join="inner")
+    out: dict = {}
+    for dt, f_row in aligned_f.iterrows():
+        r_row = aligned_r.loc[dt]
+        s_row = aligned_s.loc[dt]
+        mask = f_row.notna() & r_row.notna() & s_row.notna()
+        if mask.sum() < 10:
+            # 行业中性化需要至少 2 个行业 × 若干股票，样本太少回归不稳定
+            continue
+        # 行业哑变量（drop_first 避免共线性）
+        try:
+            dummies = pd.get_dummies(s_row[mask], drop_first=True, dtype=float)
+        except Exception:
+            continue
+        if dummies.shape[1] == 0 or dummies.shape[0] <= dummies.shape[1] + 1:
+            continue
+        # OLS: factor ~ sectors → 残差 = 行业中性的 alpha
+        from numpy.linalg import lstsq
+
+        X = np.column_stack([np.ones(dummies.shape[0]), dummies.values])
+        y = f_row[mask].values.astype(float)
+        try:
+            coef, _, _, _ = lstsq(X, y)
+        except np.linalg.LinAlgError:
+            continue
+        residual = y - X @ coef
+        if len(residual) < 3:
+            continue
+        r_vals = r_row[mask].values.astype(float)
+        valid = np.isfinite(residual) & np.isfinite(r_vals)
+        if valid.sum() < 3:
+            continue
+        corr = np.corrcoef(residual[valid], r_vals[valid])[0, 1]
+        if np.isfinite(corr):
+            out[dt] = float(corr)
+    return pd.Series(out).sort_index()
+
+
+def ic_decay(
+    factor: pd.DataFrame,
+    forward_rets: dict[int, pd.DataFrame],
+) -> dict[int, float]:
+    """计算不同持有期的 IC 均值（IC 衰减结构）。
+
+    Args:
+        factor: 因子宽表。
+        forward_rets: ``{hold_days: forward_ret_panel}``，如
+            ``{1: ret_1d, 5: ret_5d, 10: ret_10d, 21: ret_21d}``。
+
+    Returns:
+        ``{hold_days: ic_mean}``，每个持有期的截面 Rank IC 均值。
+        某个持有期 IC 序列为空则该 key 值为 0.0。
+    """
+    result: dict[int, float] = {}
+    for hold_days, ret_panel in sorted(forward_rets.items()):
+        ic = cross_sectional_rank_ic(factor, ret_panel)
+        result[hold_days] = float(ic.mean()) if not ic.empty else 0.0
+    return result
+
+
+def conditional_ic(
+    factor: pd.DataFrame,
+    forward_ret: pd.DataFrame,
+    condition: pd.Series,
+) -> dict[str, pd.Series]:
+    """按市场状态拆分的条件 IC。
+
+    将交易日按 condition 的中位数分为"高"和"低"两组（如市场波动率高低），
+    分别计算每组的截面 Rank IC，用于识别因子在不同市场环境中的有效性差异。
+
+    Args:
+        factor: 因子宽表。
+        forward_ret: 前向收益宽表。
+        condition: ``pd.Series(index=date)``，市场状态变量（如市场日收益、VIX 等）。
+
+    Returns:
+        ``{"high": ic_series_high, "low": ic_series_low}``。
+        空 condition 返回两个空 Series。
+    """
+    if condition.empty:
+        return {"high": pd.Series(dtype=float), "low": pd.Series(dtype=float)}
+    median = condition.median()
+    high_dates = condition.index[condition > median]
+    low_dates = condition.index[condition <= median]
+    ic_full = cross_sectional_rank_ic(factor, forward_ret)
+    return {
+        "high": ic_full.reindex(ic_full.index.intersection(high_dates)).dropna(),
+        "low": ic_full.reindex(ic_full.index.intersection(low_dates)).dropna(),
+    }
+
+
+def newey_west_se(series: pd.Series, max_lags: int | None = None) -> float:
+    """Newey-West 自相关稳健标准误。
+
+    对时间序列（如每日 IC）计算异方差和自相关一致（HAC）的标准误。
+    用于检验 IC 是否在统计上显著偏离 0。
+
+    Args:
+        series: 时间序列。
+        max_lags: 最大滞后期数。None 时用 ``int(4 * (n/100)^(2/9))``（Newey-West 1994 推荐）。
+
+    Returns:
+        HAC 标准误；序列长度 < 2 返回 0.0。
+    """
+    n = len(series)
+    if n < 2:
+        return 0.0
+    if max_lags is None:
+        max_lags = int(4 * (n / 100.0) ** (2 / 9))
+    max_lags = min(max_lags, n - 1)
+    x = series.values - series.mean()
+    # 方差部分
+    S0 = np.sum(x ** 2) / n
+    # 自协方差加权部分
+    w = 1.0 - np.arange(1, max_lags + 1) / (max_lags + 1.0)  # Bartlett kernel
+    for lag in range(1, max_lags + 1):
+        S0 += 2.0 * w[lag - 1] * np.sum(x[lag:] * x[:-lag]) / n
+    S0 = max(S0, 0.0)
+    return float(np.sqrt(S0 / n))
+
+
+def ic_summary_robust(ic_series: pd.Series) -> dict:
+    """带 Newey-West 稳健标准误的 IC 汇总统计。
+
+    Returns:
+        dict 在 ``ic_summary`` 基础上增加：
+        - ``ic_t_nw``：Newey-West 稳健 t 统计量
+        - ``nw_se``：Newey-West 标准误
+    """
+    base = ic_summary(ic_series)
+    if ic_series.empty:
+        base["ic_t_nw"] = 0.0
+        base["nw_se"] = 0.0
+        return base
+    nw_se = newey_west_se(ic_series)
+    base["nw_se"] = nw_se
+    base["ic_t_nw"] = float(base["ic_mean"] / nw_se) if nw_se > 1e-12 else 0.0
+    return base
+
+
+def fama_macbeth(
+    factor_panels: dict[str, pd.DataFrame],
+    forward_ret: pd.DataFrame,
+) -> dict:
+    """Fama-MacBeth 两阶段回归。
+
+    Stage 1（横截面）：对每个交易日 t，回归：
+        forward_ret_{i,t} = alpha_t + sum(beta_{k,t} * factor_{k,i,t}) + e_{i,t}
+    Stage 2（时间序列）：对每个因子 k，beta_k = mean(beta_{k,t})，用 Newey-West 算 t 值。
+
+    Args:
+        factor_panels: ``{factor_name: panel}``，每个 panel 是 index=date, columns=symbol。
+        forward_ret: 前向收益宽表。
+
+    Returns:
+        ``{"alpha": float, "factors": {name: {"coef": float, "t_stat": float, "se": float}}}``。
+        空输入或对齐后无有效日期返回 alpha=0 + 各 factor coef=0。
+    """
+    if not factor_panels:
+        return {"alpha": 0.0, "factors": {}}
+    # 对齐所有面板
+    names = list(factor_panels.keys())
+    panels = list(factor_panels.values())
+    aligned = [forward_ret] + panels
+    common_cols = aligned[0].columns
+    common_idx = aligned[0].index
+    for p in aligned[1:]:
+        common_cols = common_cols.intersection(p.columns)
+        common_idx = common_idx.intersection(p.index)
+    if len(common_cols) < 5 or len(common_idx) < 10:
+        return {"alpha": 0.0, "factors": {n: {"coef": 0.0, "t_stat": 0.0, "se": 0.0} for n in names}}
+    # Stage 1：每日横截面回归
+    from numpy.linalg import lstsq
+
+    alpha_ts: list[float] = []
+    beta_ts: dict[str, list[float]] = {n: [] for n in names}
+    for dt in common_idx:
+        y = forward_ret.loc[dt, common_cols].values.astype(float)
+        X_cols = []
+        for p in panels:
+            X_cols.append(p.loc[dt, common_cols].values.astype(float))
+        X = np.column_stack(X_cols)
+        mask = np.isfinite(y)
+        for j in range(X.shape[1]):
+            mask &= np.isfinite(X[:, j])
+        if mask.sum() < len(names) + 2:
+            continue
+        Xm = np.column_stack([np.ones(mask.sum()), X[mask]])
+        ym = y[mask]
+        try:
+            coef, _, _, _ = lstsq(Xm, ym)
+        except np.linalg.LinAlgError:
+            continue
+        alpha_ts.append(float(coef[0]))
+        for j, name in enumerate(names):
+            beta_ts[name].append(float(coef[j + 1]))
+    if not alpha_ts:
+        return {"alpha": 0.0, "factors": {n: {"coef": 0.0, "t_stat": 0.0, "se": 0.0} for n in names}}
+    # Stage 2：时间序列平均 + Newey-West
+    alpha_series = pd.Series(alpha_ts)
+    result = {
+        "alpha": float(alpha_series.mean()),
+        "alpha_t": float(alpha_series.mean() / newey_west_se(alpha_series)) if newey_west_se(alpha_series) > 1e-12 else 0.0,
+        "n_dates": len(alpha_ts),
+        "factors": {},
+    }
+    for name in names:
+        if not beta_ts[name]:
+            result["factors"][name] = {"coef": 0.0, "t_stat": 0.0, "se": 0.0}
+            continue
+        beta_s = pd.Series(beta_ts[name])
+        se = newey_west_se(beta_s)
+        result["factors"][name] = {
+            "coef": float(beta_s.mean()),
+            "t_stat": float(beta_s.mean() / se) if se > 1e-12 else 0.0,
+            "se": float(se),
+        }
+    return result

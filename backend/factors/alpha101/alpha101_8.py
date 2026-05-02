@@ -32,6 +32,7 @@ class Alpha101_8(BaseFactor):
         "- delay((sum(open,N)*sum(returns,N)), D)))；"
         "默认 N=5, D=10 即论文标准 Alpha 101 第 8 号因子。"
     )
+    hypothesis = "开盘价×收益的复合度量短期上行变化越剧烈，未来反转越强——Alpha101 #8 反转信号。"
     params_schema: dict = {
         "sum_window": {
             "type": "int",
@@ -60,10 +61,8 @@ class Alpha101_8(BaseFactor):
         )
 
     def required_warmup(self, params: dict) -> int:
-        # rolling sum 需要 N + delay D + pct_change 1 个 prev 行 ≈ N + D + 1 交易日。
-        # 1.5x 折自然日 + 5 天 buffer 兜节假日。
         sum_w, delay_p = self._params(params)
-        return int((sum_w + delay_p + 1) * 1.5) + 5
+        return self._calc_warmup(sum_w + delay_p + 1, buffer_days=5)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         sum_w, delay_p = self._params(params)

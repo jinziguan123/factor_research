@@ -50,6 +50,7 @@ class KdjKPctRev(BaseFactor):
         "factor = -rolling_pct_rank(K, lookback)；K 在自身过去 lookback 日分位的"
         "相反数，分位越低越看多，消除 K 绝对值跨股不可比。"
     )
+    hypothesis = "K 值在自身历史分位极低时超卖——用分位消除 K 绝对值跨股不可比问题，反转信号。"
     params_schema = {
         "n": {
             "type": "int", "default": 9, "min": 3, "max": 60,
@@ -66,8 +67,7 @@ class KdjKPctRev(BaseFactor):
     def required_warmup(self, params: dict) -> int:
         n = int(params.get("n", self.default_params["n"]))
         lookback = int(params.get("lookback", self.default_params["lookback"]))
-        # n*3 给 K/D EMA 收敛，+ lookback 给 pct_rank 窗口就位，再 1.5× + 10 兜假。
-        return int((n * 3 + lookback) * 1.5) + 10
+        return self._calc_warmup(n * 3 + lookback)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n = int(params.get("n", self.default_params["n"]))

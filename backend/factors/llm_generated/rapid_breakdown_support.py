@@ -11,6 +11,7 @@ class RapidBreakdownSupport(BaseFactor):
     display_name = "急跌破位因子"
     category = "momentum"
     description = "刻画短期快速下杀并跌破近三个月支撑的弱势形态，因子值越大，预期未来5日收益越负（下破延续假设）。"
+    hypothesis = "短期急跌破支撑后弱势延续——破位后的惯性下杀，趋势跟随。"
     default_params = {
         "support_window": 60,
         "fast_drop_window": 7,
@@ -31,7 +32,7 @@ class RapidBreakdownSupport(BaseFactor):
         trend_window = int(params.get("trend_window", self.default_params["trend_window"]))
         volume_window = int(params.get("volume_window", self.default_params["volume_window"]))
         lookback = max(support_window + 1, fast_drop_window + 1, trend_window * 2, volume_window + 1)
-        return int(lookback * 1.5) + 10
+        return self._calc_warmup(lookback)
 
     @staticmethod
     def _cs_zscore(df: pd.DataFrame) -> pd.DataFrame:

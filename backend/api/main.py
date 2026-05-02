@@ -2,6 +2,7 @@
 
 职责：
 - 创建 ``FastAPI`` 实例 + 统一 CORS；
+- 请求级 ``x-request-id`` 中间件（日志追踪 + 关联前端调用链）；
 - ``startup`` 钩子：跑一次 ``FactorRegistry.scan_and_register``，并按配置开启 watchdog；
 - ``shutdown`` 钩子：停 watchdog + 释放 ProcessPool；
 - 挂载所有子路由（factors / pools / evals / backtests / bars / admin）；
@@ -12,14 +13,19 @@
 """
 from __future__ import annotations
 
+import json
 import logging
+import time
+import uuid
 from pathlib import Path
+from typing import Callable
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.api.routers import (
     admin,
@@ -44,7 +50,27 @@ from backend.config import settings
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.hot_reload import start_hot_reload
 
-logging.basicConfig(level=settings.log_level)
+# -- 日志初始化 -----------------------------------------------------------
+
+if settings.log_json:
+    _stream = logging.StreamHandler()
+    _stream.setFormatter(
+        logging.Formatter(
+            json.dumps({
+                "ts": "%(asctime)s",
+                "level": "%(levelname)s",
+                "name": "%(name)s",
+                "msg": "%(message)s",
+                "req_id": "%(req_id)s",
+            })
+        )
+    )
+    logging.basicConfig(level=settings.log_level, handlers=[_stream])
+else:
+    logging.basicConfig(
+        level=settings.log_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 log = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -52,6 +78,56 @@ app = FastAPI(
     version="0.1.0",
     description="因子研究平台后端 API。",
 )
+
+# -- 中间件（栈序 = 后 add 的先执行） -----------------------------------------
+
+# 1. 请求体大小限制（拒绝 > 10 MiB 的请求）
+_MAX_BODY_BYTES = 10 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _body_size_limit(request: Request, call_next: Callable):
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > _MAX_BODY_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={"code": 413, "message": "Request body too large (max 10 MiB)"},
+        )
+    return await call_next(request)
+
+
+# 2. 请求追踪：注入 request-id + 记录耗时
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next: Callable):
+        req_id = request.headers.get("x-request-id", str(uuid.uuid4())[:12])
+        request.state.req_id = req_id
+        t0 = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            elapsed = (time.monotonic() - t0) * 1000
+            log.error(
+                "%s %s | req=%s | %.0fms | unhandled",
+                request.method,
+                request.url.path,
+                req_id,
+                elapsed,
+            )
+            raise
+        elapsed = (time.monotonic() - t0) * 1000
+        log.info(
+            "%s %s | req=%s | %d | %.0fms",
+            request.method,
+            request.url.path,
+            req_id,
+            response.status_code,
+            elapsed,
+        )
+        response.headers["x-request-id"] = req_id
+        return response
+
+
+app.add_middleware(RequestIdMiddleware)
 
 # CORS：开发态把 Vite 两个端口放进白名单；生产部署应在反向代理层限制。
 # 注意：allow_origins=["*"] 与 allow_credentials=True 不兼容（浏览器规范），
@@ -61,7 +137,6 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "*",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -161,11 +236,13 @@ async def _http_exception_handler(request: Request, exc: FastAPIHTTPException):
     - ``status_code`` 作 ``code``，与 HTTP 状态 1:1；
     - ``detail`` 作 ``message``；不附加 traceback，避免把实现细节暴露给前端。
     """
+    req_id = getattr(request.state, "req_id", "-")
     return JSONResponse(
         status_code=exc.status_code,
         content={
             "code": exc.status_code,
             "message": exc.detail if isinstance(exc.detail, str) else str(exc.detail),
+            "req_id": req_id,
         },
     )
 
@@ -179,6 +256,7 @@ async def _starlette_http_exception_handler(
     FastAPI ``HTTPException`` 继承自 Starlette ``HTTPException``，理论上前一个 handler
     就能接住。但 Starlette 源头抛出的（如 method not allowed）会走这里。
     """
+    req_id = getattr(request.state, "req_id", "-")
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -186,6 +264,7 @@ async def _starlette_http_exception_handler(
             "message": exc.detail
             if isinstance(exc.detail, str)
             else str(exc.detail),
+            "req_id": req_id,
         },
     )
 
@@ -193,10 +272,11 @@ async def _starlette_http_exception_handler(
 @app.exception_handler(Exception)
 async def _general_exception_handler(request: Request, exc: Exception):
     """兜底任何未预期异常。打 traceback 日志，前端看到统一 500。"""
-    log.exception("unhandled error on %s", request.url.path)
+    req_id = getattr(request.state, "req_id", "-")
+    log.exception("unhandled error on %s | req=%s", request.url.path, req_id)
     return JSONResponse(
         status_code=500,
-        content={"code": 500, "message": "Internal Server Error"},
+        content={"code": 500, "message": "Internal Server Error", "req_id": req_id},
     )
 
 

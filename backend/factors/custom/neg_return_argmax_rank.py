@@ -35,6 +35,7 @@ class NegReturnArgmaxRank(BaseFactor):
         "(rank(Ts_ArgMax(SignedPower(-returns, 2), window)) - 0.5)；"
         "窗口内最剧烈下跌日越靠后排名越高，捕捉短期过跌反弹。"
     )
+    hypothesis = "窗口内最大单日跌幅越靠近当前，短期过度反应预期越强——Alpha101 风格反转捕捉。"
     params_schema = {
         "window": {
             "type": "int",
@@ -49,23 +50,12 @@ class NegReturnArgmaxRank(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         window = int(params.get("window", self.default_params["window"]))
-        # 需要 1 天算 pct_change + window 天 rolling 凑齐，共 (window + 1) 交易日。
-        # 1.5× 折自然日 + 5 天 buffer 兜住周末 / 小长假。
-        return int((window + 1) * 1.5) + 5
+        return self._calc_warmup(window + 1, buffer_days=5)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         window = int(params.get("window", self.default_params["window"]))
-        warmup = self.required_warmup(params)
-        data_start = (ctx.start_date - pd.Timedelta(days=warmup)).date()
-        close = ctx.data.load_panel(
-            ctx.symbols,
-            data_start,
-            ctx.end_date.date(),
-            freq="1d",
-            field="close",
-            adjust="qfq",
-        )
-        if close.empty:
+        close = self._load_close_panel(ctx, params)
+        if close is None:
             return pd.DataFrame()
 
         # fill_method=None：停牌日 close 为 NaN 时 return 也 NaN（不做 ffill

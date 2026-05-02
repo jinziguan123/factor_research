@@ -24,6 +24,7 @@ class KdjOversoldHinge(BaseFactor):
     display_name = "KDJ 超卖 hinge"
     category = "oscillator"
     description = "factor = max(0, threshold - K)；仅在 K 低于阈值（超卖区）给正分。"
+    hypothesis = "K 低于阈值（如 20）时激活超卖反弹信号——经典技术分析离散规则，反转信号。"
     params_schema = {
         "n": {
             "type": "int", "default": 9, "min": 3, "max": 60,
@@ -39,7 +40,7 @@ class KdjOversoldHinge(BaseFactor):
 
     def required_warmup(self, params: dict) -> int:
         n = int(params.get("n", self.default_params["n"]))
-        return int(n * 3 * 1.5) + 10
+        return self._calc_warmup(n * 3)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
         n = int(params.get("n", self.default_params["n"]))

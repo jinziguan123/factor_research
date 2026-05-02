@@ -132,6 +132,49 @@ def run_archive_once(max_workers: int = 20) -> dict:
     return archive_today(pool_id=None, max_workers=max_workers)
 
 
+class CircuitBreaker:
+    """简单的熔断器：连续失败 N 次后打开，冷却期间拒绝执行。
+
+    用于保护 akshare 外部 API——连续失败时暂停重试，避免在故障窗口期耗尽配额。
+    """
+
+    def __init__(self, failure_threshold: int = 5, cooldown_sec: float = 900.0):
+        self._threshold = failure_threshold
+        self._cooldown = cooldown_sec
+        self._failures = 0
+        self._open_since: float | None = None
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self._threshold:
+            self._open_since = time_mod.monotonic()
+            log.warning(
+                "circuit breaker OPEN after %d consecutive failures; "
+                "cooldown=%.0fs",
+                self._failures, self._cooldown,
+            )
+
+    def record_success(self) -> None:
+        if self._failures > 0:
+            log.info("circuit breaker reset after success")
+        self._failures = 0
+        self._open_since = None
+
+    def allow(self) -> bool:
+        if self._open_since is None:
+            return True
+        if time_mod.monotonic() - self._open_since >= self._cooldown:
+            log.info("circuit breaker cooldown expired; allowing half-open probe")
+            self._open_since = None
+            self._failures = 0
+            return True
+        return False
+
+
+# 模块级熔断器（spot 拉取专用）
+_spot_cb = CircuitBreaker(failure_threshold=5, cooldown_sec=900.0)
+
+
 def ensure_spot_fresh(stale_sec: int = 60) -> bool:
     """确保 stock_spot_realtime 中最新 spot age <= stale_sec；陈旧 / 缺失则拉新。
 
@@ -144,8 +187,16 @@ def ensure_spot_fresh(stale_sec: int = 60) -> bool:
     if age is not None and age <= stale_sec:
         log.debug("spot age=%.1fs <= %ds; reuse existing", age, stale_sec)
         return False
+    if not _spot_cb.allow():
+        log.warning("circuit breaker open; skipping spot fetch this tick")
+        return False
     log.info("spot age=%s; fetching fresh snapshot", age)
-    run_spot_once()
+    try:
+        run_spot_once()
+        _spot_cb.record_success()
+    except Exception:
+        _spot_cb.record_failure()
+        raise
     return True
 
 
