@@ -103,6 +103,7 @@ function methodLabel(m: string): string {
     case 'equal': return '等权'
     case 'ic_weighted': return 'IC 加权'
     case 'orthogonal_equal': return '正交等权'
+    case 'ml_lgb': return 'ML-LGB'
     default: return m
   }
 }

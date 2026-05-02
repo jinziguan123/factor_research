@@ -84,7 +84,11 @@ const columns: DataTableColumns<CompositionRun> = [
         ? '等权'
         : row.method === 'ic_weighted'
           ? 'IC 加权'
-          : '正交等权'
+          : row.method === 'orthogonal_equal'
+            ? '正交等权'
+            : row.method === 'ml_lgb'
+              ? 'ML-LGB'
+              : row.method || '-'
       return h(NTag, { size: 'small', bordered: false }, { default: () => label })
     },
   },

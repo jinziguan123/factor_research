@@ -246,6 +246,7 @@ const methodLabel = computed(() => {
   if (m === 'equal') return '等权 (equal)'
   if (m === 'ic_weighted') return 'IC 加权 (ic_weighted)'
   if (m === 'orthogonal_equal') return '正交等权 (orthogonal_equal)'
+  if (m === 'ml_lgb') return 'LightGBM 合成 (ml_lgb)'
   return m || '-'
 })
 
