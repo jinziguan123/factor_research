@@ -29,7 +29,7 @@ import logging
 import math
 import traceback
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -390,7 +390,7 @@ _DEFAULT_LGB_PARAMS = {
     "min_child_samples": 20,   # 叶节点至少 20 样本
     "verbose": -1,             # 静默
     "random_state": 42,        # 可重现
-    "n_jobs": -1,              # 多核
+    "n_jobs": 1,               # 单线程——ProcessPool 子进程内多线程会争抢 CPU
 }
 
 
@@ -402,6 +402,7 @@ def _combine_lightgbm(
     forward_period: int = 5,
     warmup_days: int = 60,
     lgb_params: dict | None = None,
+    on_progress: "Callable[[int], None] | None" = None,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
     """walk-forward expanding window 训 LightGBM 学非线性因子合成。
 
@@ -412,6 +413,7 @@ def _combine_lightgbm(
         forward_period: label 是 future_N_return；训练集要 [start, t-N] 防泄漏
         warmup_days: 前 N 天 cold start 跳过
         lgb_params: 覆盖默认超参；None 用 _DEFAULT_LGB_PARAMS
+        on_progress: 可选进度回调，参数为 0-100 的整数
 
     Returns:
         (pred, feature_importance):
@@ -442,6 +444,8 @@ def _combine_lightgbm(
     )
     importances: list[dict[str, float]] = []
     all_dates = sorted(X_panel.index.get_level_values(0).unique())
+    n_dates = len(all_dates)
+    last_report_pct = -1
 
     for i, date_t in enumerate(all_dates):
         if i < warmup_days:
@@ -473,6 +477,13 @@ def _combine_lightgbm(
         importances.append(
             dict(zip(factor_ids, model.feature_importances_.astype(float)))
         )
+
+        # 进度上报：每 10% 跳一次，避免频繁回调
+        if on_progress and n_dates > 0:
+            pct = int((i + 1) * 100 / n_dates)
+            if pct - last_report_pct >= 10:
+                last_report_pct = pct
+                on_progress(pct)
 
         # 预测 date_t 当天截面
         try:
@@ -665,19 +676,21 @@ def run_composition(run_id: str, body: dict) -> None:
         elif method == "ml_lgb":
             # LightGBM 非线性合成：用因子横截面 z-score 预测 forward_period 的 rank-pct
             # 标签（[-1, 1]），walk-forward 训练防穿越。
-            #
-            # design doc 决定 forward_period 固定 5，不暴露给 UI 也不复用
-            # ic_weight_period（后者默认 1，语义是单日 IC 加权，不是 ml_lgb 的"未来 N 日 rank"）。
             LGB_FORWARD_PERIOD = 5
             label_panel = _build_future_return_label(
                 close, forward_period=LGB_FORWARD_PERIOD,
             )
+
+            def _lgb_progress(pct: int):
+                _update_status(run_id, progress=55 + int(20 * pct / 100))
+
             F_combined, feature_importance = _combine_lightgbm(
                 z_frames,
                 label_panel,
                 factor_ids,
                 forward_period=LGB_FORWARD_PERIOD,
-                warmup_days=60,  # design doc 默认；与 IC 加权 lookback 语义一致
+                warmup_days=60,
+                on_progress=_lgb_progress,
             )
         else:  # orthogonal_equal
             F_combined = _combine_orthogonal_equal(z_frames)
