@@ -10,6 +10,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/evals', component: () => import('@/pages/evals/EvalList.vue') },
   { path: '/evals/new', component: () => import('@/pages/evals/EvalCreate.vue') },
   { path: '/evals/grid-search', component: () => import('@/pages/evals/GridSearch.vue') },
+  { path: '/evals/grid-search/list', component: () => import('@/pages/param-sensitivity/GridSearchList.vue') },
   { path: '/evals/:runId', component: () => import('@/pages/evals/EvalDetail.vue') },
   { path: '/backtests', component: () => import('@/pages/backtests/BacktestList.vue') },
   { path: '/backtests/new', component: () => import('@/pages/backtests/BacktestCreate.vue') },

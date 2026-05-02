@@ -105,6 +105,7 @@ def create_param_sensitivity(
 def list_param_sensitivity(
     factor_id: str | None = None,
     status: str | None = None,
+    param_name: str | None = None,
     limit: int = 50,
 ) -> dict:
     """列表页：不返回 points_json / base_params_json（后者可能几 KB，列表无需）。"""
@@ -123,6 +124,9 @@ def list_param_sensitivity(
     if status:
         sql += " AND status=%s"
         params.append(status)
+    if param_name:
+        sql += " AND param_name=%s"
+        params.append(param_name)
     sql += " ORDER BY created_at DESC, run_id DESC LIMIT %s"
     params.append(limit)
     with mysql_conn() as c:

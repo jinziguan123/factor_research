@@ -28,7 +28,7 @@ const menuOptions: MenuOption[] = [
     key: 'group-analysis',
     children: [
       { label: '评估记录', key: '/evals' },
-      { label: '栅格搜索', key: '/evals/grid-search' },
+      { label: '栅格搜索', key: '/evals/grid-search/list' },
       { label: '多因子合成', key: '/compositions' },
       { label: '回测记录', key: '/backtests' },
       { label: '成本敏感性', key: '/cost-sensitivity' },
