@@ -15,11 +15,12 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from backend.api.schemas import BatchDeleteIn, CreateBacktestIn, ok
 from backend.config import settings
@@ -32,6 +33,8 @@ from backend.services.backtest_artifact_view import (
 )
 from backend.services.params_hash import params_hash
 from backend.storage.mysql_client import mysql_conn
+from backend.runtime.entries import walk_forward_entry
+from backend.runtime.task_pool import submit
 
 router = APIRouter(prefix="/api/backtests", tags=["backtests"])
 
@@ -85,6 +88,58 @@ def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
         c.commit()
 
     bt.add_task(submit, backtest_entry, run_id, body.model_dump(mode="json"))
+    return ok({"run_id": run_id, "status": "pending"})
+
+
+class WalkForwardIn(BaseModel):
+    """Walk-forward 回测请求体。"""
+    factor_id: str
+    params: dict | None = None
+    pool_id: int
+    start_date: date
+    end_date: date
+    n_groups: int = Field(default=5, ge=2, le=20)
+    train_days: int = Field(default=252, ge=60, le=1008, description="训练窗口交易日数")
+    test_days: int = Field(default=63, ge=20, le=252, description="测试窗口交易日数")
+    step_days: int | None = Field(default=None, ge=20, le=252, description="滑窗步长，默认=test_days")
+
+
+@router.post("/walk-forward")
+def create_walk_forward(body: WalkForwardIn, bt: BackgroundTasks) -> dict:
+    """创建 walk-forward 回测任务。"""
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    try:
+        reg.get(body.factor_id)
+    except KeyError:
+        raise HTTPException(status_code=400, detail="factor not found")
+
+    run_id = uuid.uuid4().hex
+    bd = body.model_dump(mode="json")
+    if bd.get("step_days") is None:
+        bd["step_days"] = bd["test_days"]
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_backtest_runs
+                (run_id, factor_id, factor_version, params_hash, params_json,
+                 pool_id, freq, start_date, end_date,
+                 status, progress, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
+                """,
+                (
+                    run_id, body.factor_id, 0,
+                    params_hash(body.params or {}),
+                    json.dumps(body.params or {}),
+                    body.pool_id, "1d",
+                    body.start_date, body.end_date, datetime.now(),
+                ),
+            )
+        c.commit()
+
+    bt.add_task(submit, walk_forward_entry, run_id, bd)
     return ok({"run_id": run_id, "status": "pending"})
 
 

@@ -655,3 +655,179 @@ def run_backtest(run_id: str, body: dict) -> None:
             )
         except Exception:
             log.exception("_update_status 记录失败时自身也抛异常: run_id=%s", run_id)
+
+
+# ---------------------------- Walk-Forward 回测 ----------------------------
+
+
+def run_walk_forward(
+    run_id: str,
+    body: dict,
+) -> None:
+    """Walk-forward 滚动窗口回测：把全时段切成训练+测试窗口滑窗评估。
+
+    与单窗口回测的关键区别：每个测试窗口只使用该窗口之前的数据计算因子值，
+    彻底消除前视偏差。拼接所有测试窗口的净值形成一条连续的 OOS 权益曲线。
+
+    配置项（body 内）：
+    - ``train_days``：训练窗口大小（交易日），默认 252（≈1 年）
+    - ``test_days``：测试窗口大小（交易日），默认 63（≈1 季度）
+    - ``step_days``：窗口滑动步长（交易日），默认 63；等于 test_days 时不重叠
+
+    每个子窗口运行简化回测（top-only, 不生成 artifacts），最终聚合 OOS 收益。
+    """
+    from backend.runtime.task_pool import submit  # noqa: F811
+
+    try:
+        _update_status(run_id, status="running", started=True)
+        reg = FactorRegistry()
+        reg.scan_and_register()
+        try:
+            factor = reg.get(body["factor_id"])
+        except KeyError:
+            raise ValueError(f"factor_id={body['factor_id']!r} 未注册")
+        version = reg.latest_version_from_db(body["factor_id"])
+        params = body.get("params") or factor.default_params
+        phash = _hash(params)
+
+        data = DataService()
+        pool_id = body["pool_id"]
+        symbols = data.resolve_pool(pool_id)
+
+        full_start = pd.to_datetime(body["start_date"])
+        full_end = pd.to_datetime(body["end_date"])
+        n_groups = int(body.get("n_groups", 5))
+        train_days = int(body.get("train_days", 252))
+        test_days = int(body.get("test_days", 63))
+        step_days = int(body.get("step_days", test_days))
+
+        warmup = factor.required_warmup(params)
+        data_start = (full_start - pd.Timedelta(days=warmup + train_days)).date()
+
+        # 预加载完整区段的 close + 因子值（只算一次，各窗口切片）
+        close = data.load_panel(
+            symbols, data_start, full_end.date(), field="close", adjust="qfq"
+        )
+        if close.empty:
+            raise ValueError("close 数据为空")
+
+        ctx = FactorContext(
+            data=data, symbols=symbols,
+            start_date=pd.Timestamp(data_start),
+            end_date=full_end, warmup_days=warmup,
+        )
+        F_raw = factor.compute(ctx, params)
+        F, close_aligned = F_raw.align(close, join="inner")
+
+        # 逐窗口
+        windows: list[dict] = []
+        oos_equity_parts: list[pd.Series] = []
+        cursor = full_start
+        win_idx = 0
+        while cursor + pd.Timedelta(days=train_days + test_days) <= full_end:
+            win_idx += 1
+            train_end = cursor + pd.Timedelta(days=train_days)
+            test_end = train_end + pd.Timedelta(days=test_days)
+            if test_end > full_end:
+                test_end = full_end
+            check_abort("wf_backtest", run_id)
+
+            # 测试窗口：factor 与 close 都取 [train_end, test_end]
+            F_test = F.loc[train_end:test_end]
+            C_test = close_aligned.loc[train_end:test_end]
+            if F_test.empty or C_test.empty:
+                cursor += pd.Timedelta(days=step_days)
+                continue
+
+            # 权重：仅 top 组
+            from backend.services.backtest_service import _build_weights
+
+            W = _build_weights(F_test, n_groups=n_groups, rebalance=1, position="top")
+            W_aligned, C_aligned = W.align(C_test, join="inner")
+            if W_aligned.empty:
+                cursor += pd.Timedelta(days=step_days)
+                continue
+
+            # 简单日收益：权重复制前日，日收益 = W * ret
+            ret_1d = C_aligned.pct_change(fill_method=None).shift(-1)
+            daily_ret = (W_aligned.shift(1) * ret_1d).sum(axis=1).dropna()
+            cum = (1 + daily_ret).cumprod()
+            oos_equity_parts.append(cum)
+
+            windows.append({
+                "window": win_idx,
+                "train_start": str(cursor.date()),
+                "train_end": str(train_end.date()),
+                "test_start": str(train_end.date()),
+                "test_end": str(test_end.date()),
+                "n_stocks": len(C_test.columns),
+                "total_return": float(cum.iloc[-1] - 1) if len(cum) > 0 else 0.0,
+            })
+            cursor += pd.Timedelta(days=step_days)
+
+        if not oos_equity_parts:
+            raise ValueError("walk-forward 未能生成任何有效窗口（窗口过大或数据不足）")
+
+        # 拼接 OOS 净值
+        oos_equity = pd.concat(oos_equity_parts).sort_index()
+        oos_equity = oos_equity[~oos_equity.index.duplicated(keep="first")]
+        oos_ret = oos_equity.pct_change().dropna()
+
+        # 汇总指标
+        n_days = len(oos_ret)
+        yrs = max(n_days / 252, 1e-9)
+        total_ret = float(oos_equity.iloc[-1] - 1)
+        ann_ret = (1 + total_ret) ** (1 / yrs) - 1 if total_ret > -1 else -1.0
+        vol = float(oos_ret.std(ddof=1)) if n_days > 1 else 0.0
+        sharpe = float(oos_ret.mean() / vol * np.sqrt(252)) if vol > 1e-12 else 0.0
+        max_dd = float((oos_equity / oos_equity.cummax() - 1).min())
+
+        payload = {
+            "method": "walk_forward",
+            "params": {
+                "train_days": train_days,
+                "test_days": test_days,
+                "step_days": step_days,
+                "n_windows": len(windows),
+            },
+            "summary": {
+                "total_return": total_ret,
+                "annual_return": ann_ret,
+                "sharpe_ratio": sharpe,
+                "max_drawdown": max_dd,
+                "n_days": n_days,
+            },
+            "windows": windows,
+            "oos_equity": {
+                "dates": [str(d.date()) for d in oos_equity.index],
+                "values": [float(v) for v in oos_equity.values],
+            },
+        }
+
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    REPLACE INTO fr_backtest_metrics
+                    (run_id, total_return, annual_return, sharpe_ratio,
+                     max_drawdown, win_rate, trade_count, payload_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (run_id, total_ret, ann_ret, sharpe, max_dd, 0.0, 0,
+                     json.dumps(payload, ensure_ascii=False, allow_nan=False)),
+                )
+            c.commit()
+        _update_status(run_id, status="success", progress=100, finished=True)
+    except AbortedError:
+        log.info("wf_backtest aborted: run_id=%s", run_id)
+        try:
+            _update_status(run_id, status="aborted", finished=True)
+        except Exception:
+            log.exception("wf _update_status aborted 失败: run_id=%s", run_id)
+    except Exception:
+        log.exception("wf_backtest failed: run_id=%s", run_id)
+        try:
+            _update_status(run_id, status="failed",
+                           error=traceback.format_exc()[:4000], finished=True)
+        except Exception:
+            log.exception("wf _update_status failed: run_id=%s", run_id)

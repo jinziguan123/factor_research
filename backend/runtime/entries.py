@@ -63,3 +63,10 @@ def signal_entry(run_id: str, body: dict) -> None:
     from backend.services.signal_service import run_signal
 
     run_signal(run_id, body)
+
+
+def walk_forward_entry(run_id: str, body: dict) -> None:
+    """Walk-forward 回测任务入口。"""
+    from backend.services.backtest_service import run_walk_forward
+
+    run_walk_forward(run_id, body)
