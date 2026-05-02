@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="FR_LOG_LEVEL")
     # 是否输出 JSON 格式日志（适合 ELK/Loki 等集中式日志系统）
     log_json: bool = Field(default=False, alias="FR_LOG_JSON")
+    # API 鉴权：设置后所有请求需带 `x-api-key: <值>` 头；空串 = 关闭鉴权（默认）
+    api_key: str = Field(default="", alias="FR_API_KEY")
+    # 速率限制：每 IP 每秒最大请求数；0 = 不限制（默认）
+    rate_limit_per_sec: float = Field(default=0.0, alias="FR_RATE_LIMIT_PER_SEC")
     # 是否开启因子热加载（watchdog 监听 factors 目录）。
     hot_reload: bool = Field(default=True, alias="FR_HOT_RELOAD")
     # factor_meta.owner 的默认归属，区分本平台与外部系统写入的因子。

@@ -81,7 +81,45 @@ app = FastAPI(
 
 # -- 中间件（栈序 = 后 add 的先执行） -----------------------------------------
 
-# 1. 请求体大小限制（拒绝 > 10 MiB 的请求）
+# 0. 速率限制：滑动窗口计数器，per-IP
+_rate_window: dict[str, list[float]] = {}
+
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next: Callable):
+    if settings.rate_limit_per_sec <= 0:
+        return await call_next(request)
+    now = time.monotonic()
+    ip = request.client.host if request.client else "unknown"
+    bucket = _rate_window.setdefault(ip, [])
+    # 清理过期窗口
+    bucket[:] = [t for t in bucket if now - t < 1.0]
+    if len(bucket) >= settings.rate_limit_per_sec:
+        return JSONResponse(
+            status_code=429,
+            content={"code": 429, "message": "请求过于频繁，请稍后重试"},
+        )
+    bucket.append(now)
+    return await call_next(request)
+
+
+# 1. API Key 鉴权（FR_API_KEY 为空时跳过）
+@app.middleware("http")
+async def _api_key_auth(request: Request, call_next: Callable):
+    if not settings.api_key:
+        return await call_next(request)
+    if request.url.path in ("/api/health", "/api/factors/categories"):
+        return await call_next(request)
+    key = request.headers.get("x-api-key", "")
+    if key != settings.api_key:
+        return JSONResponse(
+            status_code=401,
+            content={"code": 401, "message": "缺少或无效的 x-api-key"},
+        )
+    return await call_next(request)
+
+
+# 2. 请求体大小限制（拒绝 > 10 MiB 的请求）
 _MAX_BODY_BYTES = 10 * 1024 * 1024
 
 

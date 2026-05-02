@@ -338,3 +338,43 @@ def fail(code: int, message: str, detail: Any = None) -> dict:
     保证 ``code`` 与 HTTP status 一致，且 message 永远来自单一出口。
     """
     return {"code": code, "message": message, "detail": detail}
+
+
+# ---------------------------- 分页 ----------------------------
+
+
+class PageResponse(BaseModel):
+    """分页包装：list 端点返回 ``{items, next_cursor, has_more, total}``。
+
+    - ``next_cursor``：下一页的游标，客户端下次请求传 ``?cursor=xxx``；
+      为空表示已到末页。
+    - ``total``：可选总数（某些端点查询成本高时不返回，为 -1）。
+    """
+
+    items: list[Any]
+    next_cursor: str | None = None
+    has_more: bool = False
+    total: int = -1
+
+
+def paginate(items: list[Any], cursor_field: str = "id", limit: int = 50) -> dict:
+    """对已排序列表做游标分页，返回 ``PageResponse`` 结构的 dict。
+
+    调用方应保证 ``items`` 已按 ``cursor_field`` 排序；本函数只做切片。
+    ``cursor`` 取最后一项的 ``cursor_field`` 值；实际游标由路由层解析。
+    """
+    page = items[:limit]
+    has_more = len(items) > limit
+    next_cursor: str | None = None
+    if has_more and page:
+        last = page[-1]
+        if isinstance(last, dict):
+            next_cursor = str(last.get(cursor_field, ""))
+        elif hasattr(last, cursor_field):
+            next_cursor = str(getattr(last, cursor_field, ""))
+    return {
+        "items": page,
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "total": len(items),
+    }
