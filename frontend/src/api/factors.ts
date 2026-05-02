@@ -10,7 +10,7 @@
 // 删除范围：仍仅限 backend/factors/llm_generated/ 下的因子，业务因子 DELETE 返回 403。
 import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
 import { client } from './client'
-import type { Ref } from 'vue'
+import { computed, type Ref } from 'vue'
 
 export interface Factor {
   factor_id: string
@@ -103,7 +103,7 @@ export interface FactorQuery {
 /** 获取全部因子列表（支持可选筛选） */
 export function useFactors(query?: Ref<FactorQuery | undefined>) {
   return useQuery<Factor[]>({
-    queryKey: ['factors', query?.value ?? {}],
+    queryKey: computed(() => ['factors', query?.value ?? {}]),
     queryFn: () => {
       const params: Record<string, string> = {}
       const q = query?.value
