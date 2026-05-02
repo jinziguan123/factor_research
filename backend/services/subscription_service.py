@@ -476,6 +476,13 @@ def prepare_subscription_refresh(
     return run_id, body
 
 
+# 订阅连续失败计数器（模块级，进程重启清零）
+# key=subscription_id, value=连续失败次数
+_sub_failure_counter: dict[str, int] = {}
+# 连续失败多少次后自动 disable
+_MAX_CONSECUTIVE_FAILURES = 5
+
+
 def process_due_subscription(sub: dict) -> str:
     """worker 用：同步 prepare + 同步 run_signal。
 
@@ -485,22 +492,38 @@ def process_due_subscription(sub: dict) -> str:
       run_signal 跑完会再次转成 success/failed；
     - 用户在前端删了那条 run（last_run_id 失效）：fall back 到 INSERT。
 
+    连续失败 ≥ 5 次时自动将订阅设为 is_active=0（降级保护），
+    成功一次后计数器归零。
+
     Returns:
         run_id（首次为新 ID，后续与 sub.last_run_id 相同）。
     """
-    # Lazy import：subscription_service 自身在 worker / router 导入时不应拉起
-    # signal_service 的全部依赖（pandas / numpy / 因子注册表等）。
     from backend.services.signal_service import run_signal
 
     run_id, body = prepare_subscription_refresh(sub)
+    sid = sub["subscription_id"]
 
     try:
         run_signal(run_id, body)
+        # 成功 → 清零失败计数
+        if _sub_failure_counter.pop(sid, None):
+            log.info("sub=%s 恢复成功，失败计数清零", sid[:8])
     except Exception:
         log.exception(
             "process_due_subscription: run_signal failed for sub=%s run=%s",
-            sub["subscription_id"], run_id,
+            sid, run_id,
         )
+        cnt = _sub_failure_counter.get(sid, 0) + 1
+        _sub_failure_counter[sid] = cnt
+        if cnt >= _MAX_CONSECUTIVE_FAILURES:
+            log.warning(
+                "sub=%s 连续失败 %d 次，自动设为 is_active=0（降级保护）",
+                sid[:8], cnt,
+            )
+            try:
+                set_active(sid, False)
+            except Exception:
+                log.exception("auto-disable sub=%s 失败", sid[:8])
     return run_id
 
 
