@@ -18,8 +18,10 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
+from pydantic import BaseModel, Field
+
 from backend.api.schemas import BatchDeleteIn, CreateEvalIn, ok
-from backend.runtime.entries import eval_entry
+from backend.runtime.entries import eval_entry, grid_search_entry
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import submit
 from backend.services.params_hash import params_hash
@@ -262,3 +264,82 @@ def batch_delete_evals(body: BatchDeleteIn) -> dict:
                 deleted += cur.rowcount
         c.commit()
     return ok({"deleted_count": deleted})
+
+
+# ---------------------------- 栅格搜索 ----------------------------
+
+
+class GridSearchIn(BaseModel):
+    """多参数栅格搜索请求体。"""
+    factor_id: str
+    grid: dict[str, list] = Field(
+        ..., min_length=1,
+        description="参数名 → 取值列表，如 {'window': [5,10,20], 'skip': [0,5]}",
+    )
+    pool_id: int
+    start_date: str
+    end_date: str
+    n_groups: int = Field(default=5, ge=2, le=20)
+    forward_periods: list[int] = [1]
+    base_params: dict | None = Field(
+        default=None,
+        description="未扫参数的默认值，不传则用 factor.default_params",
+    )
+    optimize_by: str = Field(
+        default="ic_mean",
+        description="优化目标：ic_mean / rank_ic_mean / long_short_sharpe",
+    )
+
+
+@router.post("/grid-search")
+def create_grid_search(body: GridSearchIn, bt: BackgroundTasks) -> dict:
+    """创建多参数栅格搜索任务。"""
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    try:
+        factor = reg.get(body.factor_id)
+    except KeyError:
+        raise HTTPException(status_code=400, detail="factor not found")
+
+    # 验证每个参数都在 params_schema 中
+    schema = factor.params_schema or {}
+    for pname in body.grid:
+        if pname not in schema and pname not in (factor.default_params or {}):
+            raise HTTPException(
+                status_code=400,
+                detail=f"参数 {pname!r} 不在因子 {body.factor_id} 的 params_schema 中",
+            )
+
+    # 限制组合数
+    n = 1
+    for vl in body.grid.values():
+        n *= len(vl)
+    if n > 200:
+        raise HTTPException(
+            status_code=400,
+            detail=f"组合数 {n} 超过上限 200，请缩小扫描范围",
+        )
+
+    if body.optimize_by not in ("ic_mean", "rank_ic_mean", "long_short_sharpe"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"optimize_by={body.optimize_by!r} 不支持",
+        )
+
+    run_id = uuid.uuid4().hex
+    bd = body.model_dump(mode="json")
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_param_sensitivity_runs
+                (run_id, factor_id, param_name, status, progress, created_at)
+                VALUES (%s, %s, %s, 'pending', 0, %s)
+                """,
+                (run_id, body.factor_id, "grid_search", datetime.now()),
+            )
+        c.commit()
+
+    bt.add_task(submit, grid_search_entry, run_id, bd)
+    return ok({"run_id": run_id, "status": "pending"})

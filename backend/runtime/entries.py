@@ -70,3 +70,10 @@ def walk_forward_entry(run_id: str, body: dict) -> None:
     from backend.services.backtest_service import run_walk_forward
 
     run_walk_forward(run_id, body)
+
+
+def grid_search_entry(run_id: str, body: dict) -> None:
+    """多参数栅格搜索任务入口。"""
+    from backend.services.grid_search_service import run_grid_search
+
+    run_grid_search(run_id, body)
