@@ -231,7 +231,7 @@ const categoryLabels: Record<string, string> = {
 
       <!-- 股票池 -->
       <n-form-item label="股票池" required>
-        <pool-selector v-model="poolId" style="width: 360px" />
+        <pool-selector v-model:value="poolId" style="width: 360px" />
       </n-form-item>
 
       <!-- 日期 -->
