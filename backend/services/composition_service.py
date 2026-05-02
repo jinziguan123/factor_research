@@ -398,6 +398,9 @@ _DEFAULT_LGB_PARAMS = {
 
 # walk-forward 训练时，用最近 N 天而非全量历史（减少后期模型训练量）
 _MAX_TRAIN_DAYS = 504  # ≈ 2 年交易日
+# 重训间隔：每隔 N 个交易日训一个新模型，中间复用上一个模型的预测
+# 20 ≈ 每月一次，685 个模型 → ~34 个，速度提升 ~20×
+_DEFAULT_RETRAIN_INTERVAL = 20
 
 
 def _detect_lgb_device() -> str:
@@ -446,24 +449,27 @@ def _combine_lightgbm(
     *,
     forward_period: int = 5,
     warmup_days: int = 60,
+    retrain_interval: int = _DEFAULT_RETRAIN_INTERVAL,
     lgb_params: dict | None = None,
     on_progress: "Callable[[int], None] | None" = None,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
-    """walk-forward expanding window 训 LightGBM 学非线性因子合成。
+    """walk-forward 训 LightGBM 学非线性因子合成。
+
+    不逐日重训——每 ``retrain_interval`` 个交易日训一次，中间用最近模型预测。
+    默认 20 天（≈ 每月一次），将 685 个模型压缩到 ~34 个，提速 ~20×。
 
     Args:
-        z_frames: 已 cross-section z-score 化的 N 个因子面板（同 (date×symbol) 形态）
-        label_panel: 同形 label（每日 cross-section rank 化的未来 forward_period 日收益）
-        factor_ids: factor_id 列表（顺序与 z_frames 对应）
-        forward_period: label 是 future_N_return；训练集要 [start, t-N] 防泄漏
+        z_frames: 已 cross-section z-score 化的 N 个因子面板
+        label_panel: 同形 label（每日 rank 化的未来 N 日收益）
+        factor_ids: factor_id 列表
+        forward_period: label 前瞻期，训练集切到 [start, t-N] 防泄漏
         warmup_days: 前 N 天 cold start 跳过
-        lgb_params: 覆盖默认超参；None 用 _DEFAULT_LGB_PARAMS
-        on_progress: 可选进度回调，参数为 0-100 的整数
+        retrain_interval: 重训间隔（交易日），默认 20
+        lgb_params: 覆盖默认超参
+        on_progress: 可选进度回调 0-100
 
     Returns:
-        (pred, feature_importance):
-        - pred: (date × symbol) 预测值面板，前 warmup + forward 天为 NaN
-        - feature_importance: {factor_id: mean_gain_across_walk_forward_models}
+        (pred, feature_importance)
     """
     from lightgbm import LGBMRegressor
 
@@ -495,47 +501,49 @@ def _combine_lightgbm(
              n_dates, n_trainable, n_trainable)
     last_report_pct = -1
 
+    model_obj: "LGBMRegressor | None" = None
     for i, date_t in enumerate(all_dates):
         if i < warmup_days:
-            continue                                 # cold start
-        train_end_idx = i - forward_period           # 防 label 跨日泄漏
-        if train_end_idx < warmup_days:
             continue
-        train_end_date = all_dates[train_end_idx]
-        # 滚动窗口：只取最近 _MAX_TRAIN_DAYS 天，避免后期模型训练集过大
-        train_start_idx = max(0, train_end_idx - _MAX_TRAIN_DAYS)
-        train_start_date = all_dates[train_start_idx]
-        X_train = X_panel.loc[train_start_date:train_end_date]
-        y_train = y_series.loc[train_start_date:train_end_date]
-
-        # 删除 X 或 y 含 NaN 的行
-        valid = X_train.notna().all(axis=1) & y_train.notna()
-        X_train = X_train[valid]
-        y_train = y_train[valid]
-        if len(X_train) < 100:
-            continue                                 # 样本太少跳过
-
-        # 训练失败（数据 NaN/inf、LightGBM 内部错等）→ log warn + 跳过当日，不阻断后续
-        try:
-            model = LGBMRegressor(**params)
-            model.fit(X_train, y_train)
-        except Exception as e:  # noqa: BLE001 - LightGBM 抛任意异常都跳过
-            log.warning(
-                "ml_lgb 训练失败 date=%s: %s（跳过当日）", date_t, e,
-            )
+        pred_idx = i - forward_period
+        if pred_idx < warmup_days:
             continue
-        importances.append(
-            dict(zip(factor_ids, model.feature_importances_.astype(float)))
-        )
 
-        # 进度上报：每 10% 跳一次，避免频繁回调
+        # 重训条件：尚无模型 / 到达重训间隔
+        needs_retrain = model_obj is None or (i % retrain_interval == 0)
+
+        if needs_retrain:
+            train_end_date = all_dates[pred_idx]
+            train_start_idx = max(0, pred_idx - _MAX_TRAIN_DAYS)
+            train_start_date = all_dates[train_start_idx]
+            X_train = X_panel.loc[train_start_date:train_end_date]
+            y_train = y_series.loc[train_start_date:train_end_date]
+
+            valid = X_train.notna().all(axis=1) & y_train.notna()
+            X_train = X_train[valid]
+            y_train = y_train[valid]
+            if len(X_train) < 100:
+                continue
+
+            try:
+                model_obj = LGBMRegressor(**params)
+                model_obj.fit(X_train, y_train)
+                importances.append(
+                    dict(zip(factor_ids, model_obj.feature_importances_.astype(float)))
+                )
+            except Exception as e:
+                log.warning("ml_lgb 训练失败 date=%s: %s（跳过）", date_t, e)
+                continue
+
+        # 进度上报：每 5% 跳一次
         if on_progress and n_dates > 0:
             pct = int((i + 1) * 100 / n_dates)
-            if pct - last_report_pct >= 10:
+            if pct - last_report_pct >= 5:
                 last_report_pct = pct
                 on_progress(pct)
 
-        # 预测 date_t 当天截面
+        if model_obj is None:
+            continue
         try:
             X_today = X_panel.xs(date_t, level=0)
         except KeyError:
@@ -544,11 +552,9 @@ def _combine_lightgbm(
         if not valid_today.any():
             continue
         try:
-            pred_vals = model.predict(X_today.loc[valid_today])
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "ml_lgb 预测失败 date=%s: %s（跳过当日）", date_t, e,
-            )
+            pred_vals = model_obj.predict(X_today.loc[valid_today])
+        except Exception as e:
+            log.warning("ml_lgb 预测失败 date=%s: %s（跳过）", date_t, e)
             continue
         pred.loc[date_t, X_today.index[valid_today]] = pred_vals
 
