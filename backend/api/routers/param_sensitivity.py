@@ -320,16 +320,49 @@ def apply_best_params(run_id: str) -> dict:
     p = _require_factor_file(factor_id, reg)
     code = p.read_text(encoding="utf-8")
 
-    # 用正则替换 default_params = {...} 行
+    # 用 AST 精确定位 default_params 赋值，替换其值节点
     params_str = json.dumps(new_params, ensure_ascii=False)
-    new_line = f"    default_params: dict = {params_str}"
-    code, n = re.subn(
-        r"^\s*default_params\s*[:=]\s*\{[^}]*\}",
-        new_line,
-        code,
-        flags=re.MULTILINE,
-    )
-    if n == 0:
+    tree = ast.parse(code)
+    replaced = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for stmt in node.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for tgt in stmt.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "default_params":
+                    # 替换从值节点开始到行尾 / 下一个语句之间的源码
+                    val_node = stmt.value
+                    start = val_node.lineno - 1  # 0-based line
+                    # 取从值行开始到闭括号之后的内容
+                    # 简单策略：找到值节点的结束位置，替换整段
+                    end_lineno = getattr(val_node, 'end_lineno', val_node.lineno)
+                    end_offset = getattr(val_node, 'end_col_offset', len(code.split('\n')[val_node.lineno - 1]))
+                    lines = code.split('\n')
+                    # 从值开始行到最后行，重建
+                    prefix_lines = lines[:start]
+                    suffix_lines = lines[end_lineno:]
+                    # 计算该行的缩进
+                    indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+                    new_val_line = f"{indent}{params_str}"
+                    if end_lineno > val_node.lineno:
+                        # 多行：prefix + 新值 + suffix
+                        new_code = '\n'.join(prefix_lines + [new_val_line] + suffix_lines)
+                    else:
+                        # 单行：替换该行从值开始处之后的内容
+                        line = lines[start]
+                        before_val = line[:val_node.col_offset]
+                        new_code = '\n'.join(prefix_lines + [f"{before_val}{params_str}"] + suffix_lines)
+                    code = new_code
+                    replaced = True
+                    break
+            if replaced:
+                break
+        if replaced:
+            break
+
+    if not replaced:
         raise HTTPException(
             status_code=500,
             detail="未在源码中找到 default_params = {...} 赋值，无法自动更新",
