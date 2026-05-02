@@ -381,17 +381,21 @@ _ALLOWED_METHODS = ("equal", "ic_weighted", "orthogonal_equal", "ml_lgb")
 
 # LightGBM 默认超参——保守起点防过拟合（量化数据信噪比低）
 _DEFAULT_LGB_PARAMS = {
-    "n_estimators": 100,
-    "max_depth": 4,            # 浅树
-    "num_leaves": 15,          # 2^4 - 1
+    "n_estimators": 60,        # 60 棵树对排序任务足够（原 100）
+    "max_depth": 4,            # 浅树防过拟合
+    "num_leaves": 15,          # ≈ 2^4 - 1
     "learning_rate": 0.05,
+    "subsample": 0.8,          # 每棵树随机采样 80% 行→快且防过拟合
     "reg_alpha": 0.1,          # L1 正则
     "reg_lambda": 0.1,         # L2 正则
-    "min_child_samples": 20,   # 叶节点至少 20 样本
+    "min_child_samples": 50,   # 叶节点至少 50 样本（原 20，加大加速分裂）
     "verbose": -1,             # 静默
     "random_state": 42,        # 可重现
     "n_jobs": 1,               # 单线程——ProcessPool 子进程内多线程会争抢 CPU
 }
+
+# walk-forward 训练时，用最近 N 天而非全量历史（减少后期模型训练量）
+_MAX_TRAIN_DAYS = 504  # ≈ 2 年交易日
 
 
 def _combine_lightgbm(
@@ -445,6 +449,9 @@ def _combine_lightgbm(
     importances: list[dict[str, float]] = []
     all_dates = sorted(X_panel.index.get_level_values(0).unique())
     n_dates = len(all_dates)
+    n_trainable = sum(1 for i in range(n_dates) if i >= warmup_days and (i - forward_period) >= warmup_days)
+    log.info("ml_lgb walk-forward: %d total dates, %d trainable, ~%d models to fit",
+             n_dates, n_trainable, n_trainable)
     last_report_pct = -1
 
     for i, date_t in enumerate(all_dates):
@@ -454,9 +461,11 @@ def _combine_lightgbm(
         if train_end_idx < warmup_days:
             continue
         train_end_date = all_dates[train_end_idx]
-        # MultiIndex sort 后用 .loc[:date] 直接切第一层（date），比 isin 快很多
-        X_train = X_panel.loc[:train_end_date]
-        y_train = y_series.loc[:train_end_date]
+        # 滚动窗口：只取最近 _MAX_TRAIN_DAYS 天，避免后期模型训练集过大
+        train_start_idx = max(0, train_end_idx - _MAX_TRAIN_DAYS)
+        train_start_date = all_dates[train_start_idx]
+        X_train = X_panel.loc[train_start_date:train_end_date]
+        y_train = y_series.loc[train_start_date:train_end_date]
 
         # 删除 X 或 y 含 NaN 的行
         valid = X_train.notna().all(axis=1) & y_train.notna()
