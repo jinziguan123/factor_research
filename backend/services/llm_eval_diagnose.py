@@ -64,30 +64,24 @@ def _trim_payload(payload: dict) -> dict:
     完整 payload 包含 IC 序列、分组累计净值时间序列等，每条几百-上千个点；
     全发给 LLM 浪费 token 且收益有限。规则：长度 > 30 的时间序列保留前 5 + 后 5
     + 每 N 取一个采样点，并附标签让 LLM 知道是采样而非全量。
+
+    递归处理嵌套结构——防止 ``time_series.per_symbol.data`` 这类深层大列表漏网。
     """
-    out: dict[str, Any] = {}
+    def _maybe_trim(val: Any) -> Any:
+        if isinstance(val, list):
+            if len(val) <= 30:
+                # 短列表仍然递归处理内部元素（元素可能是 dict）
+                return [_maybe_trim(v) for v in val]
+            head = [_maybe_trim(v) for v in val[:5]]
+            tail = [_maybe_trim(v) for v in val[-5:]]
+            step = max(1, (len(val) - 10) // 8)
+            mid = [_maybe_trim(v) for v in val[5:-5:step][:8]]
+            return {"_sampled_from": len(val), "values": head + mid + tail}
+        if isinstance(val, dict):
+            return {kk: _maybe_trim(vv) for kk, vv in val.items()}
+        return _safe_finite(val)
 
-    def _maybe_trim_series(name: str, val: Any) -> Any:
-        if not isinstance(val, list):
-            return val
-        if len(val) <= 30:
-            return val
-        # 头 5 + 中间均匀 8 + 尾 5（去重，保持顺序），加 sampled 标记
-        head = val[:5]
-        tail = val[-5:]
-        step = max(1, (len(val) - 10) // 8)
-        mid = val[5:-5:step][:8]
-        sampled = head + mid + tail
-        return {"_sampled_from": len(val), "values": sampled}
-
-    for k, v in payload.items():
-        if isinstance(v, dict):
-            out[k] = {kk: _maybe_trim_series(kk, vv) for kk, vv in v.items()}
-        elif isinstance(v, list):
-            out[k] = _maybe_trim_series(k, v)
-        else:
-            out[k] = _safe_finite(v)
-    return out
+    return {k: _maybe_trim(v) for k, v in payload.items()}
 
 
 def _build_user_prompt(
