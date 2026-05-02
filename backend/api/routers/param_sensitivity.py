@@ -24,6 +24,8 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from backend.api.schemas import CreateParamSensitivityIn, ok
 from backend.runtime.entries import param_sensitivity_entry
+
+logger = logging.getLogger(__name__)
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import submit
 from backend.storage.mysql_client import mysql_conn
