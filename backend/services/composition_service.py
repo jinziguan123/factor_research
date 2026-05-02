@@ -34,6 +34,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from backend.config import settings
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
 from backend.services import metrics
@@ -392,10 +393,50 @@ _DEFAULT_LGB_PARAMS = {
     "verbose": -1,             # 静默
     "random_state": 42,        # 可重现
     "n_jobs": 1,               # 单线程——ProcessPool 子进程内多线程会争抢 CPU
+    "device_type": "cpu",      # 默认 CPU，启动时按 FR_LGB_DEVICE 覆盖
 }
 
 # walk-forward 训练时，用最近 N 天而非全量历史（减少后期模型训练量）
 _MAX_TRAIN_DAYS = 504  # ≈ 2 年交易日
+
+
+def _detect_lgb_device() -> str:
+    """检测 LightGBM GPU 可用性，返回 ``"cpu"`` 或 ``"gpu"``。
+
+    FR_LGB_DEVICE=cpu → cpu
+    FR_LGB_DEVICE=gpu → gpu（不可用时报错）
+    FR_LGB_DEVICE=auto → 检测 GPU，可用则 gpu 否则 cpu
+    """
+    wanted = (settings.lgb_device or "auto").lower()
+    if wanted == "cpu":
+        return "cpu"
+    if wanted == "auto" or wanted == "gpu":
+        # LightGBM GPU 需要 OpenCL GPU 构建 + 正确驱动
+        try:
+            from lightgbm import LGBMRegressor
+
+            probe = LGBMRegressor(
+                n_estimators=1, max_depth=2, verbose=-1,
+                device_type="gpu",
+            )
+            probe.fit([[0.0, 0.0], [1.0, 1.0]], [0.0, 1.0])
+            log.info("LightGBM GPU 可用，使用 GPU 训练")
+            return "gpu"
+        except Exception as e:
+            if wanted == "gpu":
+                raise RuntimeError(
+                    f"FR_LGB_DEVICE=gpu 但 LightGBM GPU 不可用：{e}"
+                ) from e
+            log.info("LightGBM GPU 不可用（%s），回落 CPU 训练", e)
+            return "cpu"
+    return "cpu"
+
+
+def _resolve_lgb_params() -> dict:
+    """返回当前运行的 LightGBM 参数字典（按 FR_LGB_DEVICE 覆盖 device_type）。"""
+    params = dict(_DEFAULT_LGB_PARAMS)
+    params["device_type"] = _detect_lgb_device()
+    return params
 
 
 def _combine_lightgbm(
@@ -426,7 +467,7 @@ def _combine_lightgbm(
     """
     from lightgbm import LGBMRegressor
 
-    params = {**_DEFAULT_LGB_PARAMS, **(lgb_params or {})}
+    params = {**_resolve_lgb_params(), **(lgb_params or {})}
 
     # 1. stack 每个 z 面板成 Series，concat 成 (date, symbol) MultiIndex DataFrame
     X_panel = pd.concat(

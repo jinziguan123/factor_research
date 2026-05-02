@@ -54,6 +54,9 @@ class Settings(BaseSettings):
         default=30.0, alias="MYSQL_READ_TIMEOUT_S"
     )
 
+    # LightGBM 设备：cpu / gpu / auto（auto=检测 GPU 可用则用）
+    lgb_device: str = Field(default="auto", alias="FR_LGB_DEVICE")
+
     # ---------- 复权因子 Parquet 路径 ----------
     qfq_factor_path: str = Field(
         default=str(_PROJECT_ROOT / "data" / "merged_adjust_factors.parquet"),
