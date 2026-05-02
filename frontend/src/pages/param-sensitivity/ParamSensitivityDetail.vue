@@ -6,11 +6,12 @@
  *
  * 图表 / 稳定性 / 表格逻辑全部从原 Preview 页搬过来（异步化只改了数据入口）。
  */
-import { computed, h } from 'vue'
+import { computed, h, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NAlert, NDataTable, NEmpty, NSpace, NTag,
+  NButton, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { use } from 'echarts/core'
@@ -24,6 +25,7 @@ import VChart from 'vue-echarts'
 import { useParamSensitivity } from '@/api/param_sensitivity'
 import type { ParamSensitivityPoint } from '@/api/param_sensitivity'
 import { usePoolNameMap } from '@/api/pools'
+import { client } from '@/api/client'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 use([
@@ -34,11 +36,27 @@ use([
 
 const route = useRoute()
 const router = useRouter()
+const message = useMessage()
 
 const runId = computed(() => route.params.runId as string)
 const { data: run, isLoading } = useParamSensitivity(runId)
 
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+const applyingBest = ref(false)
+async function applyBestParams() {
+  if (!runId.value) return
+  applyingBest.value = true
+  try {
+    const res = await client.post(`/param-sensitivity/${runId.value}/apply-best`)
+    const data = res.data
+    message.success(`已更新 ${data.factor_id} 默认参数为 ${JSON.stringify(data.new_default_params)}`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.message || e?.response?.data?.detail || e?.message || '应用失败')
+  } finally {
+    applyingBest.value = false
+  }
+}
 
 const isRunning = computed(
   () => run.value?.status === 'pending' || run.value?.status === 'running',
@@ -329,6 +347,16 @@ function fmtValues(v: number[] | Record<string, number[]> | null | undefined): s
               <span>最优参数组合</span>
               <n-tag type="success" size="small" round>BEST</n-tag>
             </n-space>
+            <template #header-extra>
+              <n-button
+                size="small"
+                type="primary"
+                :loading="applyingBest"
+                @click="applyBestParams"
+              >
+                应用为默认参数
+              </n-button>
+            </template>
           </template>
           <div style="font-size: 14px; margin-bottom: 8px">
             <code style="font-size: 15px; font-weight: 600">{{ gsBest.params ? JSON.stringify(gsBest.params) : '-' }}</code>

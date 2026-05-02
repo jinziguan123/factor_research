@@ -275,6 +275,86 @@ def delete_param_sensitivity(run_id: str) -> dict:
     return ok({"run_id": run_id, "deleted": True})
 
 
+@router.post("/{run_id}/apply-best")
+def apply_best_params(run_id: str) -> dict:
+    """将栅格搜索的最优参数应用为因子默认参数。
+
+    从 points_json 里读取 best.params，覆写因子源码中的 default_params 行，
+    然后 reload 模块 + 重置进程池。
+    """
+    import ast
+    import inspect
+    import re
+
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT factor_id, points_json FROM fr_param_sensitivity_runs "
+                "WHERE run_id=%s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not row.get("points_json"):
+        raise HTTPException(status_code=400, detail="该 run 尚未产生结果")
+
+    try:
+        parsed = json.loads(row["points_json"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="points_json 解析失败")
+
+    best = parsed.get("best") if isinstance(parsed, dict) else None
+    if not best or not best.get("params"):
+        raise HTTPException(status_code=400, detail="该 run 没有 best 参数组合")
+
+    new_params = best["params"]
+    factor_id = row["factor_id"]
+
+    # 定位因子源码文件
+    from backend.api.routers.factors import _require_factor_file
+    from backend.runtime.factor_registry import FactorRegistry
+
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    p = _require_factor_file(factor_id, reg)
+    code = p.read_text(encoding="utf-8")
+
+    # 用正则替换 default_params = {...} 行
+    params_str = json.dumps(new_params, ensure_ascii=False)
+    new_line = f"    default_params: dict = {params_str}"
+    code, n = re.subn(
+        r"^\s*default_params\s*[:=]\s*\{[^}]*\}",
+        new_line,
+        code,
+        flags=re.MULTILINE,
+    )
+    if n == 0:
+        raise HTTPException(
+            status_code=500,
+            detail="未在源码中找到 default_params = {...} 赋值，无法自动更新",
+        )
+
+    # 写回
+    p.write_text(code, encoding="utf-8")
+    mod = inspect.getmodule(reg.get(factor_id).__class__)
+    if mod is not None:
+        reg.reload_module(mod.__name__)
+    from backend.runtime.task_pool import reset_pool
+
+    reset_pool()
+
+    logger.info(
+        "apply_best_params: factor_id=%s new_params=%s",
+        factor_id, params_str,
+    )
+    return ok({
+        "factor_id": factor_id,
+        "new_default_params": new_params,
+        "version": reg.current_version(factor_id),
+    })
+
+
 def _decode_json_inplace(row: dict, src_key: str, dst_key: str) -> None:
     """把 row[src_key] 里的 JSON 字符串解码塞到 row[dst_key]，失败就保留原值。
 
