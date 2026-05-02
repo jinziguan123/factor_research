@@ -347,16 +347,16 @@ function fmtValues(v: number[] | Record<string, number[]> | null | undefined): s
               <span>最优参数组合</span>
               <n-tag type="success" size="small" round>BEST</n-tag>
             </n-space>
-            <template #header-extra>
-              <n-button
-                size="small"
-                type="primary"
-                :loading="applyingBest"
-                @click="applyBestParams"
-              >
-                应用为默认参数
-              </n-button>
-            </template>
+          </template>
+          <template #header-extra>
+            <n-button
+              size="small"
+              type="primary"
+              :loading="applyingBest"
+              @click="applyBestParams"
+            >
+              应用为默认参数
+            </n-button>
           </template>
           <div style="font-size: 14px; margin-bottom: 8px">
             <code style="font-size: 15px; font-weight: 600">{{ gsBest.params ? JSON.stringify(gsBest.params) : '-' }}</code>
