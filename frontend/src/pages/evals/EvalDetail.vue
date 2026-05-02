@@ -8,7 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NGrid, NGridItem, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NEmpty, NAlert, NCard, NTag,
-  NTable, NModal, NInput, NSelect, NFormItem, useMessage,
+  NTable, NModal, NInput, NSelect, NFormItem, NTabs, NTabPane, useMessage,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
 import { useFactorLineage } from '@/api/factors'
@@ -30,6 +30,7 @@ const router = useRouter()
 const runId = computed(() => route.params.runId as string)
 const { data: evalRun, isLoading } = useEval(runId)
 const message = useMessage()
+const activeTab = ref<'cross_section' | 'time_series'>('cross_section')
 
 // 池名映射：详情页把 pool_id 渲染成池名，查不到退化成 #<id>（软删池）。
 const { lookup: lookupPoolName } = usePoolNameMap()
@@ -396,9 +397,12 @@ const rankIcMeanDiverged = computed(() =>
         </n-descriptions-item>
       </n-descriptions>
 
+      <!-- Tab 切换：横截面评估 / 个股时序 -->
+      <n-tabs v-if="evalRun?.status === 'success'" v-model:value="activeTab" type="segment" style="margin-bottom: 16px">
+        <n-tab-pane name="cross_section" tab="横截面评估">
       <!-- 横截面指标全空：池太小 / 有效样本不足，提示用户换池 -->
       <n-alert
-        v-if="evalRun?.status === 'success' && crossSectionalEmpty"
+        v-if="crossSectionalEmpty"
         type="warning"
         title="横截面指标无法计算"
         style="margin-bottom: 16px"
@@ -697,9 +701,11 @@ const rankIcMeanDiverged = computed(() =>
           </n-table>
         </template>
       </template>
+        </n-tab-pane>
+        <n-tab-pane name="time_series" tab="个股时序">
       <!-- 个股时序评估：对每只股票独立计算 IC / Hit Rate / 自相关 -->
-      <template v-if="evalRun?.status === 'success' && tsSummary">
-        <h3 style="margin-bottom: 12px; margin-top: 24px">个股时序评估</h3>
+      <template v-if="tsSummary">
+        <h3 style="margin-bottom: 12px">个股时序评估</h3>
         <n-alert type="info" :show-icon="false" style="margin-bottom: 16px">
           横截面 IC 回答"今天谁比谁好"，个股时序 IC 回答"这只票上因子持续有效吗"。
           时序 IC &gt; 0 表示因子值高时该股票确实倾向于上涨，是因子对个股稳定性的直接证据。
@@ -813,6 +819,10 @@ const rankIcMeanDiverged = computed(() =>
           </n-table>
         </n-card>
       </template>
+
+      <n-empty v-else description="时序评估数据不可用（可能因样本不足被跳过）" style="padding: 40px" />
+        </n-tab-pane>
+      </n-tabs>
 
     </n-spin>
   </div>
