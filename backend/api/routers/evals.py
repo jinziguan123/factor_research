@@ -335,11 +335,24 @@ def create_grid_search(body: GridSearchIn, bt: BackgroundTasks) -> dict:
             cur.execute(
                 """
                 INSERT INTO fr_param_sensitivity_runs
-                (run_id, factor_id, factor_version, param_name, status,
-                 progress, created_at)
-                VALUES (%s, %s, %s, %s, 'pending', 0, %s)
+                (run_id, factor_id, factor_version, param_name, values_json,
+                 base_params_json, pool_id, freq, start_date, end_date,
+                 n_groups, forward_periods,
+                 status, progress, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
                 """,
-                (run_id, body.factor_id, version, "grid_search", datetime.now()),
+                (
+                    run_id, body.factor_id, version,
+                    "grid_search",
+                    json.dumps(body.grid, ensure_ascii=False),
+                    json.dumps(body.base_params, ensure_ascii=False)
+                    if body.base_params is not None else None,
+                    body.pool_id, "1d",
+                    body.start_date, body.end_date,
+                    body.n_groups,
+                    json.dumps(body.forward_periods),
+                    datetime.now(),
+                ),
             )
         c.commit()
 

@@ -211,17 +211,16 @@ def run_grid_search(run_id: str, body: dict) -> None:
             with c.cursor() as cur:
                 cur.execute(
                     """
-                    REPLACE INTO fr_param_sensitivity_runs
-                    (run_id, factor_id, param_name, status, progress,
-                     started_at, finished_at, points_json)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    UPDATE fr_param_sensitivity_runs
+                    SET status=%s, progress=%s, started_at=%s,
+                        finished_at=%s, points_json=%s
+                    WHERE run_id=%s
                     """,
                     (
-                        run_id, factor_id,
-                        "×".join(param_names),
                         "success", 100,
                         datetime.now(), datetime.now(),
                         json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                        run_id,
                     ),
                 )
             c.commit()
