@@ -636,3 +636,182 @@ def fama_macbeth(
             "se": float(se),
         }
     return result
+
+
+# ------------------- 个股时序评估指标 -------------------
+#
+# 与横截面指标（每天跨股票排序）不同，下面这些指标对每只股票独立计算
+# 时间序列统计量，回答"这个因子在某只股票上是否持续有效"。
+
+
+def per_symbol_ic(
+    factor: pd.DataFrame, forward_ret: pd.DataFrame
+) -> pd.Series:
+    """每只股票的时序 Pearson IC：因子值与其前向收益的相关系数。
+
+    Args:
+        factor: 宽表 index=date, columns=symbol。
+        forward_ret: 同结构的前向收益。
+
+    Returns:
+        ``pd.Series(index=symbol, value=corr)``，有效样本 <10 的 symbol 被跳过。
+    """
+    aligned_f, aligned_r = factor.align(forward_ret, join="inner")
+    out: dict = {}
+    for sym in aligned_f.columns:
+        f_vals = aligned_f[sym].dropna()
+        r_vals = aligned_r[sym].dropna()
+        common = f_vals.index.intersection(r_vals.index)
+        if len(common) < 10:
+            continue
+        f = f_vals.loc[common].values.astype(float)
+        r = r_vals.loc[common].values.astype(float)
+        mask = np.isfinite(f) & np.isfinite(r)
+        if mask.sum() < 10:
+            continue
+        corr = float(np.corrcoef(f[mask], r[mask])[0, 1])
+        if np.isfinite(corr):
+            out[sym] = corr
+    return pd.Series(out).sort_values()
+
+
+def hit_rate(
+    factor: pd.DataFrame, forward_ret: pd.DataFrame
+) -> pd.Series:
+    """每只股票的方向正确率：sign(factor) == sign(forward_ret) 的占比。
+
+    方向正确意味着：因子看多（factor>0）且确实涨了（ret>0），或因子看空
+    且确实跌了。值域 [0, 1]，0.5 约等于随机猜测。
+
+    Returns:
+        ``pd.Series(index=symbol, value=hit_rate)``。
+    """
+    aligned_f, aligned_r = factor.align(forward_ret, join="inner")
+    out: dict = {}
+    for sym in aligned_f.columns:
+        f = aligned_f[sym].dropna()
+        r = aligned_r[sym].dropna()
+        common = f.index.intersection(r.index)
+        if len(common) < 10:
+            continue
+        f_sign = np.sign(f.loc[common].values)
+        r_sign = np.sign(r.loc[common].values)
+        valid = (f_sign != 0) & (r_sign != 0) & np.isfinite(f_sign) & np.isfinite(r_sign)
+        if valid.sum() < 10:
+            continue
+        out[sym] = float((f_sign[valid] == r_sign[valid]).mean())
+    return pd.Series(out).sort_values()
+
+
+def factor_autocorr(
+    factor: pd.DataFrame, lag: int = 1
+) -> pd.Series:
+    """每只股票因子值的自相关（lag 阶），衡量因子信号的持续性。
+
+    自相关越高说明因子不会每日剧烈反转，换手成本越低。
+    lag=1 时衡量"今天的因子值和昨天有多像"。
+
+    Returns:
+        ``pd.Series(index=symbol, value=autocorr)``。
+    """
+    out: dict = {}
+    for sym in factor.columns:
+        s = factor[sym].dropna()
+        if len(s) < 20:
+            continue
+        vals = s.values.astype(float)
+        mask = np.isfinite(vals)
+        if mask.sum() < 20:
+            continue
+        v = vals[mask]
+        out[sym] = float(np.corrcoef(v[lag:], v[:-lag])[0, 1])
+    return pd.Series(out).sort_values()
+
+
+def rolling_hit_rate(
+    factor: pd.DataFrame,
+    forward_ret: pd.DataFrame,
+    window: int = 60,
+) -> pd.DataFrame:
+    """每只股票的滚动窗口方向正确率，用于检测因子衰减。
+
+    Args:
+        factor: 宽表。
+        forward_ret: 前向收益。
+        window: 滚动窗口大小（交易日）。
+
+    Returns:
+        宽表 index=date, columns=symbol，值为该日过去 window 天的 hit rate。
+        窗口未就绪（前 window-1 天）为 NaN。
+    """
+    aligned_f, aligned_r = factor.align(forward_ret, join="inner")
+    signs_match = (np.sign(aligned_f) == np.sign(aligned_r)).astype(float)
+    signs_match = signs_match.where(
+        np.isfinite(aligned_f.values) & np.isfinite(aligned_r.values)
+        & (np.sign(aligned_f.values) != 0) & (np.sign(aligned_r.values) != 0)
+    )
+    return signs_match.rolling(window, min_periods=window).mean()
+
+
+def per_symbol_summary(
+    factor: pd.DataFrame, forward_ret: pd.DataFrame
+) -> pd.DataFrame:
+    """个股时序评估汇总表：每只股票一行，含 IC / Hit Rate / 自相关。
+
+    Returns:
+        DataFrame index=symbol, columns=[ts_ic, hit_rate, autocorr,
+        n_samples, ic_sign（IC 方向，+1/-1/0）]。按 ts_ic 降序排列。
+    """
+    ic = per_symbol_ic(factor, forward_ret)
+    hr = hit_rate(factor, forward_ret)
+    ac = factor_autocorr(factor)
+    rows: list[dict] = []
+    all_syms = set(ic.index) | set(hr.index) | set(ac.index)
+    for sym in sorted(all_syms):
+        ic_v = ic.get(sym)
+        hr_v = hr.get(sym)
+        ac_v = ac.get(sym)
+        f_col = factor[sym].dropna()
+        r_col = forward_ret[sym].dropna()
+        n = min(len(f_col.index.intersection(r_col.index)), len(f_col), len(r_col))
+        rows.append({
+            "symbol": sym,
+            "ts_ic": float(ic_v) if ic_v is not None and np.isfinite(ic_v) else None,
+            "hit_rate": float(hr_v) if hr_v is not None and np.isfinite(hr_v) else None,
+            "autocorr": float(ac_v) if ac_v is not None and np.isfinite(ac_v) else None,
+            "n_samples": n,
+            "ic_sign": 1 if (ic_v or 0) > 1e-8 else -1 if (ic_v or 0) < -1e-8 else 0,
+        })
+    df = pd.DataFrame(rows).set_index("symbol")
+    return df.sort_values("ts_ic", ascending=False, na_position="last")
+
+
+def ts_summary_stats(per_sym: pd.DataFrame) -> dict:
+    """从 per_symbol_summary 的结果中提取汇总统计。
+
+    Returns:
+        dict 包含：
+        - ``ts_ic_mean``：个股时序 IC 的横截面均值
+        - ``ts_ic_positive_ratio``：IC>0 的股票占比
+        - ``ts_hit_rate_mean``：平均方向正确率
+        - ``ts_autocorr_mean``：平均因子自相关
+        - ``ts_n_stocks``：参与统计的股票数
+        - ``ts_ic_std``：个股 IC 的横截面标准差（分散度）
+    """
+    if per_sym.empty:
+        return {
+            "ts_ic_mean": 0, "ts_ic_positive_ratio": 0,
+            "ts_hit_rate_mean": 0, "ts_autocorr_mean": 0,
+            "ts_n_stocks": 0, "ts_ic_std": 0,
+        }
+    ic = per_sym["ts_ic"].dropna()
+    hr = per_sym["hit_rate"].dropna()
+    ac = per_sym["autocorr"].dropna()
+    return {
+        "ts_ic_mean": float(ic.mean()) if len(ic) > 0 else 0.0,
+        "ts_ic_std": float(ic.std(ddof=1)) if len(ic) > 1 else 0.0,
+        "ts_ic_positive_ratio": float((ic > 0).mean()) if len(ic) > 0 else 0.0,
+        "ts_hit_rate_mean": float(hr.mean()) if len(hr) > 0 else 0.0,
+        "ts_autocorr_mean": float(ac.mean()) if len(ac) > 0 else 0.0,
+        "ts_n_stocks": len(ic),
+    }

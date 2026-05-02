@@ -146,6 +146,28 @@ def get_eval(run_id: str) -> dict:
     return ok(run)
 
 
+@router.get("/{run_id}/ts")
+def get_eval_time_series(run_id: str) -> dict:
+    """返回个股时序评估数据：汇总统计 + 前/后 30 只股票的明细表。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT payload_json FROM fr_factor_eval_metrics WHERE run_id=%s",
+                (run_id,),
+            )
+            m = cur.fetchone()
+    if not m or not m.get("payload_json"):
+        raise HTTPException(status_code=404, detail="metrics not found or eval still running")
+    try:
+        payload = json.loads(m["payload_json"])
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=500, detail="payload_json 解析失败")
+    ts = payload.get("time_series")
+    if ts is None:
+        raise HTTPException(status_code=404, detail="时序评估数据不可用（可能因样本不足被跳过）")
+    return ok(ts)
+
+
 @router.get("/{run_id}/status")
 def get_eval_status(run_id: str) -> dict:
     """轻量状态端点，前端轮询（每 1-2s）只需要少量字段，避免把 payload_json 也搬运。"""

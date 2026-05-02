@@ -751,6 +751,29 @@ def run_eval(run_id: str, body: dict) -> None:
             split_date=body.get("split_date"),
         )
 
+        # 个股时序评估：对每只股票独立计算 IC / Hit Rate / 自相关
+        _set_status(run_id, progress=85)
+        try:
+            from backend.services.metrics import (
+                per_symbol_summary,
+                ts_summary_stats,
+            )
+
+            fwd_ret_1d = close.shift(-1) / close - 1
+            ts_per_symbol = per_symbol_summary(F, fwd_ret_1d)
+            ts_stats = ts_summary_stats(ts_per_symbol)
+            payload["time_series"] = {
+                "summary": ts_stats,
+                "per_symbol": _df_to_obj(ts_per_symbol.reset_index()),
+                "top_n": _df_to_obj(ts_per_symbol.head(30).reset_index()),
+                "bottom_n": _df_to_obj(
+                    ts_per_symbol.dropna(subset=["ts_ic"]).tail(30).reset_index()
+                ),
+            }
+        except Exception:  # noqa: BLE001
+            log.exception("个股时序评估失败 run_id=%s（不影响主流程）", run_id)
+            payload["time_series"] = None
+
         _set_status(run_id, progress=90)
         with mysql_conn() as c:
             with c.cursor() as cur:

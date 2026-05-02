@@ -147,6 +147,12 @@ const longShortSampleInsufficient = computed(() => {
   return n !== null && n > 0 && n < LS_SAMPLE_WARN_THRESHOLD
 })
 
+// 个股时序评估数据
+const tsData = computed(() => payload.value?.time_series ?? null)
+const tsSummary = computed(() => tsData.value?.summary ?? null)
+const tsTopN = computed(() => (tsData.value?.top_n?.data ?? []) as any[])
+const tsBottomN = computed(() => (tsData.value?.bottom_n?.data ?? []) as any[])
+
 // 因子体检卡片数据：后端 _build_health 产出的 {overall, items[]}。
 // 老的 run 没这段，payload.health 会是 undefined → 直接不渲染卡片。
 interface HealthItem {
@@ -691,11 +697,146 @@ const rankIcMeanDiverged = computed(() =>
           </n-table>
         </template>
       </template>
+      <!-- 个股时序评估：对每只股票独立计算 IC / Hit Rate / 自相关 -->
+      <template v-if="evalRun?.status === 'success' && tsSummary">
+        <h3 style="margin-bottom: 12px; margin-top: 24px">个股时序评估</h3>
+        <n-alert type="info" :show-icon="false" style="margin-bottom: 16px">
+          横截面 IC 回答"今天谁比谁好"，个股时序 IC 回答"这只票上因子持续有效吗"。
+          时序 IC &gt; 0 表示因子值高时该股票确实倾向于上涨，是因子对个股稳定性的直接证据。
+        </n-alert>
+
+        <!-- 汇总统计 -->
+        <n-card size="small" style="margin-bottom: 16px">
+          <template #header>时序评估汇总</template>
+          <n-grid :cols="6" :x-gap="12" responsive="screen">
+            <n-grid-item span="6 s:3 m:2 l:1">
+              <div class="ts-stat">
+                <div class="ts-stat-label">个股时序 IC 均值</div>
+                <div class="ts-stat-value" :style="{ color: (tsSummary.ts_ic_mean ?? 0) > 0 ? '#18A058' : '#D03050' }">
+                  {{ fmtNum(tsSummary.ts_ic_mean) }}
+                </div>
+              </div>
+            </n-grid-item>
+            <n-grid-item span="6 s:3 m:2 l:1">
+              <div class="ts-stat">
+                <div class="ts-stat-label">IC &gt; 0 占比</div>
+                <div class="ts-stat-value">{{ fmtPct(tsSummary.ts_ic_positive_ratio) }}</div>
+              </div>
+            </n-grid-item>
+            <n-grid-item span="6 s:3 m:2 l:1">
+              <div class="ts-stat">
+                <div class="ts-stat-label">IC 横截面标准差</div>
+                <div class="ts-stat-value">{{ fmtNum(tsSummary.ts_ic_std) }}</div>
+              </div>
+            </n-grid-item>
+            <n-grid-item span="6 s:3 m:2 l:1">
+              <div class="ts-stat">
+                <div class="ts-stat-label">平均方向正确率</div>
+                <div class="ts-stat-value">{{ fmtPct(tsSummary.ts_hit_rate_mean) }}</div>
+              </div>
+            </n-grid-item>
+            <n-grid-item span="6 s:3 m:2 l:1">
+              <div class="ts-stat">
+                <div class="ts-stat-label">平均因子自相关</div>
+                <div class="ts-stat-value">{{ fmtNum(tsSummary.ts_autocorr_mean) }}</div>
+              </div>
+            </n-grid-item>
+            <n-grid-item span="6 s:3 m:2 l:1">
+              <div class="ts-stat">
+                <div class="ts-stat-label">有效股票数</div>
+                <div class="ts-stat-value">{{ tsSummary.ts_n_stocks }}</div>
+              </div>
+            </n-grid-item>
+          </n-grid>
+        </n-card>
+
+        <!-- Top 30 股票明细 -->
+        <n-card size="small" style="margin-bottom: 16px">
+          <template #header>
+            个股时序 IC Top 30（因子在这些股票上最有效）
+          </template>
+          <n-table :bordered="true" :single-line="false" size="small">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>股票</th>
+                <th>时序 IC</th>
+                <th>方向正确率</th>
+                <th>因子自相关</th>
+                <th>有效样本</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, idx) in tsTopN.slice(0, 30)" :key="row.symbol ?? idx">
+                <td style="color: #848E9C">{{ idx + 1 }}</td>
+                <td><code>{{ row.symbol }}</code></td>
+                <td :style="{ color: (row.ts_ic ?? 0) > 0 ? '#18A058' : '#D03050' }">
+                  {{ fmtNum(row.ts_ic) }}
+                </td>
+                <td>{{ fmtPct(row.hit_rate) }}</td>
+                <td>{{ fmtNum(row.autocorr) }}</td>
+                <td style="color: #848E9C">{{ row.n_samples }}</td>
+              </tr>
+            </tbody>
+          </n-table>
+        </n-card>
+
+        <!-- Bottom 30 股票明细 -->
+        <n-card size="small" style="margin-bottom: 16px">
+          <template #header>
+            个股时序 IC Bottom 30（因子在这些股票上最无效或反向）
+            <n-tag type="warning" size="small" style="margin-left: 8px">列为负值表示因子方向在该股上反向</n-tag>
+          </template>
+          <n-table :bordered="true" :single-line="false" size="small">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>股票</th>
+                <th>时序 IC</th>
+                <th>方向正确率</th>
+                <th>因子自相关</th>
+                <th>有效样本</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, idx) in tsBottomN.slice(0, 30)" :key="row.symbol ?? idx">
+                <td style="color: #848E9C">{{ idx + 1 }}</td>
+                <td><code>{{ row.symbol }}</code></td>
+                <td :style="{ color: (row.ts_ic ?? 0) > 0 ? '#18A058' : '#D03050' }">
+                  {{ fmtNum(row.ts_ic) }}
+                </td>
+                <td>{{ fmtPct(row.hit_rate) }}</td>
+                <td>{{ fmtNum(row.autocorr) }}</td>
+                <td style="color: #848E9C">{{ row.n_samples }}</td>
+              </tr>
+            </tbody>
+          </n-table>
+        </n-card>
+      </template>
+
     </n-spin>
   </div>
 </template>
 
 <style scoped>
+.ts-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--n-border-color, #eee);
+  border-radius: 6px;
+  height: 100%;
+  min-height: 72px;
+}
+.ts-stat-label {
+  font-size: 12px;
+  color: var(--n-text-color-3, #848E9C);
+}
+.ts-stat-value {
+  font-size: 20px;
+  font-weight: 600;
+}
 .health-cell {
   display: flex;
   flex-direction: column;
