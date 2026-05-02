@@ -244,6 +244,24 @@ def _build_user_content(
             parts.append({"type": "input_image", "image_url": uri})
         return parts
 
+    if protocol == "anthropic_messages":
+        # Anthropic 格式：{"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
+        parts: list[dict] = [{"type": "text", "text": text}]
+        for uri in images:
+            # data URI 格式：data:image/png;base64,xxxx
+            media_type = "image/png"
+            data = uri
+            if uri.startswith("data:"):
+                header, b64 = uri.split(",", 1)
+                if ";" in header:
+                    media_type = header.split(":")[1].split(";")[0]
+                data = b64
+            parts.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            })
+        return parts
+
     # chat_completions：图片分片用 {"type":"image_url","image_url":{"url": data_uri}}
     parts = [{"type": "text", "text": text}]
     for uri in images:
@@ -444,15 +462,56 @@ def _call_responses(
     )
 
 
+def _call_anthropic_messages(messages: list[dict]) -> str:
+    """Anthropic Messages API 协议：``POST {base_url}/messages``。
+
+    DeepSeek 等厂商的 Anthropic 兼容端点。system prompt 提取为顶层字段，
+    其余放入 messages 数组。返回 ``content[0].text``。
+    """
+    url = settings.openai_base_url.rstrip("/") + "/messages"
+    system_text: str | None = None
+    user_assistant: list[dict] = []
+    for m in messages:
+        if str(m.get("role", "")).lower() == "system":
+            system_text = str(m.get("content", ""))
+        else:
+            user_assistant.append(m)
+
+    payload: dict = {
+        "model": settings.openai_model,
+        "messages": user_assistant,
+        "max_tokens": 4096,
+        "stream": False,
+    }
+    if system_text:
+        payload["system"] = system_text
+
+    data = _post_and_validate(url, payload)
+
+    # Anthropic 格式: {"content": [{"type": "text", "text": "..."}]}
+    content = data.get("content", [])
+    if isinstance(content, list):
+        parts = [str(c.get("text", "")) for c in content if c.get("type") == "text"]
+        if parts:
+            return "".join(parts)
+    # OpenAI 格式 fallback（某些代理双格式兼容）
+    choices = data.get("choices", [])
+    if choices:
+        return str(choices[0].get("message", {}).get("content", "") or "")
+
+    raise FactorAssistantError(
+        f"Anthropic Messages 响应无法解析：{json.dumps(data, ensure_ascii=False)[:300]}"
+    )
+
+
 def _call_openai_compatible(
     messages: list[dict], reasoning_effort: str = "medium",
 ) -> str:
-    """按 ``OPENAI_API_PROTOCOL`` 分发到老 Chat Completions 或新 Responses API。
+    """按 ``OPENAI_API_PROTOCOL`` 分发到 Chat Completions / Responses / Anthropic。
 
-    测试里会 monkeypatch 这个函数替换成桩，所以这一层只做协议分发，不做其它逻辑。
+    测试里会 monkeypatch 这个函数替换成桩，所以这一层只做协议分发。
 
-    ``reasoning_effort`` 仅在 ``responses`` 协议下生效；``chat_completions``
-    协议会忽略（chat 接口没这个参数）。
+    ``reasoning_effort`` 仅在 ``responses`` 协议下生效；其它协议忽略。
     """
     if not settings.openai_api_key:
         raise FactorAssistantError(
@@ -464,9 +523,11 @@ def _call_openai_compatible(
         return _call_responses(messages, reasoning_effort=reasoning_effort)
     if proto == "chat_completions":
         return _call_chat_completions(messages)
+    if proto == "anthropic_messages":
+        return _call_anthropic_messages(messages)
     raise FactorAssistantError(
         f"OPENAI_API_PROTOCOL 非法：{proto!r}；"
-        f"可选 'chat_completions'（默认）或 'responses'"
+        f"可选 'chat_completions'（默认）/ 'responses' / 'anthropic_messages'"
     )
 
 
