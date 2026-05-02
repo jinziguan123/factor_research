@@ -30,7 +30,7 @@ export interface ParamSensitivityRun {
   factor_id: string
   factor_version: number
   param_name: string
-  values: number[] | null
+  values: number[] | Record<string, number[]> | null
   base_params?: Record<string, any> | null
   pool_id: number
   freq: string
@@ -48,6 +48,12 @@ export interface ParamSensitivityRun {
   points?: ParamSensitivityPoint[] | null
   default_value?: number | null
   schema_entry?: ParamSensitivitySchemaEntry | null
+  // 栅格搜索专属
+  is_grid_search?: boolean
+  results?: any[]
+  best?: any
+  heatmap?: any
+  optimize_by?: string
 }
 
 export interface ParamSensitivityInput {

@@ -228,9 +228,51 @@ const tableCols: DataTableColumns<ParamSensitivityPoint> = [
 
 // values 在 run 顶层和成功后的 points 数组重复，此处直接用 run.values 展示基础信息，
 // 还没跑出 points 时就不渲染稳定性 / 图表 / 表格。
-function fmtValues(v: number[] | null | undefined): string {
-  if (!v || v.length === 0) return '-'
-  return v.join(' / ')
+// 是否栅格搜索（values_json 是 dict 而非 array）
+const isGridSearch = computed(() => {
+  const v = run.value?.values
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+})
+
+// 栅格搜索结果表格列
+const gsColumns: DataTableColumns<any> = [
+  { title: '参数', key: 'params_display', width: 200, ellipsis: true },
+  {
+    title: 'IC Mean', key: 'ic_mean', width: 100,
+    render: (r) => (r.ic_mean ?? 0).toFixed(4),
+  },
+  {
+    title: 'Rank IC Mean', key: 'rank_ic_mean', width: 110,
+    render: (r) => (r.rank_ic_mean ?? 0).toFixed(4),
+  },
+  {
+    title: 'IC IR', key: 'ic_ir', width: 90,
+    render: (r) => (r.ic_ir ?? 0).toFixed(3),
+  },
+  {
+    title: 'Win Rate', key: 'ic_win_rate', width: 90,
+    render: (r) => r.ic_win_rate != null ? (r.ic_win_rate * 100).toFixed(1) + '%' : '-',
+  },
+  { title: '样本天数', key: 'n_dates', width: 80 },
+]
+
+const gsResults = computed<any[]>(() => {
+  const raw = run.value?.results ?? []
+  return raw.map((r: any) => ({
+    ...r,
+    params_display: r.params ? JSON.stringify(r.params) : (r.error ?? '-'),
+  }))
+})
+
+const gsBest = computed<any>(() => run.value?.best ?? null)
+
+function fmtValues(v: number[] | Record<string, number[]> | null | undefined): string {
+  if (!v) return '-'
+  if (Array.isArray(v)) return v.length ? v.join(' / ') : '-'
+  // dict 格式（栅格搜索）：{"window":[5,10,20],"skip":[0,5]}
+  return Object.entries(v)
+    .map(([k, vals]) => `${k}=[${(vals as number[]).join(', ')}]`)
+    .join('  ')
 }
 </script>
 
@@ -279,7 +321,44 @@ function fmtValues(v: number[] | null | undefined): string {
         </n-alert>
       </n-card>
 
-      <template v-if="run?.status === 'success' && sortedPoints.length > 0">
+      <!-- 栅格搜索结果 -->
+      <template v-if="isGridSearch && run?.status === 'success'">
+        <n-card v-if="gsBest" size="small" style="margin-bottom: 16px">
+          <template #header>
+            <n-space align="center">
+              <span>最优参数组合</span>
+              <n-tag type="success" size="small" round>BEST</n-tag>
+            </n-space>
+          </template>
+          <div style="font-size: 14px; margin-bottom: 8px">
+            <code style="font-size: 15px; font-weight: 600">{{ gsBest.params ? JSON.stringify(gsBest.params) : '-' }}</code>
+          </div>
+          <n-space :wrap="true" :size="16">
+            <span>IC Mean: <b>{{ (gsBest.ic_mean ?? 0).toFixed(4) }}</b></span>
+            <span>Rank IC: <b>{{ (gsBest.rank_ic_mean ?? 0).toFixed(4) }}</b></span>
+            <span>IC IR: <b>{{ (gsBest.ic_ir ?? 0).toFixed(3) }}</b></span>
+            <span>Win Rate: <b>{{ gsBest.ic_win_rate != null ? (gsBest.ic_win_rate * 100).toFixed(1) + '%' : '-' }}</b></span>
+            <span>样本: <b>{{ gsBest.n_dates ?? '-' }} 天</b></span>
+          </n-space>
+        </n-card>
+
+        <n-card size="small" style="margin-bottom: 16px">
+          <template #header>
+            全部组合（{{ gsResults.length }}，按 {{ run.optimize_by ?? 'ic_mean' }} 排序）
+          </template>
+          <n-data-table
+            :columns="gsColumns"
+            :data="gsResults"
+            :bordered="false"
+            :single-line="false"
+            size="small"
+            :max-height="500"
+            :row-key="(_r: any, idx: number) => idx"
+          />
+        </n-card>
+      </template>
+
+      <template v-if="!isGridSearch && run?.status === 'success' && sortedPoints.length > 0">
         <!-- 稳定性摘要 -->
         <n-card size="small" style="margin-bottom: 16px">
           <template #header>

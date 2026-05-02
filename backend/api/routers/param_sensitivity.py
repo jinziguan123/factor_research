@@ -167,18 +167,33 @@ def get_param_sensitivity(run_id: str) -> dict:
         try:
             parsed = json.loads(raw_points)
             if isinstance(parsed, dict):
-                run["points"] = parsed.get("points")
-                run["default_value"] = parsed.get("default_value")
-                run["schema_entry"] = parsed.get("schema_entry")
+                # 栅格搜索：payload 含 results / best 字段
+                if "results" in parsed:
+                    run["is_grid_search"] = True
+                    run["results"] = parsed.get("results")
+                    run["best"] = parsed.get("best")
+                    run["heatmap"] = parsed.get("heatmap")
+                    run["optimize_by"] = parsed.get("optimize_by")
+                    run["points"] = None
+                    run["default_value"] = None
+                    run["schema_entry"] = None
+                else:
+                    run["is_grid_search"] = False
+                    run["points"] = parsed.get("points")
+                    run["default_value"] = parsed.get("default_value")
+                    run["schema_entry"] = parsed.get("schema_entry")
             else:
+                run["is_grid_search"] = False
                 run["points"] = None
                 run["default_value"] = None
                 run["schema_entry"] = None
         except (TypeError, ValueError):
+            run["is_grid_search"] = False
             run["points"] = None
             run["default_value"] = None
             run["schema_entry"] = None
     else:
+        run["is_grid_search"] = False
         run["points"] = None
         run["default_value"] = None
         run["schema_entry"] = None
