@@ -23,7 +23,7 @@ class AmihudIlliquidityNeg(BaseFactor):
     description = 'Amihud (2002) 非流动性度量取负——高流动性看多，方向与质量/低风险因子对齐。'
     hypothesis = '【已取负，方向反转】流动性越差预期收益越高（非流动性溢价）——Amihud 2002 / Liu-Stambaugh-Yuan 2019。'
     params_schema: dict = {'window': {'type': 'int', 'default': 20, 'min': 5, 'max': 252, 'desc': '滚动均值窗口（交易日）'}}
-    default_params: dict = {'window': 20}
+    default_params: dict = {"window": 50}
     supported_freqs = ('1d',)
 
     def required_warmup(self, params: dict) -> int:
