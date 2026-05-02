@@ -275,6 +275,8 @@ def _df_to_obj(df: pd.DataFrame) -> dict:
 
     列名如果是整数（pandas 默认 0..n-1），自动前缀 ``g{i+1}``；
     其它列名原样 str 化。NaN 转 None。
+
+    要求 index 为 DatetimeIndex（调用方保证）。
     """
     if df.empty:
         return {"dates": []}
@@ -288,6 +290,32 @@ def _df_to_obj(df: pd.DataFrame) -> dict:
             key = str(col)
         obj[key] = [None if pd.isna(x) else float(x) for x in df[col].values]
     return obj
+
+
+def _df_to_rows(df: pd.DataFrame) -> dict:
+    """把任意 index 的 DataFrame 转成 ``{columns, data: [{col: val}]}``。
+
+    适用于非日期 index 的 DataFrame（如个股时序评估的 per_symbol_summary 结果）。
+    """
+    if df.empty:
+        return {"columns": [], "data": []}
+    rows: list[dict] = []
+    for idx_val in df.index:
+        row: dict = {"_index": str(idx_val)}
+        for col in df.columns:
+            v = df.at[idx_val, col]
+            if isinstance(v, float) and not np.isfinite(v):
+                row[str(col)] = None
+            elif isinstance(v, (np.integer,)):
+                row[str(col)] = int(v)
+            elif isinstance(v, (np.floating,)):
+                row[str(col)] = float(v)
+            elif pd.isna(v):
+                row[str(col)] = None
+            else:
+                row[str(col)] = v
+        rows.append(row)
+    return {"columns": [str(c) for c in df.columns], "data": rows}
 
 
 def _build_alphalens_extras(
@@ -764,10 +792,10 @@ def run_eval(run_id: str, body: dict) -> None:
             ts_stats = ts_summary_stats(ts_per_symbol)
             payload["time_series"] = {
                 "summary": ts_stats,
-                "per_symbol": _df_to_obj(ts_per_symbol.reset_index()),
-                "top_n": _df_to_obj(ts_per_symbol.head(30).reset_index()),
-                "bottom_n": _df_to_obj(
-                    ts_per_symbol.dropna(subset=["ts_ic"]).tail(30).reset_index()
+                "per_symbol": _df_to_rows(ts_per_symbol),
+                "top_n": _df_to_rows(ts_per_symbol.head(30)),
+                "bottom_n": _df_to_rows(
+                    ts_per_symbol.dropna(subset=["ts_ic"]).tail(30)
                 ),
             }
         except Exception:  # noqa: BLE001

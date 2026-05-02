@@ -153,6 +153,7 @@ const tsData = computed(() => payload.value?.time_series ?? null)
 const tsSummary = computed(() => tsData.value?.summary ?? null)
 const tsTopN = computed(() => (tsData.value?.top_n?.data ?? []) as any[])
 const tsBottomN = computed(() => (tsData.value?.bottom_n?.data ?? []) as any[])
+function tsRowSymbol(row: any): string { return row._index ?? row.symbol ?? '-' }
 
 // 因子体检卡片数据：后端 _build_health 产出的 {overall, items[]}。
 // 老的 run 没这段，payload.health 会是 undefined → 直接不渲染卡片。
@@ -773,9 +774,9 @@ const rankIcMeanDiverged = computed(() =>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, idx) in tsTopN.slice(0, 30)" :key="row.symbol ?? idx">
+              <tr v-for="(row, idx) in tsTopN.slice(0, 30)" :key="tsRowSymbol(row) ?? idx">
                 <td style="color: #848E9C">{{ idx + 1 }}</td>
-                <td><code>{{ row.symbol }}</code></td>
+                <td><code>{{ tsRowSymbol(row) }}</code></td>
                 <td :style="{ color: (row.ts_ic ?? 0) > 0 ? '#18A058' : '#D03050' }">
                   {{ fmtNum(row.ts_ic) }}
                 </td>
@@ -805,9 +806,9 @@ const rankIcMeanDiverged = computed(() =>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, idx) in tsBottomN.slice(0, 30)" :key="row.symbol ?? idx">
+              <tr v-for="(row, idx) in tsBottomN.slice(0, 30)" :key="tsRowSymbol(row) ?? idx">
                 <td style="color: #848E9C">{{ idx + 1 }}</td>
-                <td><code>{{ row.symbol }}</code></td>
+                <td><code>{{ tsRowSymbol(row) }}</code></td>
                 <td :style="{ color: (row.ts_ic ?? 0) > 0 ? '#18A058' : '#D03050' }">
                   {{ fmtNum(row.ts_ic) }}
                 </td>
