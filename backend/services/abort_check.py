@@ -40,6 +40,9 @@ _ABORT_TABLES = {
     "backtest": "fr_backtest_runs",
     "cost_sensitivity": "fr_cost_sensitivity_runs",
     "param_sensitivity": "fr_param_sensitivity_runs",
+    "grid_search": "fr_param_sensitivity_runs",
+    "wf_backtest": "fr_backtest_runs",
+    "composition": "fr_composition_runs",
 }
 
 
