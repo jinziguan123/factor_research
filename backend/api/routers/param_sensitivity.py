@@ -328,37 +328,45 @@ def apply_best_params(run_id: str) -> dict:
         if not isinstance(node, ast.ClassDef):
             continue
         for stmt in node.body:
-            if not isinstance(stmt, ast.Assign):
-                continue
-            for tgt in stmt.targets:
+            val_node = None
+            is_ann = False
+            # default_params = {...}  →  ast.Assign
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id == "default_params":
+                        val_node = stmt.value
+                        break
+            # default_params: dict = {...}  →  ast.AnnAssign
+            elif isinstance(stmt, ast.AnnAssign):
+                tgt = stmt.target
                 if isinstance(tgt, ast.Name) and tgt.id == "default_params":
-                    # 替换从值节点开始到行尾 / 下一个语句之间的源码
                     val_node = stmt.value
-                    start = val_node.lineno - 1  # 0-based line
-                    # 取从值行开始到闭括号之后的内容
-                    # 简单策略：找到值节点的结束位置，替换整段
-                    end_lineno = getattr(val_node, 'end_lineno', val_node.lineno)
-                    end_offset = getattr(val_node, 'end_col_offset', len(code.split('\n')[val_node.lineno - 1]))
-                    lines = code.split('\n')
-                    # 从值开始行到最后行，重建
-                    prefix_lines = lines[:start]
-                    suffix_lines = lines[end_lineno:]
-                    # 计算该行的缩进
-                    indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
-                    new_val_line = f"{indent}{params_str}"
-                    if end_lineno > val_node.lineno:
-                        # 多行：prefix + 新值 + suffix
-                        new_code = '\n'.join(prefix_lines + [new_val_line] + suffix_lines)
-                    else:
-                        # 单行：替换该行从值开始处之后的内容
-                        line = lines[start]
-                        before_val = line[:val_node.col_offset]
-                        new_code = '\n'.join(prefix_lines + [f"{before_val}{params_str}"] + suffix_lines)
-                    code = new_code
-                    replaced = True
-                    break
-            if replaced:
-                break
+                    is_ann = True
+            if val_node is None:
+                continue
+
+            start = val_node.lineno - 1
+            end_lineno = getattr(val_node, 'end_lineno', val_node.lineno)
+            lines = code.split('\n')
+            prefix_lines = lines[:start]
+            suffix_lines = lines[end_lineno:]
+            indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+
+            if is_ann:
+                # AnnAssign: 保留类型注解，只替换值
+                new_line = f"{indent}default_params: dict = {params_str}"
+            else:
+                # Assign: 加类型注解 + 值
+                new_line = f"{indent}default_params: dict = {params_str}"
+
+            if end_lineno > val_node.lineno:
+                code = '\n'.join(prefix_lines + [new_line] + suffix_lines)
+            else:
+                line = lines[start]
+                before_val = line[:val_node.col_offset]
+                code = '\n'.join(prefix_lines + [f"{before_val}{params_str}"] + suffix_lines)
+            replaced = True
+            break
         if replaced:
             break
 
