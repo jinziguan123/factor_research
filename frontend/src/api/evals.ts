@@ -109,3 +109,25 @@ export function useAbortEval() {
     },
   })
 }
+
+// --------------------- 栅格搜索 ---------------------
+
+export interface GridSearchParams {
+  factor_id: string
+  grid: Record<string, (number | string)[]>
+  pool_id: number
+  start_date: string
+  end_date: string
+  n_groups?: number
+  forward_periods?: number[]
+  base_params?: Record<string, any>
+  optimize_by?: 'ic_mean' | 'rank_ic_mean' | 'long_short_sharpe'
+}
+
+/** 创建栅格搜索任务 */
+export function useCreateGridSearch() {
+  return useMutation<{ run_id: string }, any, GridSearchParams>({
+    mutationFn: (body) =>
+      client.post('/evals/grid-search', body).then(r => r.data),
+  })
+}

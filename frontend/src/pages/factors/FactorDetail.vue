@@ -245,6 +245,12 @@ function confirmDelete() {
           </n-button>
           <n-button
             secondary
+            @click="router.push(`/evals/grid-search?factor_id=${factorId}`)"
+          >
+            栅格搜索
+          </n-button>
+          <n-button
+            secondary
             @click="router.push(`/backtests/new?factor_id=${factorId}`)"
           >
             新回测
