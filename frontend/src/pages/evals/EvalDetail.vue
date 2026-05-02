@@ -155,6 +155,33 @@ const tsTopN = computed(() => (tsData.value?.top_n?.data ?? []) as any[])
 const tsBottomN = computed(() => (tsData.value?.bottom_n?.data ?? []) as any[])
 function tsRowSymbol(row: any): string { return row._index ?? row.symbol ?? '-' }
 
+// 个股时序表格排序
+const tsSortKey = ref<string>('ts_ic')
+const tsSortDir = ref<'asc' | 'desc'>('desc')
+function tsSortBy(key: string) {
+  if (tsSortKey.value === key) {
+    tsSortDir.value = tsSortDir.value === 'desc' ? 'asc' : 'desc'
+  } else {
+    tsSortKey.value = key
+    tsSortDir.value = 'desc'
+  }
+}
+function tsSortIcon(key: string): string {
+  if (tsSortKey.value !== key) return '↕'
+  return tsSortDir.value === 'desc' ? '↓' : '↑'
+}
+function tsSortRows(rows: any[]): any[] {
+  const dir = tsSortDir.value === 'desc' ? -1 : 1
+  return [...rows].sort((a, b) => {
+    const av = a[tsSortKey.value] ?? 0
+    const bv = b[tsSortKey.value] ?? 0
+    if (av === bv) return 0
+    return av > bv ? dir : -dir
+  })
+}
+const sortedTsTopN = computed(() => tsSortRows(tsTopN.value))
+const sortedTsBottomN = computed(() => tsSortRows(tsBottomN.value))
+
 // 因子体检卡片数据：后端 _build_health 产出的 {overall, items[]}。
 // 老的 run 没这段，payload.health 会是 undefined → 直接不渲染卡片。
 interface HealthItem {
@@ -715,46 +742,34 @@ const rankIcMeanDiverged = computed(() =>
         <!-- 汇总统计 -->
         <n-card size="small" style="margin-bottom: 16px">
           <template #header>时序评估汇总</template>
-          <n-grid :cols="6" :x-gap="12" responsive="screen">
-            <n-grid-item span="6 s:3 m:2 l:1">
-              <div class="ts-stat">
-                <div class="ts-stat-label">个股时序 IC 均值</div>
-                <div class="ts-stat-value" :style="{ color: (tsSummary.ts_ic_mean ?? 0) > 0 ? '#18A058' : '#D03050' }">
-                  {{ fmtNum(tsSummary.ts_ic_mean) }}
-                </div>
+          <div class="ts-summary-grid">
+            <div class="ts-stat">
+              <div class="ts-stat-label">个股时序 IC 均值</div>
+              <div class="ts-stat-value" :style="{ color: (tsSummary.ts_ic_mean ?? 0) > 0 ? '#18A058' : '#D03050' }">
+                {{ fmtNum(tsSummary.ts_ic_mean) }}
               </div>
-            </n-grid-item>
-            <n-grid-item span="6 s:3 m:2 l:1">
-              <div class="ts-stat">
-                <div class="ts-stat-label">IC &gt; 0 占比</div>
-                <div class="ts-stat-value">{{ fmtPct(tsSummary.ts_ic_positive_ratio) }}</div>
-              </div>
-            </n-grid-item>
-            <n-grid-item span="6 s:3 m:2 l:1">
-              <div class="ts-stat">
-                <div class="ts-stat-label">IC 横截面标准差</div>
-                <div class="ts-stat-value">{{ fmtNum(tsSummary.ts_ic_std) }}</div>
-              </div>
-            </n-grid-item>
-            <n-grid-item span="6 s:3 m:2 l:1">
-              <div class="ts-stat">
-                <div class="ts-stat-label">平均方向正确率</div>
-                <div class="ts-stat-value">{{ fmtPct(tsSummary.ts_hit_rate_mean) }}</div>
-              </div>
-            </n-grid-item>
-            <n-grid-item span="6 s:3 m:2 l:1">
-              <div class="ts-stat">
-                <div class="ts-stat-label">平均因子自相关</div>
-                <div class="ts-stat-value">{{ fmtNum(tsSummary.ts_autocorr_mean) }}</div>
-              </div>
-            </n-grid-item>
-            <n-grid-item span="6 s:3 m:2 l:1">
-              <div class="ts-stat">
-                <div class="ts-stat-label">有效股票数</div>
-                <div class="ts-stat-value">{{ tsSummary.ts_n_stocks }}</div>
-              </div>
-            </n-grid-item>
-          </n-grid>
+            </div>
+            <div class="ts-stat">
+              <div class="ts-stat-label">IC &gt; 0 占比</div>
+              <div class="ts-stat-value">{{ fmtPct(tsSummary.ts_ic_positive_ratio) }}</div>
+            </div>
+            <div class="ts-stat">
+              <div class="ts-stat-label">IC 横截面标准差</div>
+              <div class="ts-stat-value">{{ fmtNum(tsSummary.ts_ic_std) }}</div>
+            </div>
+            <div class="ts-stat">
+              <div class="ts-stat-label">平均方向正确率</div>
+              <div class="ts-stat-value">{{ fmtPct(tsSummary.ts_hit_rate_mean) }}</div>
+            </div>
+            <div class="ts-stat">
+              <div class="ts-stat-label">平均因子自相关</div>
+              <div class="ts-stat-value">{{ fmtNum(tsSummary.ts_autocorr_mean) }}</div>
+            </div>
+            <div class="ts-stat">
+              <div class="ts-stat-label">有效股票数</div>
+              <div class="ts-stat-value">{{ tsSummary.ts_n_stocks }}</div>
+            </div>
+          </div>
         </n-card>
 
         <!-- Top 30 股票明细 -->
@@ -766,15 +781,15 @@ const rankIcMeanDiverged = computed(() =>
             <thead>
               <tr>
                 <th>#</th>
-                <th>股票</th>
-                <th>时序 IC</th>
-                <th>方向正确率</th>
-                <th>因子自相关</th>
-                <th>有效样本</th>
+                <th class="ts-sort-th" @click="tsSortBy('_index')">股票 {{ tsSortIcon('_index') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('ts_ic')">时序 IC {{ tsSortIcon('ts_ic') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('hit_rate')">方向正确率 {{ tsSortIcon('hit_rate') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('autocorr')">因子自相关 {{ tsSortIcon('autocorr') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('n_samples')">有效样本 {{ tsSortIcon('n_samples') }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, idx) in tsTopN.slice(0, 30)" :key="tsRowSymbol(row) ?? idx">
+              <tr v-for="(row, idx) in sortedTsTopN.slice(0, 30)" :key="tsRowSymbol(row) ?? idx">
                 <td style="color: #848E9C">{{ idx + 1 }}</td>
                 <td><code>{{ tsRowSymbol(row) }}</code></td>
                 <td :style="{ color: (row.ts_ic ?? 0) > 0 ? '#18A058' : '#D03050' }">
@@ -798,15 +813,15 @@ const rankIcMeanDiverged = computed(() =>
             <thead>
               <tr>
                 <th>#</th>
-                <th>股票</th>
-                <th>时序 IC</th>
-                <th>方向正确率</th>
-                <th>因子自相关</th>
-                <th>有效样本</th>
+                <th class="ts-sort-th" @click="tsSortBy('_index')">股票 {{ tsSortIcon('_index') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('ts_ic')">时序 IC {{ tsSortIcon('ts_ic') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('hit_rate')">方向正确率 {{ tsSortIcon('hit_rate') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('autocorr')">因子自相关 {{ tsSortIcon('autocorr') }}</th>
+                <th class="ts-sort-th" @click="tsSortBy('n_samples')">有效样本 {{ tsSortIcon('n_samples') }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(row, idx) in tsBottomN.slice(0, 30)" :key="tsRowSymbol(row) ?? idx">
+              <tr v-for="(row, idx) in sortedTsBottomN.slice(0, 30)" :key="tsRowSymbol(row) ?? idx">
                 <td style="color: #848E9C">{{ idx + 1 }}</td>
                 <td><code>{{ tsRowSymbol(row) }}</code></td>
                 <td :style="{ color: (row.ts_ic ?? 0) > 0 ? '#18A058' : '#D03050' }">
@@ -830,15 +845,28 @@ const rankIcMeanDiverged = computed(() =>
 </template>
 
 <style scoped>
+.ts-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .ts-summary-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 520px) {
+  .ts-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .ts-stat {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px solid var(--n-border-color, #eee);
   border-radius: 6px;
-  height: 100%;
-  min-height: 72px;
 }
 .ts-stat-label {
   font-size: 12px;
@@ -847,6 +875,15 @@ const rankIcMeanDiverged = computed(() =>
 .ts-stat-value {
   font-size: 20px;
   font-weight: 600;
+}
+.ts-sort-th {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.ts-sort-th:hover {
+  color: var(--n-text-color, #333);
+  background: var(--n-merged-color-fill, #f5f5f5);
 }
 .health-cell {
   display: flex;
