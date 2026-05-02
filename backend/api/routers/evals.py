@@ -326,6 +326,7 @@ def create_grid_search(body: GridSearchIn, bt: BackgroundTasks) -> dict:
             detail=f"optimize_by={body.optimize_by!r} 不支持",
         )
 
+    version = reg.latest_version_from_db(body.factor_id)
     run_id = uuid.uuid4().hex
     bd = body.model_dump(mode="json")
 
@@ -334,10 +335,11 @@ def create_grid_search(body: GridSearchIn, bt: BackgroundTasks) -> dict:
             cur.execute(
                 """
                 INSERT INTO fr_param_sensitivity_runs
-                (run_id, factor_id, param_name, status, progress, created_at)
-                VALUES (%s, %s, %s, 'pending', 0, %s)
+                (run_id, factor_id, factor_version, param_name, status,
+                 progress, created_at)
+                VALUES (%s, %s, %s, %s, 'pending', 0, %s)
                 """,
-                (run_id, body.factor_id, "grid_search", datetime.now()),
+                (run_id, body.factor_id, version, "grid_search", datetime.now()),
             )
         c.commit()
 
