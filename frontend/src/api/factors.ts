@@ -91,11 +91,36 @@ export interface FactorMutationResult {
   backup_path?: string | null
 }
 
-/** 获取全部因子列表 */
-export function useFactors() {
+export interface FactorQuery {
+  /** 按分类过滤 */
+  category?: string
+  /** 模糊搜索 factor_id / display_name / description / hypothesis */
+  keyword?: string
+  /** 仅 SOTA / 仅非 SOTA */
+  is_sota?: boolean
+}
+
+/** 获取全部因子列表（支持可选筛选） */
+export function useFactors(query?: Ref<FactorQuery | undefined>) {
   return useQuery<Factor[]>({
-    queryKey: ['factors'],
-    queryFn: () => client.get('/factors').then(r => r.data),
+    queryKey: ['factors', query?.value ?? {}],
+    queryFn: () => {
+      const params: Record<string, string> = {}
+      const q = query?.value
+      if (q?.category) params.category = q.category
+      if (q?.keyword) params.keyword = q.keyword
+      if (q?.is_sota !== undefined) params.is_sota = String(q.is_sota)
+      return client.get('/factors', { params }).then(r => r.data)
+    },
+  })
+}
+
+/** 获取所有因子分类（去重），供筛选下拉框使用 */
+export function useFactorCategories() {
+  return useQuery<string[]>({
+    queryKey: ['factor-categories'],
+    queryFn: () => client.get('/factors/categories').then(r => r.data),
+    staleTime: 5 * 60 * 1000,
   })
 }
 

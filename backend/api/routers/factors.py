@@ -223,11 +223,58 @@ class CreateFactorIn(BaseModel):
 
 
 @router.get("")
-def list_factors() -> dict:
-    """列出所有已注册因子。"""
+def list_factors(
+    category: str | None = None,
+    keyword: str | None = None,
+    is_sota: bool | None = None,
+) -> dict:
+    """列出已注册因子，支持条件筛选。
+
+    - **category**：按分类过滤（reversal / momentum / volatility / volume / fundamental / alpha101 / oscillator / custom）
+    - **keyword**：模糊搜索 factor_id / display_name / description / hypothesis（不区分大小写）
+    - **is_sota**：仅返回 SOTA 因子（true）/ 仅非 SOTA（false）
+    """
     reg = FactorRegistry()
     reg.scan_and_register()
-    return ok(reg.list())
+    items = reg.list()
+
+    # 分类过滤
+    if category:
+        cat_lower = category.strip().lower()
+        items = [it for it in items if (it.get("category") or "").lower() == cat_lower]
+
+    # 关键词模糊搜索
+    if keyword:
+        kw = keyword.strip().lower()
+        if kw:
+            filtered: list[dict] = []
+            for it in items:
+                haystack = " ".join(
+                    str(it.get(k, "")) for k in ("factor_id", "display_name", "description", "hypothesis")
+                ).lower()
+                if kw in haystack:
+                    filtered.append(it)
+            items = filtered
+
+    # SOTA 过滤
+    if is_sota is not None:
+        target = 1 if is_sota else 0
+        items = [it for it in items if (it.get("is_sota", 0) or 0) == target]
+
+    return ok(items)
+
+
+@router.get("/categories")
+def list_categories() -> dict:
+    """返回所有已注册因子的分类列表（去重），供前端筛选下拉框使用。"""
+    reg = FactorRegistry()
+    reg.scan_and_register()
+    cats: set[str] = set()
+    for it in reg.list():
+        c = it.get("category")
+        if c:
+            cats.add(c)
+    return ok(sorted(cats))
 
 
 @router.get("/{factor_id}")

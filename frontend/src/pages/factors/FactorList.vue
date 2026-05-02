@@ -12,11 +12,11 @@ import { useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NGrid, NGridItem, NTag, NSpin, NEmpty,
   NButton, NModal, NInput, NForm, NFormItem, NSpace, NAlert,
-  NUpload, NSelect,
+  NUpload, NSelect, NCheckbox,
   useMessage,
   type UploadFileInfo,
 } from 'naive-ui'
-import { useFactors, useCreateFactor } from '@/api/factors'
+import { useFactors, useFactorCategories, useCreateFactor, type FactorQuery } from '@/api/factors'
 import type { Factor } from '@/api/factors'
 import { useGenerateFactor, type GenerateFactorOut } from '@/api/factor_assistant'
 import { usePools } from '@/api/pools'
@@ -29,7 +29,28 @@ const IMAGE_MAX_COUNT = 4
 
 const router = useRouter()
 const message = useMessage()
-const { data: factors, isLoading } = useFactors()
+
+// 筛选状态
+const factorQuery = ref<FactorQuery>({})
+const { data: factors, isLoading } = useFactors(factorQuery)
+const { data: availableCategories } = useFactorCategories()
+const searchKeyword = ref('')
+const selectedCategory = ref<string | null>(null)
+const sotaOnly = ref(false)
+
+function applyFilters() {
+  factorQuery.value = {
+    keyword: searchKeyword.value.trim() || undefined,
+    category: selectedCategory.value ?? undefined,
+    is_sota: sotaOnly.value ? true : undefined,
+  }
+}
+function clearFilters() {
+  searchKeyword.value = ''
+  selectedCategory.value = null
+  sotaOnly.value = false
+  factorQuery.value = {}
+}
 
 // 分类中文映射
 const categoryLabels: Record<string, string> = {
@@ -37,8 +58,18 @@ const categoryLabels: Record<string, string> = {
   momentum: '动量',
   volatility: '波动率',
   volume: '成交量',
+  fundamental: '基本面',
+  alpha101: 'Alpha101',
+  oscillator: '振荡器',
   custom: '自定义',
 }
+
+const categoryOptions = computed(() =>
+  (availableCategories.value ?? []).map(c => ({
+    label: categoryLabels[c] ?? c,
+    value: c,
+  })),
+)
 
 // 按 category 分组
 const grouped = computed(() => {
@@ -308,6 +339,38 @@ async function submitTemplate() {
         </n-space>
       </template>
     </n-page-header>
+
+    <!-- 快速检索 / 条件筛选 -->
+    <n-space align="center" style="margin-bottom: 16px" :wrap="true">
+      <n-input
+        v-model:value="searchKeyword"
+        placeholder="搜索因子 ID / 名称 / 描述 / 假设..."
+        clearable
+        style="width: 320px"
+        @keydown.enter="applyFilters"
+        @clear="applyFilters"
+      >
+        <template #prefix>
+          <span style="font-size: 16px">🔍</span>
+        </template>
+      </n-input>
+      <n-select
+        v-model:value="selectedCategory"
+        :options="categoryOptions"
+        placeholder="按分类筛选"
+        clearable
+        style="width: 160px"
+        @update:value="applyFilters"
+      />
+      <n-checkbox v-model:checked="sotaOnly" @update:checked="applyFilters">
+        ⭐ 仅 SOTA
+      </n-checkbox>
+      <n-button size="small" secondary @click="applyFilters">搜索</n-button>
+      <n-button size="small" quaternary @click="clearFilters">清除筛选</n-button>
+      <span style="color: #848E9C; font-size: 12px">
+        {{ (factors ?? []).length }} 个因子
+      </span>
+    </n-space>
 
     <n-spin :show="isLoading">
       <n-empty v-if="!isLoading && !(factors ?? []).length" description="暂无因子" />
