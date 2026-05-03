@@ -8,16 +8,154 @@
 import { computed, ref, watch } from 'vue'
 import {
   NPageHeader, NCard, NInput, NButton, NSelect, NDatePicker,
-  NSpace, NAlert, NSpin, useMessage,
+  NSpace, NAlert, NSpin, NTag, NDrawer, NDrawerContent,
+  NForm, NFormItem, NInputNumber, useMessage,
 } from 'naive-ui'
-import { useDailyKline, useMinuteKline } from '@/api/klines'
+import { useDailyKline, useMinuteKline, useFactorBars, type FactorBarQuery } from '@/api/klines'
+import { useFactors } from '@/api/factors'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 
 const message = useMessage()
 
+// --- refresh key to trigger factor bar refetch ---
+const refreshKey = ref(0)
+
+// --- factor selection ---
+const FACTOR_COLORS = ['#5dade2', '#e67e22', '#27ae60', '#9b59b6', '#f1c40f']
+
+interface FactorSlot {
+  factor_id: string
+  display_name: string
+  category: string
+  params_schema: Record<string, any>
+  default_params: Record<string, any>
+  params: Record<string, any>
+  color: string
+}
+
+const selectedFactors = ref<FactorSlot[]>([])
+const selectedFactorToAdd = ref<string | null>(null)
+const { data: allFactors } = useFactors()
+
+// Only show factors that support the current frequency and aren't already selected
+const availableFactors = computed(() => {
+  if (!allFactors.value) return []
+  const alreadySelected = new Set(selectedFactors.value.map(s => s.factor_id))
+  return allFactors.value.filter(
+    f => f.supported_freqs.includes(freq.value) && !alreadySelected.has(f.factor_id),
+  )
+})
+
+const canAddFactor = computed(() => selectedFactors.value.length < 5)
+
+// --- parameter editing ---
+const editingFactorIndex = ref<number | null>(null)
+const editingParams = ref<Record<string, any>>({})
+
+const showParamDrawer = computed({
+  get: () => editingFactorIndex.value !== null,
+  set: (v) => { if (!v) editingFactorIndex.value = null },
+})
+
+function openParamEditor(index: number) {
+  editingFactorIndex.value = index
+  editingParams.value = { ...selectedFactors.value[index].params }
+}
+
+function applyParams() {
+  if (editingFactorIndex.value === null) return
+  const idx = editingFactorIndex.value
+  const next = [...selectedFactors.value]
+  next[idx] = { ...next[idx], params: { ...editingParams.value } }
+  selectedFactors.value = next
+  editingFactorIndex.value = null
+}
+
+function resetParams() {
+  if (editingFactorIndex.value === null) return
+  const slot = selectedFactors.value[editingFactorIndex.value]
+  editingParams.value = { ...slot.default_params }
+}
+
+// --- factor management ---
+function addFactor(factorId: string) {
+  if (!canAddFactor.value) return
+  const factor = allFactors.value?.find(f => f.factor_id === factorId)
+  if (!factor) return
+  const slot: FactorSlot = {
+    factor_id: factor.factor_id,
+    display_name: factor.display_name,
+    category: factor.category,
+    params_schema: factor.params_schema,
+    default_params: { ...factor.default_params },
+    params: { ...factor.default_params },
+    color: FACTOR_COLORS[selectedFactors.value.length],
+  }
+  selectedFactors.value = [...selectedFactors.value, slot]
+}
+
+function removeFactor(index: number) {
+  const next = [...selectedFactors.value]
+  next.splice(index, 1)
+  next.forEach((s, i) => { s.color = FACTOR_COLORS[i] })
+  selectedFactors.value = next
+}
+
+// --- factor data hooks (one per slot position) ---
+function slotQuery(index: number) {
+  return computed<FactorBarQuery | null>(() => {
+    const slot = selectedFactors.value[index]
+    if (!slot || !symbol.value.trim()) return null
+    void refreshKey.value  // dependency tracking
+    const range = freq.value === '1d' ? dailyRange.value : minuteRange.value
+    return {
+      symbol: symbol.value.trim().toUpperCase(),
+      start: toIso(range[0]),
+      end: toIso(range[1]),
+      freq: freq.value,
+    }
+  })
+}
+
+const slotBars = [0, 1, 2, 3, 4].map(i =>
+  useFactorBars(
+    computed(() => selectedFactors.value[i]?.factor_id ?? ''),
+    computed(() => selectedFactors.value[i]?.params ?? {}),
+    slotQuery(i),
+  )
+)
+
+// --- factor rows for CandlestickChart ---
+const factorRows = computed(() =>
+  slotBars
+    .map((q, i) => ({ slot: selectedFactors.value[i], data: q.data.value }))
+    .filter(x => x.slot && x.data && x.data.dates.length > 0)
+    .map(x => ({
+      name: x.slot!.display_name,
+      color: x.slot!.color,
+      dates: x.data!.dates,
+      values: x.data!.values,
+    }))
+)
+
 const symbol = ref('000001.SZ')
 const freq = ref<'1d' | '1m'>('1d')
 const adjust = ref<'qfq' | 'none'>('qfq')
+
+// --- frequency switch: remove incompatible factors ---
+watch(freq, (newFreq) => {
+  const removed: string[] = []
+  const kept = selectedFactors.value.filter(s => {
+    const factor = allFactors.value?.find(f => f.factor_id === s.factor_id)
+    const ok = factor?.supported_freqs.includes(newFreq)
+    if (!ok) removed.push(s.display_name)
+    return ok
+  })
+  if (removed.length > 0) {
+    selectedFactors.value = kept.map((s, i) => ({ ...s, color: FACTOR_COLORS[i] }))
+    message.warning(`${removed.join('、')} doesn't support this frequency, auto-removed`)
+  }
+})
 // 涨跌配色：默认 A 股（红涨绿跌），一键切成币圈 / 美股风格（绿涨红跌）。
 const colorMode = ref<'a-share' | 'binance'>('a-share')
 function toggleColorMode() {
@@ -105,6 +243,7 @@ function handleRefresh() {
   }
   if (freq.value === '1d') dailyQ.refetch()
   else minuteQ.refetch()
+  refreshKey.value++
 }
 
 watch(freq, () => {
@@ -145,6 +284,35 @@ watch(freq, () => {
           ]"
           style="width: 160px"
         />
+        <!-- Factor selector -->
+        <n-select
+          v-model:value="selectedFactorToAdd"
+          :options="availableFactors.map(f => ({ label: `${f.display_name} (${f.factor_id})`, value: f.factor_id }))"
+          placeholder="+ Add Factor"
+          :disabled="!canAddFactor"
+          filterable
+          clearable
+          style="width: 180px"
+          @update:value="(val: string) => { if (val) { addFactor(val); selectedFactorToAdd = null } }"
+        />
+
+        <!-- Factor chips -->
+        <n-space v-if="selectedFactors.length > 0" :size="4" align="center">
+          <n-tag
+            v-for="(slot, idx) in selectedFactors"
+            :key="slot.factor_id"
+            :bordered="true"
+            :color="{ color: slot.color, borderColor: slot.color }"
+            closable
+            @close="removeFactor(idx)"
+          >
+            {{ slot.display_name }}
+            <template #avatar>
+              <span @click.stop="openParamEditor(idx)" style="cursor: pointer; opacity: 0.7;">&#9881;</span>
+            </template>
+          </n-tag>
+        </n-space>
+
         <n-date-picker
           v-if="freq === '1d'"
           v-model:value="dailyRange"
@@ -179,11 +347,47 @@ watch(freq, () => {
           :ohlc="chartData.ohlc"
           :volumes="chartData.volumes"
           :color-mode="colorMode"
+          :factor-rows="factorRows"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">
         暂无数据，请检查股票代码 / 日期区间。
       </n-alert>
     </n-spin>
+
+    <!-- Parameter editing drawer -->
+    <n-drawer v-model:show="showParamDrawer" :width="360" placement="right">
+      <n-drawer-content title="Factor Parameters" closable>
+        <template v-if="editingFactorIndex !== null && selectedFactors[editingFactorIndex]">
+          <n-form label-placement="top" :model="editingParams">
+            <n-form-item
+              v-for="(meta, key) in selectedFactors[editingFactorIndex].params_schema"
+              :key="key"
+              :label="`${key} (${meta.type ?? 'int'}${meta.min != null ? ', ' + meta.min + '~' + meta.max : ''})`"
+            >
+              <n-select
+                v-if="meta.options"
+                v-model:value="editingParams[key]"
+                :options="meta.options.map((o: any) => ({ label: String(o), value: o }))"
+              />
+              <n-input-number
+                v-else
+                v-model:value="editingParams[key]"
+                :min="meta.min"
+                :max="meta.max"
+                :step="meta.type === 'float' ? 0.01 : 1"
+              />
+            </n-form-item>
+          </n-form>
+          <n-space justify="end" style="margin-top: 16px">
+            <n-button quaternary @click="resetParams">Reset Default</n-button>
+            <n-button type="primary" @click="applyParams">Apply</n-button>
+          </n-space>
+        </template>
+        <template v-else>
+          <n-alert type="default">No factor selected for editing.</n-alert>
+        </template>
+      </n-drawer-content>
+    </n-drawer>
   </div>
 </template>
