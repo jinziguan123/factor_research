@@ -20,7 +20,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { CandlestickChart, BarChart } from 'echarts/charts'
+import { CandlestickChart, BarChart, LineChart } from 'echarts/charts'
 import {
   GridComponent,
   TooltipComponent,
@@ -34,6 +34,7 @@ use([
   CanvasRenderer,
   CandlestickChart,
   BarChart,
+  LineChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -53,8 +54,15 @@ const props = withDefaults(
     volumes: number[]
     /** 涨跌配色。默认 A 股红涨绿跌；切成 'binance' 是绿涨红跌。 */
     colorMode?: ColorMode
+    /** 因子行数据。每个因子一个条目，含名称、颜色、日期、值。 */
+    factorRows?: {
+      name: string
+      color: string
+      dates: string[]
+      values: (number | null)[]
+    }[]
   }>(),
-  { colorMode: 'a-share' },
+  { colorMode: 'a-share', factorRows: () => [] },
 )
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -74,6 +82,16 @@ const colors = computed(() => {
   }
   return { up: '#F6465D', down: '#0ECB81' }
 })
+
+// Factor grid layout: N → percentage allocation for each region
+const FACTOR_LAYOUT: Record<number, { klineH: number; volTop: number; volH: number; factorTop: number; factorH: number }> = {
+  0: { klineH: 60, volTop: 64, volH: 12, factorTop: 0, factorH: 0 },
+  1: { klineH: 52, volTop: 56, volH: 12, factorTop: 70, factorH: 20 },
+  2: { klineH: 48, volTop: 52, volH: 12, factorTop: 66, factorH: 13 },
+  3: { klineH: 46, volTop: 50, volH: 12, factorTop: 64, factorH: 9 },
+  4: { klineH: 44, volTop: 48, volH: 11, factorTop: 61, factorH: 7 },
+  5: { klineH: 42, volTop: 46, volH: 10, factorTop: 58, factorH: 6 },
+}
 
 // ECharts 要的是 [open, close, low, high]；重排。
 const candleData = computed(() =>
@@ -119,87 +137,135 @@ function tooltipFormatter(params: any[]): string {
       lines.push(
         `<div style="display:flex;gap:12px"><span>量</span><span>${fmtVolume(v)}</span></div>`,
       )
+    } else if (p.seriesType === 'line') {
+      const v = typeof p.data === 'object' ? (p.data as any)?.value : p.data
+      const name = p.seriesName ?? ''
+      const valStr = v != null && Number.isFinite(v) ? (v as number).toFixed(4) : '-'
+      lines.push(
+        `<div style="display:flex;gap:12px"><span>${name}</span><span>${valStr}</span></div>`,
+      )
     }
   }
   return lines.join('')
 }
 
-const option = computed(() => ({
-  animation: false,
-  legend: { data: ['K 线', '成交量'], top: 5 },
-  tooltip: {
-    trigger: 'axis',
-    axisPointer: { type: 'cross' },
-    backgroundColor: 'rgba(30,32,38,0.95)',
-    borderWidth: 0,
-    textStyle: { color: '#fff', fontSize: 12 },
-    formatter: tooltipFormatter,
-  },
-  axisPointer: { link: [{ xAxisIndex: 'all' }] },
-  // 两个 grid 上下排列：K 线占 70%，成交量占 20%，中间留空给 dataZoom。
-  grid: [
-    { left: 60, right: 60, top: 40, height: '60%' },
-    { left: 60, right: 60, top: '75%', height: '15%' },
-  ],
-  xAxis: [
+const option = computed(() => {
+  const N = Math.min(props.factorRows?.length ?? 0, 5)
+  const layout = FACTOR_LAYOUT[N]
+
+  // ---- grids ----
+  const grids: any[] = [
+    { left: 60, right: 60, top: 40, height: layout.klineH + '%' },
+    { left: 60, right: 60, top: layout.volTop + '%', height: layout.volH + '%' },
+  ]
+  for (let i = 0; i < N; i++) {
+    grids.push({
+      left: 60,
+      right: 60,
+      top: (layout.factorTop + i * layout.factorH) + '%',
+      height: (layout.factorH - 1) + '%',
+    })
+  }
+
+  // ---- xAxis ----
+  const xAxes: any[] = [
     {
-      type: 'category',
-      data: props.categories,
-      boundaryGap: true,
-      axisLine: { onZero: false },
-      axisLabel: { show: false },
-      splitLine: { show: false },
+      type: 'category', data: props.categories, boundaryGap: true,
+      axisLine: { onZero: false }, axisLabel: { show: false }, splitLine: { show: false },
     },
     {
-      type: 'category',
-      gridIndex: 1,
-      data: props.categories,
-      boundaryGap: true,
+      type: 'category', gridIndex: 1, data: props.categories, boundaryGap: true,
       axisLabel: { rotate: 30, fontSize: 10 },
     },
-  ],
-  yAxis: [
+  ]
+  for (let i = 0; i < N; i++) {
+    const isLast = i === N - 1
+    xAxes.push({
+      type: 'category', gridIndex: 2 + i, data: props.categories, boundaryGap: true,
+      axisLabel: isLast ? { rotate: 30, fontSize: 10 } : { show: false },
+      axisLine: { show: isLast },
+    })
+  }
+
+  // ---- yAxis ----
+  const yAxes: any[] = [
     {
-      scale: true,
-      splitArea: { show: true },
-      axisLabel: {
-        formatter: (v: number) => (Number.isFinite(v) ? v.toFixed(2) : String(v)),
-      },
+      scale: true, splitArea: { show: true },
+      axisLabel: { formatter: (v: number) => (Number.isFinite(v) ? v.toFixed(2) : String(v)) },
     },
     {
-      gridIndex: 1,
-      scale: true,
-      splitNumber: 2,
+      gridIndex: 1, scale: true, splitNumber: 2,
+      axisLabel: { fontSize: 10 }, axisLine: { show: false }, splitLine: { show: false },
+    },
+  ]
+  for (let i = 0; i < N; i++) {
+    yAxes.push({
+      gridIndex: 2 + i, scale: true,
       axisLabel: { fontSize: 10 },
-      axisLine: { show: false },
-      splitLine: { show: false },
-    },
-  ],
-  dataZoom: [
-    { type: 'inside', xAxisIndex: [0, 1], start: 0, end: 100 },
-    { type: 'slider', xAxisIndex: [0, 1], top: '92%', start: 0, end: 100 },
-  ],
-  series: [
+      splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' as const } },
+    })
+  }
+
+  // ---- series ----
+  const allXAxisIndices = Array.from({ length: 2 + N }, (_, i) => i)
+  const series: any[] = [
     {
-      name: 'K 线',
-      type: 'candlestick',
-      data: candleData.value,
+      name: 'K 线', type: 'candlestick', data: candleData.value,
       itemStyle: {
-        color: colors.value.up,
-        color0: colors.value.down,
-        borderColor: colors.value.up,
-        borderColor0: colors.value.down,
+        color: colors.value.up, color0: colors.value.down,
+        borderColor: colors.value.up, borderColor0: colors.value.down,
       },
     },
     {
-      name: '成交量',
-      type: 'bar',
-      xAxisIndex: 1,
-      yAxisIndex: 1,
-      data: volumeData.value,
+      name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumeData.value,
     },
-  ],
-}))
+  ]
+  for (let i = 0; i < N; i++) {
+    const row = props.factorRows![i]
+    series.push({
+      name: row.name,
+      type: 'line',
+      xAxisIndex: 2 + i,
+      yAxisIndex: 2 + i,
+      data: row.values,
+      symbol: 'none',
+      lineStyle: { color: row.color, width: 1.5 },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        lineStyle: { color: '#555', type: 'dashed' as const, width: 1 },
+        data: [{ yAxis: 0 }],
+      },
+    })
+  }
+
+  return {
+    animation: false,
+    legend: { data: ['K 线', '成交量', ...(props.factorRows ?? []).map(r => r.name)], top: 5 },
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      backgroundColor: 'rgba(30,32,38,0.95)',
+      borderWidth: 0,
+      textStyle: { color: '#fff', fontSize: 12 },
+      formatter: tooltipFormatter,
+    },
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    grid: grids,
+    xAxis: xAxes,
+    yAxis: yAxes,
+    dataZoom: [
+      { type: 'inside', xAxisIndex: allXAxisIndices, start: 0, end: 100 },
+      { type: 'slider', xAxisIndex: allXAxisIndices, top: '94%', start: 0, end: 100 },
+    ],
+    series,
+  }
+})
+
+const chartHeight = computed(() => {
+  const N = Math.min(props.factorRows?.length ?? 0, 5)
+  return (400 + N * 60) + 'px'
+})
 
 // ---- 失焦修复 ----
 // 问题：鼠标悬停在 K 线图上时 alt+tab 切走、再切回来，canvas 会卡住不响应鼠标。
@@ -239,5 +305,5 @@ watch(() => props.colorMode, () => restoreChart())
 </script>
 
 <template>
-  <v-chart ref="chartRef" :option="option" autoresize style="width: 100%; height: 560px" />
+  <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" />
 </template>
