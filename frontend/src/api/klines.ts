@@ -67,3 +67,55 @@ export function useMinuteKline(params: MaybeRefOrGetter<KlineQuery | null>) {
     staleTime: 0,
   })
 }
+
+/** Query params for factor bars endpoint. */
+export interface FactorBarQuery {
+  symbol: string
+  start: string
+  end: string
+  freq: string
+}
+
+/** Response from GET /api/factors/{id}/bars. */
+export interface FactorBarResponse {
+  factor_id: string
+  symbol: string
+  freq: string
+  params: Record<string, any>
+  dates: string[]
+  values: (number | null)[]
+  version: number
+}
+
+/** Fetch single-factor time series for a single stock. */
+export function useFactorBars(
+  factorId: MaybeRefOrGetter<string>,
+  params: MaybeRefOrGetter<Record<string, any>>,
+  query: MaybeRefOrGetter<FactorBarQuery | null>,
+) {
+  return useQuery<FactorBarResponse>({
+    queryKey: ['factor-bars', () => toValue(factorId), () => toValue(params), () => toValue(query)] as any,
+    queryFn: async () => {
+      const q = toValue(query)
+      if (!q) throw new Error('no query')
+      const fid = toValue(factorId)
+      const p = toValue(params)
+      const { data } = await client.get(`/factors/${fid}/bars`, {
+        params: {
+          symbol: q.symbol,
+          start: q.start,
+          end: q.end,
+          freq: q.freq,
+          params: JSON.stringify(p),
+        },
+      })
+      return data as FactorBarResponse
+    },
+    enabled: () => {
+      const q = toValue(query)
+      const fid = toValue(factorId)
+      return !!(q && q.symbol && fid)
+    },
+    staleTime: 0,
+  })
+}
