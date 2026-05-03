@@ -38,7 +38,9 @@ class RapidBreakdownSupport(BaseFactor):
     def _cs_zscore(df: pd.DataFrame) -> pd.DataFrame:
         mu = df.mean(axis=1)
         sigma = df.std(axis=1)
-        sigma = sigma.where(sigma > 0)
+        # Single-stock fallback: std(ddof=1) = NaN, replace with 1.0 → demeaned
+        # result is 0 (neutral cross-sectional signal when N=1).
+        sigma = sigma.where(sigma > 0, 1.0)
         return df.sub(mu, axis=0).div(sigma, axis=0)
 
     def compute(self, ctx: FactorContext, params: dict) -> pd.DataFrame:
