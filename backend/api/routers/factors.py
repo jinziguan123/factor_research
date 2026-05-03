@@ -25,18 +25,24 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import logging
+import math
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+
+import pandas as pd
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.api.schemas import ok
+from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.task_pool import reset_pool
 from backend.services import factor_assistant as fa
+from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
 
 logger = logging.getLogger(__name__)
@@ -201,6 +207,11 @@ def _verify_class_factor_id(code: str, expected: str) -> None:
         status_code=400,
         detail="代码中未找到 `class X(BaseFactor): factor_id = '...'` 顶层赋值",
     )
+
+
+def _isfinite(v: float) -> bool:
+    """Check if a float is finite (not NaN, not Inf)."""
+    return not (math.isnan(v) or math.isinf(v))
 
 
 # ---------------------------- 请求体 ----------------------------
@@ -504,6 +515,106 @@ def set_sota(factor_id: str, body: SotaIn) -> dict:
                 )
         c.commit()
     return ok({"factor_id": factor_id, "is_sota": int(body.is_sota)})
+
+
+@router.get("/{factor_id}/bars")
+def get_factor_bars(
+    factor_id: str,
+    symbol: str,
+    start: date,
+    end: date,
+    freq: str = "1d",
+    params: str | None = None,
+) -> dict:
+    """Compute single-factor time series for a single stock.
+
+    Validation: factor exists -> freq in supported_freqs -> params valid -> symbol resolve.
+    Compute: FactorContext(symbols=[symbol]) -> factor.compute() -> extract column -> time series.
+    """
+    reg = FactorRegistry()
+    reg.scan_and_register()
+
+    try:
+        factor = reg.get(factor_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="factor not found")
+
+    if freq not in factor.supported_freqs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"factor {factor_id!r} does not support freq {freq!r}, "
+                f"only {list(factor.supported_freqs)}"
+            ),
+        )
+
+    # parse params
+    if params:
+        try:
+            parsed = json.loads(params)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"params JSON parse error: {e}") from e
+    else:
+        parsed = dict(factor.default_params)
+
+    try:
+        validated = factor.validate_params(parsed)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # resolve symbol
+    svc = DataService()
+    sid_map = svc.resolver.resolve_many([symbol.strip().upper()])
+    normalized = symbol.strip().upper()
+    matched = {k.strip().upper(): v for k, v in sid_map.items()}
+    if normalized not in matched:
+        raise HTTPException(status_code=404, detail=f"unknown symbol: {symbol!r}")
+
+    # compute
+    warmup = factor.required_warmup(validated)
+    ctx = FactorContext(
+        data=svc,
+        symbols=[normalized],
+        start_date=pd.Timestamp(start),
+        end_date=pd.Timestamp(end),
+        warmup_days=warmup,
+    )
+    F = factor.compute(ctx, validated)
+
+    # extract target symbol column from wide DataFrame
+    if F.empty or normalized not in F.columns:
+        return ok({
+            "factor_id": factor_id,
+            "symbol": normalized,
+            "freq": freq,
+            "params": validated,
+            "params_hash": "",
+            "dates": [],
+            "values": [],
+            "version": reg.current_version(factor_id),
+        })
+
+    series = F[normalized]
+    values: list[float | None] = [
+        None if (v is None or (isinstance(v, float) and not _isfinite(v)))
+        else float(v)
+        for v in series.values
+    ]
+    dates = [
+        d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+        for d in series.index
+    ]
+
+    return ok({
+        "factor_id": factor_id,
+        "symbol": normalized,
+        "freq": freq,
+        "params": validated,
+        "params_hash": "",
+        "dates": dates,
+        "values": values,
+        "version": reg.current_version(factor_id),
+    })
 
 
 @router.get("/{factor_id}/lineage")

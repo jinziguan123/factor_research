@@ -80,12 +80,12 @@ def test_factor_bars_with_custom_params():
                 "start": "2025-11-01",
                 "end": "2025-11-10",
                 "freq": "1d",
-                "params": '{"n": 10}',
+                "params": '{"window": 10}',
             },
         )
     assert r.status_code == 200, r.text
     data = r.json()["data"]
-    assert data["params"] == {"n": 10}
+    assert data["params"] == {"window": 10}
 
 
 def test_factor_bars_invalid_params_returns_400():
@@ -100,7 +100,7 @@ def test_factor_bars_invalid_params_returns_400():
                 "start": "2025-11-01",
                 "end": "2025-11-05",
                 "freq": "1d",
-                "params": '{"n": -1}',
+                "params": '{"window": -1}',
             },
         )
     assert r.status_code == 400
