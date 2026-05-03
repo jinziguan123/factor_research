@@ -83,14 +83,16 @@ const colors = computed(() => {
   return { up: '#F6465D', down: '#0ECB81' }
 })
 
-// Factor grid layout: N → percentage allocation for each region
+// Factor grid layout: N → percentage allocation for each region.
+// All values are percentages; K-line grid top is '5%' (legend space).
+// Gaps: ~2-3% between K-line/volume and volume/first-factor.
 const FACTOR_LAYOUT: Record<number, { klineH: number; volTop: number; volH: number; factorTop: number; factorH: number }> = {
-  0: { klineH: 60, volTop: 64, volH: 12, factorTop: 0, factorH: 0 },
-  1: { klineH: 52, volTop: 56, volH: 12, factorTop: 70, factorH: 20 },
-  2: { klineH: 48, volTop: 52, volH: 12, factorTop: 66, factorH: 13 },
-  3: { klineH: 46, volTop: 50, volH: 12, factorTop: 64, factorH: 9 },
-  4: { klineH: 44, volTop: 48, volH: 11, factorTop: 61, factorH: 7 },
-  5: { klineH: 42, volTop: 46, volH: 10, factorTop: 58, factorH: 6 },
+  0: { klineH: 55, volTop: 62, volH: 15, factorTop: 0, factorH: 0 },
+  1: { klineH: 46, volTop: 54, volH: 13, factorTop: 70, factorH: 18 },
+  2: { klineH: 40, volTop: 48, volH: 11, factorTop: 62, factorH: 13 },
+  3: { klineH: 36, volTop: 44, volH: 10, factorTop: 57, factorH: 10 },
+  4: { klineH: 33, volTop: 41, volH: 9,  factorTop: 53, factorH: 9  },
+  5: { klineH: 30, volTop: 38, volH: 8,  factorTop: 49, factorH: 8  },
 }
 
 // ECharts 要的是 [open, close, low, high]；重排。
@@ -155,7 +157,7 @@ const option = computed(() => {
 
   // ---- grids ----
   const grids: any[] = [
-    { left: 60, right: 60, top: 40, height: layout.klineH + '%' },
+    { left: 60, right: 60, top: '5%', height: layout.klineH + '%' },
     { left: 60, right: 60, top: layout.volTop + '%', height: layout.volH + '%' },
   ]
   for (let i = 0; i < N; i++) {
@@ -202,7 +204,7 @@ const option = computed(() => {
     yAxes.push({
       gridIndex: 2 + i, scale: true,
       axisLabel: { fontSize: 10 },
-      splitLine: { show: true, lineStyle: { color: '#333', type: 'dashed' as const } },
+      splitLine: { show: false },
     })
   }
 
@@ -264,7 +266,7 @@ const option = computed(() => {
 
 const chartHeight = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
-  return (400 + N * 60) + 'px'
+  return (500 + N * 65) + 'px'
 })
 
 // ---- 失焦修复 ----
