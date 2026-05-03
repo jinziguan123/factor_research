@@ -29,17 +29,17 @@ from backend.factors.base import BaseFactor, FactorContext
 
 class IdioVolReversal(BaseFactor):
     factor_id = "idio_vol_reversal"
-    display_name = "特质波动率反转（-std(ret - cs_mean, 60)）"
+    display_name = "特质波动率反转（-std(ret - cs_mean, 30)）"
     category = "volatility"
     description = (
-        "对 close.pct_change 减去横截面均值得残差，再取 60 日 rolling std 取负。"
+        "对 close.pct_change 减去横截面均值得残差，再取 30 日 rolling std 取负。"
     )
     hypothesis = "高 IVOL 未来收益更低（IVOL 异象）；取负使高分 → 长仓。"
     params_schema: dict = {
-        "ret_window": {"type": "int", "default": 60, "min": 20, "max": 252,
+        "ret_window": {"type": "int", "default": 30, "min": 20, "max": 252,
                        "desc": "rolling std 窗口（交易日）"},
     }
-    default_params: dict = {"ret_window": 60}
+    default_params: dict = {"ret_window": 30}
     supported_freqs = ("1d",)
 
     def required_warmup(self, params: dict) -> int:
