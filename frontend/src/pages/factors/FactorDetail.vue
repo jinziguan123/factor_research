@@ -354,8 +354,8 @@ function confirmDelete() {
                 @click="router.push(`/factors/${a.factor_id}`); lineageOpen = false"
               >
                 <span v-if="idx > 0">←</span>
-                <code>{{ a.factor_id }}</code>
-                <span v-if="a.is_sota">⭐</span>
+                <span>{{ a.display_name }}</span>
+                <span v-if="a.is_sota"> ⭐</span>
                 <span style="color: #848E9C; font-size: 11px"> v{{ a.generation }}</span>
               </a>
             </span>
@@ -369,12 +369,27 @@ function confirmDelete() {
                 style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
                 @click="router.push(`/factors/${d.factor_id}`); lineageOpen = false"
               >
-                <code>{{ d.factor_id }}</code>
-                <span v-if="d.is_sota">⭐</span>
+                <span>{{ d.display_name }}</span>
+                <span v-if="d.is_sota"> ⭐</span>
                 <span style="color: #848E9C; font-size: 11px"> v{{ d.generation }}</span>
               </a>
             </span>
             <span v-else style="color: #999">（暂无子代——可在评估详情点"🧬 进化下一代"）</span>
+          </n-descriptions-item>
+          <n-descriptions-item label="兄弟">
+            <span v-if="lineage && lineage.siblings.length > 0">
+              <a
+                v-for="sib in lineage.siblings"
+                :key="sib.factor_id"
+                style="margin-right: 12px; cursor: pointer; color: #5AC8FA"
+                @click="router.push(`/factors/${sib.factor_id}`); lineageOpen = false"
+              >
+                <span>{{ sib.display_name }}</span>
+                <span v-if="sib.is_sota"> ⭐</span>
+                <span style="color: #848E9C; font-size: 11px"> v{{ sib.generation }}</span>
+              </a>
+            </span>
+            <span v-else style="color: #999">（无兄弟节点）</span>
           </n-descriptions-item>
           <n-descriptions-item
             v-if="lineage?.same_root_sota && lineage.same_root_sota !== factor.factor_id"

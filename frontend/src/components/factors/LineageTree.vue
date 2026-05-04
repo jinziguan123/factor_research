@@ -83,7 +83,6 @@ function renderNode(factor: Factor, depth: number): any {
           class: ['lineage-node', { current: isCurrent }],
           style: {
             cursor: 'pointer',
-            fontFamily: 'monospace',
             color: isCurrent ? '#F0B90B' : '#5AC8FA',
             fontWeight: isCurrent ? 700 : 500,
             padding: '2px 6px',
@@ -92,6 +91,11 @@ function renderNode(factor: Factor, depth: number): any {
           },
           onClick: () => router.push(`/factors/${factor.factor_id}`),
         },
+        factor.display_name || factor.factor_id,
+      ),
+      h(
+        'span',
+        { style: 'color:#848E9C;font-size:10px;margin-left:4px' },
         factor.factor_id,
       ),
       h(

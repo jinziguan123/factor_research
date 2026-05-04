@@ -619,10 +619,11 @@ def get_factor_bars(
 
 @router.get("/{factor_id}/lineage")
 def get_lineage(factor_id: str) -> dict:
-    """返回因子族谱：祖先链 + 直接子代列表 + 同 root 的 SOTA。
+    """返回因子族谱：祖先链 + 子代列表 + 兄弟节点 + 同 root 的 SOTA。
 
     祖先链：沿 parent_factor_id 上溯到根（最多 20 层防环）；
-    子代列表：``WHERE parent_factor_id = factor_id`` 一层；
+    子代列表：递归查找所有后代（不只直接子代）；
+    兄弟节点：同一父代下的其他因子；
     same_root_sota：同 root 下 is_sota=1 的 factor_id（最多一个）。
     """
     with mysql_conn() as c:
@@ -659,6 +660,7 @@ def get_lineage(factor_id: str) -> dict:
                 pp = cur.fetchone()
                 cursor_id = pp.get("parent_factor_id") if pp else None
 
+            # Direct children for the "子代" section
             cur.execute(
                 "SELECT factor_id, display_name, generation, is_sota "
                 "FROM fr_factor_meta WHERE parent_factor_id=%s "
@@ -666,6 +668,29 @@ def get_lineage(factor_id: str) -> dict:
                 (factor_id,),
             )
             descendants = cur.fetchall() or []
+
+            # Siblings: factors sharing the same parent (excluding self)
+            siblings: list[dict] = []
+            parent_id = self_row.get("parent_factor_id")
+            if parent_id:
+                cur.execute(
+                    "SELECT factor_id, display_name, generation, is_sota "
+                    "FROM fr_factor_meta WHERE parent_factor_id=%s AND factor_id!=%s "
+                    "ORDER BY generation, factor_id",
+                    (parent_id, factor_id),
+                )
+                siblings = cur.fetchall() or []
+
+            # All factors in the same root chain (for full tree rendering)
+            cur.execute(
+                "SELECT factor_id, display_name, parent_factor_id, "
+                "generation, is_sota "
+                "FROM fr_factor_meta "
+                "WHERE (root_factor_id=%s OR factor_id=%s) "
+                "ORDER BY generation, factor_id",
+                (root, root),
+            )
+            all_related = cur.fetchall() or []
 
             cur.execute(
                 "SELECT factor_id FROM fr_factor_meta "
@@ -679,6 +704,8 @@ def get_lineage(factor_id: str) -> dict:
         "self": self_row,
         "ancestors": ancestors,
         "descendants": descendants,
+        "siblings": siblings,
+        "all_related": all_related,
         "same_root_sota": sota_row.get("factor_id") if sota_row else None,
         "root_factor_id": root,
     })

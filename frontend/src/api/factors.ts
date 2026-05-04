@@ -40,6 +40,8 @@ export interface FactorLineage {
   self: any
   ancestors: { factor_id: string; display_name: string; generation: number; is_sota: number }[]
   descendants: { factor_id: string; display_name: string; generation: number; is_sota: number }[]
+  siblings: { factor_id: string; display_name: string; generation: number; is_sota: number }[]
+  all_related: { factor_id: string; display_name: string; parent_factor_id: string | null; generation: number; is_sota: number }[]
   same_root_sota: string | null
   root_factor_id: string
 }
