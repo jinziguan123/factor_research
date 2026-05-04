@@ -25,6 +25,7 @@ import VChart from 'vue-echarts'
 import { useParamSensitivity } from '@/api/param_sensitivity'
 import type { ParamSensitivityPoint } from '@/api/param_sensitivity'
 import { usePoolNameMap } from '@/api/pools'
+import { useFactors } from '@/api/factors'
 import { client } from '@/api/client'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
@@ -42,6 +43,13 @@ const runId = computed(() => route.params.runId as string)
 const { data: run, isLoading } = useParamSensitivity(runId)
 
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 
 const applyingBest = ref(false)
 async function applyBestParams() {
@@ -309,7 +317,7 @@ function fmtValues(v: number[] | Record<string, number[]> | null | undefined): s
     <n-spin :show="isLoading && !run">
       <n-card v-if="run" title="基础信息" style="margin-bottom: 16px">
         <n-descriptions :column="3" bordered>
-          <n-descriptions-item label="因子">{{ run.factor_id }}</n-descriptions-item>
+          <n-descriptions-item label="因子">{{ factorDisplayMap[run.factor_id] || run.factor_id }}</n-descriptions-item>
           <n-descriptions-item label="扫描参数">{{ run.param_name }}</n-descriptions-item>
           <n-descriptions-item label="股票池">{{ lookupPoolName(run.pool_id) }}</n-descriptions-item>
           <n-descriptions-item label="日期">{{ run.start_date }} ~ {{ run.end_date }}</n-descriptions-item>

@@ -12,6 +12,7 @@ import {
   type DataTableColumns,
 } from 'naive-ui'
 import { useBacktest, useEquitySeries, useTradesPage, type TradesFilter } from '@/api/backtests'
+import { useFactors } from '@/api/factors'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 import EquityCurveChart from '@/components/charts/EquityCurveChart.vue'
@@ -53,6 +54,13 @@ const { data: btRun, isLoading } = useBacktest(runId)
 
 // 池名映射：详情页把 pool_id 渲染成池名；查不到（软删 / 列表未载入）保留 #<id>。
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 
 const metrics = computed(() => btRun.value?.metrics ?? null)
 const artifacts = computed(() => (btRun.value as any)?.artifacts ?? [])
@@ -206,7 +214,7 @@ function downloadArtifact(type: string) {
 
       <!-- 任务基本信息 -->
       <n-descriptions v-if="btRun" bordered :column="3" label-placement="left" style="margin-bottom: 24px">
-        <n-descriptions-item label="因子">{{ btRun.factor_id }}</n-descriptions-item>
+        <n-descriptions-item label="因子">{{ factorDisplayMap[btRun.factor_id] || btRun.factor_id }}</n-descriptions-item>
         <n-descriptions-item label="股票池">
           {{ lookupPoolName(btRun.pool_id) }}
           <span style="color: #848E9C; font-size: 12px; margin-left: 4px">#{{ btRun.pool_id }}</span>

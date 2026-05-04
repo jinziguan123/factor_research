@@ -11,7 +11,7 @@ import {
   NTable, NModal, NInput, NSelect, NFormItem, NTabs, NTabPane, useMessage,
 } from 'naive-ui'
 import { useEval } from '@/api/evals'
-import { useFactorLineage } from '@/api/factors'
+import { useFactorLineage, useFactors } from '@/api/factors'
 import { useNegateFactor, useEvolveFactor } from '@/api/factor_assistant'
 import { usePoolNameMap, usePools } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -34,6 +34,13 @@ const activeTab = ref<'cross_section' | 'time_series'>('cross_section')
 
 // 池名映射：详情页把 pool_id 渲染成池名，查不到退化成 #<id>（软删池）。
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 
 // L2.A：诊断里出现"取负号"建议时，给一键反向按钮
 const negateMut = useNegateFactor()
@@ -412,7 +419,7 @@ const rankIcMeanDiverged = computed(() =>
 
       <!-- 任务基本信息 -->
       <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" style="margin-bottom: 24px">
-        <n-descriptions-item label="因子">{{ evalRun.factor_id }}</n-descriptions-item>
+        <n-descriptions-item label="因子">{{ factorDisplayMap[evalRun.factor_id] || evalRun.factor_id }}</n-descriptions-item>
         <n-descriptions-item label="股票池">
           {{ lookupPoolName(evalRun.pool_id) }}
           <span style="color: #848E9C; font-size: 12px; margin-left: 4px">#{{ evalRun.pool_id }}</span>
