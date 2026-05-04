@@ -42,6 +42,10 @@ export interface EvalRun {
   feedback_text?: string | null
   metrics?: EvalMetrics | null
 
+  forward_periods?: string
+  n_groups?: number
+  freq?: string
+  split_date?: string | null
   /** 中性化后指标（neutralize=true 时后端会写入） */
   neut_ic_mean?: number
   neut_ic_ir?: number

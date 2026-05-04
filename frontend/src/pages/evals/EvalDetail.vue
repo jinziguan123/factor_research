@@ -10,7 +10,7 @@ import {
   NProgress, NSpin, NButton, NSpace, NEmpty, NAlert, NCard, NTag,
   NTable, NModal, NInput, NSelect, NFormItem, NTabs, NTabPane, useMessage,
 } from 'naive-ui'
-import { useEval } from '@/api/evals'
+import { useEval, useCreateEval } from '@/api/evals'
 import { useFactorLineage, useFactors } from '@/api/factors'
 import { useNegateFactor, useEvolveFactor } from '@/api/factor_assistant'
 import { usePoolNameMap, usePools } from '@/api/pools'
@@ -31,7 +31,42 @@ const router = useRouter()
 const runId = computed(() => route.params.runId as string)
 const { data: evalRun, isLoading } = useEval(runId)
 const message = useMessage()
+const createEval = useCreateEval()
 const activeTab = ref<'cross_section' | 'time_series'>('cross_section')
+
+// ---- 重新评估 ----
+const reEvalLoading = ref(false)
+
+async function handleReEvaluate() {
+  if (!evalRun.value) return
+  reEvalLoading.value = true
+  try {
+    const fp = evalRun.value.forward_periods || '1,5,10'
+    const forwardPeriods = fp.split(',').map(Number).filter(n => n > 0)
+    const body: Record<string, any> = {
+      factor_id: evalRun.value.factor_id,
+      pool_id: evalRun.value.pool_id,
+      start_date: evalRun.value.start_date,
+      end_date: evalRun.value.end_date,
+      forward_periods: forwardPeriods.length > 0 ? forwardPeriods : [1, 5, 10],
+      n_groups: evalRun.value.n_groups ?? 5,
+      freq: evalRun.value.freq || '1d',
+      neutralize: true,
+    }
+    if (evalRun.value.params_json) {
+      try { body.params = JSON.parse(evalRun.value.params_json) } catch {}
+    }
+    if (evalRun.value.split_date) body.split_date = evalRun.value.split_date
+
+    const result = await createEval.mutateAsync(body)
+    message.success('已提交重新评估')
+    router.push(`/evals/${result.run_id}`)
+  } catch (e: any) {
+    message.error(e?.message || '重新评估失败')
+  } finally {
+    reEvalLoading.value = false
+  }
+}
 
 // 池名映射：详情页把 pool_id 渲染成池名，查不到退化成 #<id>（软删池）。
 const { lookup: lookupPoolName } = usePoolNameMap()
@@ -286,6 +321,15 @@ const rankIcMeanDiverged = computed(() =>
       <template #extra>
         <n-space align="center">
           <status-badge v-if="evalRun" :status="evalRun.status" />
+          <n-button
+            v-if="evalRun && evalRun.status !== 'pending' && evalRun.status !== 'running'"
+            secondary
+            size="small"
+            :loading="reEvalLoading"
+            @click="handleReEvaluate"
+          >
+            重新评估
+          </n-button>
           <n-button
             v-if="evalRun?.status === 'success'"
             type="primary"
