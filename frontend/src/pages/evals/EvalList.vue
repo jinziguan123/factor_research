@@ -73,6 +73,11 @@ onUnmounted(() => { if (pollTimer != null) clearInterval(pollTimer) })
 
 // ---- 下拉选项 ----
 const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 // NSelect 的 SelectMixedOption 不允许 value: null；原来 "全部因子/全部状态" 这样的哨兵项
 // 编译通不过。这里删掉哨兵，改由 `clearable` 的 × 按钮表达"清空=全部"，语义等价。
 const factorOptions = computed(() =>
@@ -99,7 +104,8 @@ const columns: DataTableColumns<EvalRun> = [
     width: 110,
     render: (row) => h('code', { style: 'font-size: 12px' }, row.run_id.slice(0, 8)),
   },
-  { title: '因子', key: 'factor_id', width: 160, ellipsis: { tooltip: true } },
+  { title: '因子', key: 'factor_id', width: 160, ellipsis: { tooltip: true },
+    render: (row) => factorDisplayMap.value[row.factor_id] || row.factor_id },
   {
     title: '状态',
     key: 'status',

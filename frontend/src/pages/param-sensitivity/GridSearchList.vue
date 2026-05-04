@@ -55,6 +55,11 @@ watch(runs, maybeStartPolling, { immediate: true })
 onUnmounted(() => { if (pollTimer != null) clearInterval(pollTimer) })
 
 const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 const factorOptions = computed(() =>
   (factors.value ?? []).map((f) => ({ label: f.display_name, value: f.factor_id })),
 )
@@ -82,7 +87,8 @@ const columns: DataTableColumns<ParamSensitivityRun> = [
     title: 'Run ID', key: 'run_id', width: 100,
     render: (row) => h('code', { style: 'font-size: 12px' }, row.run_id.slice(0, 8)),
   },
-  { title: '因子', key: 'factor_id', width: 150, ellipsis: { tooltip: true } },
+  { title: '因子', key: 'factor_id', width: 150, ellipsis: { tooltip: true },
+    render: (row) => factorDisplayMap.value[row.factor_id] || row.factor_id },
   {
     title: '状态', key: 'status', width: 90,
     render: (row) => h(StatusBadge, { status: row.status }),
