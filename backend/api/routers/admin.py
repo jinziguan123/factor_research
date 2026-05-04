@@ -469,3 +469,51 @@ def list_jobs() -> dict:
         # 表不存在 / 权限不足等：回空列表比把页面打挂更友好。
         log.exception("list_jobs failed; returning empty list")
         return ok([])
+
+
+# ---------------------------- akshare market data / industry sync ----------------------------
+
+
+class AkshareMarketDataSyncIn(BaseModel):
+    """``POST /api/admin/market_data:sync`` 请求体。"""
+
+    trade_date: date | None = None  # None = today
+
+
+def _run_sync_akshare_market_data_safely(trade_date: date | None) -> None:
+    try:
+        from backend.adapters.akshare.market_data import fetch_and_save_market_data
+
+        n = fetch_and_save_market_data(trade_date)
+        log.info("akshare market_data sync ok: %d rows for %s", n, trade_date or "today")
+    except Exception:
+        log.exception("akshare market_data sync failed")
+
+
+def _run_sync_akshare_industry_safely() -> None:
+    try:
+        from backend.adapters.akshare.industry import fetch_and_save_industry
+
+        n = fetch_and_save_industry()
+        log.info("akshare industry sync ok: %d rows", n)
+    except Exception:
+        log.exception("akshare industry sync failed")
+
+
+@router.post("/market_data:sync")
+def trigger_sync_akshare_market_data(
+    body: AkshareMarketDataSyncIn, bt: BackgroundTasks
+) -> dict:
+    """从 akshare 同步市值 + PB 到 fr_daily_market_cap / fr_daily_pb。"""
+    bt.add_task(_run_sync_akshare_market_data_safely, body.trade_date)
+    return ok({
+        "message": "akshare market_data sync submitted; see server logs",
+        "trade_date": body.trade_date.isoformat() if body.trade_date else None,
+    })
+
+
+@router.post("/industry:sync_akshare")
+def trigger_sync_akshare_industry(bt: BackgroundTasks) -> dict:
+    """从 akshare 同步申万行业分类到 fr_industry_history。"""
+    bt.add_task(_run_sync_akshare_industry_safely)
+    return ok({"message": "akshare industry sync submitted; see server logs"})

@@ -298,6 +298,47 @@ async function handleSyncCalendar() {
     calendarLoading.value = false
   }
 }
+
+// ---- 同步市值 + PB（akshare → fr_daily_market_cap / fr_daily_pb） ----
+const mktDataDate = ref<number | null>(Date.now())
+const mktDataLoading = ref(false)
+const mktDataSuccess = ref(false)
+
+async function handleSyncMarketData() {
+  mktDataLoading.value = true
+  mktDataSuccess.value = false
+  try {
+    const payload: { trade_date?: string } = {}
+    if (mktDataDate.value) {
+      payload.trade_date = new Date(mktDataDate.value).toISOString().slice(0, 10)
+    }
+    await client.post('/admin/market_data:sync', payload)
+    mktDataSuccess.value = true
+    message.success('市值 + PB 同步任务已提交到后台')
+  } catch (e: any) {
+    message.error(e?.message || '提交失败')
+  } finally {
+    mktDataLoading.value = false
+  }
+}
+
+// ---- 同步行业分类（akshare → fr_industry_history） ----
+const akshareIndustryLoading = ref(false)
+const akshareIndustrySuccess = ref(false)
+
+async function handleSyncAkshareIndustry() {
+  akshareIndustryLoading.value = true
+  akshareIndustrySuccess.value = false
+  try {
+    await client.post('/admin/industry:sync_akshare', {})
+    akshareIndustrySuccess.value = true
+    message.success('行业分类同步任务已提交到后台')
+  } catch (e: any) {
+    message.error(e?.message || '提交失败')
+  } finally {
+    akshareIndustryLoading.value = false
+  }
+}
 </script>
 
 <template>
@@ -474,6 +515,57 @@ async function handleSyncCalendar() {
         </n-space>
         <n-alert v-if="industrySuccess" type="success" closable>
           行业归属同步任务已提交到后台，请查看服务器日志了解进度
+        </n-alert>
+      </n-space>
+    </n-card>
+
+    <!-- 同步市值 + PB（akshare → fr_daily_market_cap / fr_daily_pb） -->
+    <n-card title="同步市值 + PB（akshare → fr_daily_market_cap / fr_daily_pb）" style="margin-bottom: 16px">
+      <n-space vertical>
+        <n-alert type="info" :show-icon="false" style="margin-bottom: 4px">
+          从 akshare 全市场 spot 快照拉取总市值、流通市值和 PB，写入 fr_daily_market_cap 和 fr_daily_pb。
+          日频数据，默认取当日快照；历史回填请分别选日期多次执行。
+        </n-alert>
+        <n-space align="center" :wrap-item="false" style="row-gap: 8px" wrap>
+          <span style="color: #666">交易日期：</span>
+          <n-date-picker
+            v-model:value="mktDataDate"
+            type="date"
+            clearable
+            style="width: 200px"
+          />
+          <n-button
+            type="primary"
+            :loading="mktDataLoading"
+            @click="handleSyncMarketData"
+          >
+            执行同步
+          </n-button>
+        </n-space>
+        <n-alert v-if="mktDataSuccess" type="success" closable>
+          市值 + PB 同步任务已提交到后台，请查看服务器日志了解进度
+        </n-alert>
+      </n-space>
+    </n-card>
+
+    <!-- 同步行业分类（akshare → fr_industry_history） -->
+    <n-card title="同步行业分类（akshare → fr_industry_history）" style="margin-bottom: 16px">
+      <n-space vertical>
+        <n-alert type="info" :show-icon="false" style="margin-bottom: 4px">
+          从 akshare 申万行业分类拉取全市场 A 股行业归属。仅写入新增/变化的行，天然形成**历史快照**，
+          可用于回测时的行业中性化（取 as_of_date 之前最近快照）。
+        </n-alert>
+        <n-space align="center">
+          <n-button
+            type="primary"
+            :loading="akshareIndustryLoading"
+            @click="handleSyncAkshareIndustry"
+          >
+            执行同步
+          </n-button>
+        </n-space>
+        <n-alert v-if="akshareIndustrySuccess" type="success" closable>
+          行业分类同步任务已提交到后台，请查看服务器日志了解进度
         </n-alert>
       </n-space>
     </n-card>
