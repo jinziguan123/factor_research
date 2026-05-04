@@ -272,6 +272,110 @@ class DataService:
         out.columns.name = None
         return out
 
+    def load_market_cap(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Return wide DataFrame: index=trade_date, columns=symbol, values=total_mv."""
+        sid_map = self.resolver.resolve_many(symbols)
+        if not sid_map:
+            return pd.DataFrame()
+        inv = {sid: sym for sym, sid in sid_map.items()}
+        sid_list = sorted(set(sid_map.values()))
+
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT symbol_id, trade_date, total_mv "
+                    "FROM fr_daily_market_cap "
+                    "WHERE symbol_id IN %(sids)s AND trade_date BETWEEN %(s)s AND %(e)s "
+                    "ORDER BY symbol_id, trade_date",
+                    {"sids": sid_list, "s": start, "e": end},
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=["symbol_id", "trade_date", "total_mv"])
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df["symbol"] = df["symbol_id"].map(inv)
+        df = df.dropna(subset=["symbol"])
+        panel = df.pivot_table(
+            index="trade_date", columns="symbol", values="total_mv", aggfunc="last"
+        ).sort_index()
+        panel.columns.name = None
+        return panel
+
+    def load_pb(
+        self,
+        symbols: list[str],
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """Return wide DataFrame: index=trade_date, columns=symbol, values=pb."""
+        sid_map = self.resolver.resolve_many(symbols)
+        if not sid_map:
+            return pd.DataFrame()
+        inv = {sid: sym for sym, sid in sid_map.items()}
+        sid_list = sorted(set(sid_map.values()))
+
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT symbol_id, trade_date, pb "
+                    "FROM fr_daily_pb "
+                    "WHERE symbol_id IN %(sids)s AND trade_date BETWEEN %(s)s AND %(e)s "
+                    "ORDER BY symbol_id, trade_date",
+                    {"sids": sid_list, "s": start, "e": end},
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=["symbol_id", "trade_date", "pb"])
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df["symbol"] = df["symbol_id"].map(inv)
+        df = df.dropna(subset=["symbol"])
+        panel = df.pivot_table(
+            index="trade_date", columns="symbol", values="pb", aggfunc="last"
+        ).sort_index()
+        panel.columns.name = None
+        return panel
+
+    def load_industry(
+        self,
+        symbols: list[str],
+        as_of_date: date,
+    ) -> pd.Series:
+        """Return industry Series: index=symbol, values=industry_l1.
+
+        Takes the most recent snapshot on or before as_of_date.
+        Symbols with no record return None.
+        """
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT h.symbol, h.industry_l1 "
+                    "FROM fr_industry_history h "
+                    "INNER JOIN ("
+                    "  SELECT symbol, MAX(snapshot_date) AS max_date "
+                    "  FROM fr_industry_history "
+                    "  WHERE snapshot_date <= %(as_of)s "
+                    "  GROUP BY symbol"
+                    ") latest ON h.symbol = latest.symbol AND h.snapshot_date = latest.max_date",
+                    {"as_of": as_of_date},
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return pd.Series(dtype=str)
+        result = pd.Series(
+            {r["symbol"]: r["industry_l1"] for r in rows},
+            name="industry_l1",
+        )
+        return result.reindex([s.strip().upper() for s in symbols])
+
     def save_factor_values(
         self,
         factor_id: str,
