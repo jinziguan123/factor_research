@@ -22,6 +22,7 @@ import {
 } from '@/api/signals'
 import type { SignalRun } from '@/api/signals'
 import { usePoolNameMap, usePools } from '@/api/pools'
+import { useFactors } from '@/api/factors'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 const router = useRouter()
@@ -97,6 +98,13 @@ const statusOptions = [
 ]
 const { lookup: lookupPoolName } = usePoolNameMap()
 
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
+
 function methodLabel(m: string): string {
   switch (m) {
     case 'single': return '单因子'
@@ -126,7 +134,7 @@ const columns: DataTableColumns<SignalRun> = [
         default: () =>
           (row.factor_items || []).map((it: any) =>
             h(NTag, { size: 'small', type: 'info', bordered: false }, {
-              default: () => it.factor_id,
+              default: () => factorDisplayMap.value[it.factor_id] || it.factor_id,
             }),
           ),
       }),

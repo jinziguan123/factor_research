@@ -14,6 +14,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { useComposition } from '@/api/compositions'
 import type { PerFactorIcEntry } from '@/api/compositions'
 import { usePoolNameMap } from '@/api/pools'
+import { useFactors } from '@/api/factors'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 import ChartCard from '@/components/charts/ChartCard.vue'
 import GroupReturnsChart from '@/components/charts/GroupReturnsChart.vue'
@@ -26,6 +27,13 @@ const router = useRouter()
 const runId = computed(() => route.params.runId as string)
 const { data: run, isLoading } = useComposition(runId)
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 
 const isRunning = computed(
   () => run.value?.status === 'pending' || run.value?.status === 'running',
@@ -94,7 +102,7 @@ const icRows = computed<IcRow[]>(() => {
 })
 
 const icColumns: DataTableColumns<IcRow> = [
-  { title: '因子', key: 'factor_id', width: 200 },
+  { title: '因子', key: 'factor_id', width: 200, render: (r) => r.factor_id === '📊 合成因子' ? r.factor_id : (factorDisplayMap.value[r.factor_id] || r.factor_id) },
   { title: 'IC 均值', key: 'ic_mean', width: 120, render: (r) => fmtNum(r.ic_mean, 4) },
   { title: 'IC_IR', key: 'ic_ir', width: 110, render: (r) => fmtNum(r.ic_ir) },
   { title: 'IC 胜率', key: 'ic_win_rate', width: 110, render: (r) => fmtPct(r.ic_win_rate) },
@@ -154,7 +162,7 @@ const weightRows = computed<WeightRow[]>(() => {
   }))
 })
 const weightColumns: DataTableColumns<WeightRow> = [
-  { title: '因子', key: 'factor_id', width: 220 },
+  { title: '因子', key: 'factor_id', width: 220, render: (r) => factorDisplayMap.value[r.factor_id] || r.factor_id },
   {
     title: '归一化权重',
     key: 'weight',
@@ -229,7 +237,7 @@ const improveHint = computed<string | null>(() => {
                 type="info"
                 bordered
               >
-                {{ it.factor_id }}
+                {{ factorDisplayMap[it.factor_id] || it.factor_id }}
                 <span v-if="it.factor_version" style="opacity: 0.7; margin-left: 4px">
                   v{{ it.factor_version }}
                 </span>

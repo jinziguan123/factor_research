@@ -26,6 +26,7 @@ import {
   useDeleteSubscription, useRefreshSubscriptionNow,
 } from '@/api/signal_subscriptions'
 import { usePoolNameMap } from '@/api/pools'
+import { useFactors } from '@/api/factors'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 const route = useRoute()
@@ -35,6 +36,13 @@ const message = useMessage()
 const runId = computed(() => route.params.runId as string)
 const { data: run, isLoading } = useSignal(runId)
 const { lookup: lookupPoolName } = usePoolNameMap()
+
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
 
 // 订阅相关：找当前 run 配置对应的订阅（如果有），用于 toggle 状态
 const { data: allSubs } = useSubscriptions()
@@ -334,7 +342,7 @@ const icRows = computed<IcRow[]>(() => {
 })
 
 const icColumns: DataTableColumns<IcRow> = [
-  { title: '因子', key: 'factor_id', width: 200 },
+  { title: '因子', key: 'factor_id', width: 200, render: (r) => factorDisplayMap.value[r.factor_id] || r.factor_id },
   { title: 'IC 均值', key: 'ic_mean', width: 110, render: (r) => fmtNum(r.ic_mean) },
   { title: 'IC_IR', key: 'ic_ir', width: 110, render: (r) => fmtNum(r.ic_ir, 3) },
   { title: 'IC 胜率', key: 'ic_win_rate', width: 100, render: (r) => fmtPct(r.ic_win_rate) },
@@ -612,7 +620,7 @@ const icColumns: DataTableColumns<IcRow> = [
                 :key="it.factor_id"
                 size="small" type="info" bordered
               >
-                {{ it.factor_id }}
+                {{ factorDisplayMap[it.factor_id] || it.factor_id }}
                 <span v-if="it.factor_version" style="opacity: 0.7; margin-left: 4px">
                   v{{ it.factor_version }}
                 </span>

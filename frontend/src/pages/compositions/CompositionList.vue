@@ -13,6 +13,7 @@ import type { DataTableColumns } from 'naive-ui'
 import { useCompositionRuns, useDeleteComposition } from '@/api/compositions'
 import type { CompositionRun } from '@/api/compositions'
 import { usePoolNameMap, usePools } from '@/api/pools'
+import { useFactors } from '@/api/factors'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 const router = useRouter()
@@ -51,6 +52,13 @@ const statusOptions = [
 
 const { lookup: lookupPoolName } = usePoolNameMap()
 
+const { data: factors } = useFactors()
+const factorDisplayMap = computed(() => {
+  const map: Record<string, string> = {}
+  for (const f of (factors.value ?? [])) map[f.factor_id] = f.display_name
+  return map
+})
+
 function fmtNum(v: any, digits = 3): string {
   if (v == null) return '-'
   return typeof v === 'number' ? v.toFixed(digits) : String(v)
@@ -71,7 +79,7 @@ const columns: DataTableColumns<CompositionRun> = [
       h(NSpace, { size: 4 }, {
         default: () =>
           (row.factor_items || []).map((it: any) =>
-            h(NTag, { size: 'small', type: 'info', bordered: false }, { default: () => it.factor_id }),
+            h(NTag, { size: 'small', type: 'info', bordered: false }, { default: () => factorDisplayMap.value[it.factor_id] || it.factor_id }),
           ),
       }),
   },
