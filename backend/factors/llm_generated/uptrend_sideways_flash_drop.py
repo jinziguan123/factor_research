@@ -68,7 +68,7 @@ class UptrendSidewaysFlashDrop(BaseFactor):
         close = close.astype(float)
         high = high.astype(float)
         low = low.astype(float)
-        daily_ret = close.pct_change()
+        daily_ret = close.pct_change(fill_method=None)
 
         min_p = max(5, sideways_window // 2)
 

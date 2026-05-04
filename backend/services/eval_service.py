@@ -773,6 +773,7 @@ def run_eval(run_id: str, body: dict) -> None:
         _set_status(run_id, progress=70)
         # 所有横截面/分组/多空/换手/体检 逻辑都在 evaluate_factor_panel 内完成，
         # 保证 run_eval 与 composition_service 走同一套评估管线（单一真相源）。
+        log.info("eval %s: computing raw metrics (%d symbols × %d days)...", run_id, len(symbols), len(F))
         payload, structured = evaluate_factor_panel(
             F,
             close,
@@ -781,14 +782,19 @@ def run_eval(run_id: str, body: dict) -> None:
             split_date=body.get("split_date"),
         )
 
+        log.info("eval %s: raw metrics done (IC=%.4f, IC_IR=%.4f)", run_id, structured.get("ic_mean", 0), structured.get("ic_ir", 0))
+
         # --- neutralization ---
         neut_payload = None
         neut_structured = None
         if neutralize:
             try:
+                log.info("eval %s: loading market cap + industry for neutralization...", run_id)
                 mktcap = data.load_market_cap(symbols, start.date(), end.date())
                 industry = data.load_industry(symbols, end.date())
                 if not mktcap.empty and not industry.empty:
+                    log.info("eval %s: running neutralization (mktcap=%d dates, industry=%d symbols)...",
+                             run_id, len(mktcap), len(industry))
                     from backend.services.neutralization import NeutralizationService
 
                     neut_svc = NeutralizationService()
@@ -807,6 +813,7 @@ def run_eval(run_id: str, body: dict) -> None:
         # --- style factor attribution ---
         attribution = None
         try:
+            log.info("eval %s: computing style factor attribution...", run_id)
             from backend.services.attribution import AttributionService
             reg2 = FactorRegistry()
             reg2.scan_and_register()

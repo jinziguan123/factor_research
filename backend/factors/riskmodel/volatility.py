@@ -26,6 +26,6 @@ class Volatility60d(BaseFactor):
         if close.empty:
             return pd.DataFrame()
         close = close.astype(float).sort_index()
-        ret = close.pct_change()
+        ret = close.pct_change(fill_method=None)
         result = ret.rolling(window=60, min_periods=20).std()
         return result.loc[ctx.start_date:]
