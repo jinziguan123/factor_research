@@ -808,7 +808,6 @@ def run_eval(run_id: str, body: dict) -> None:
         attribution = None
         try:
             from backend.services.attribution import AttributionService
-            from backend.runtime.factor_registry import FactorRegistry
             reg2 = FactorRegistry()
             reg2.scan_and_register()
 
