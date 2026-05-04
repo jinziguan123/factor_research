@@ -7,7 +7,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NSelect, NInputNumber,
-  NDatePicker, NDynamicTags, NButton, useMessage,
+  NDatePicker, NDynamicTags, NButton, NCheckbox, useMessage,
 } from 'naive-ui'
 import { useFactors, useFactor } from '@/api/factors'
 import { useCreateEval } from '@/api/evals'
@@ -45,6 +45,7 @@ const poolId = ref<number | null>(null)
 const dateRange = ref<[number, number] | null>(null)
 const forwardPeriods = ref<string[]>(['1', '5', '10'])
 const nGroups = ref(5)
+const neutralize = ref(true)
 // 样本内 / 样本外切分日（可选）。null → 不切分，与旧评估一致。
 // 必须严格位于 dateRange 之间，后端 Pydantic 也会再校验一次。
 const splitDate = ref<number | null>(null)
@@ -102,6 +103,7 @@ async function handleSubmit() {
     end_date: endDate,
     forward_periods: forwardPeriods.value.map(Number).filter(n => n > 0),
     n_groups: nGroups.value,
+    neutralize: neutralize.value,
   }
   // 仅在用户填了切分日时发送：Pydantic 的 Optional 遇到 null 不会报错但列表页展示会多一列，
   // 不发送能让老评估记录字段为 NULL、前端明确区分"未切分 vs 切分了"。
@@ -174,6 +176,13 @@ async function handleSubmit() {
       <!-- 分组数 -->
       <n-form-item label="分组数">
         <n-input-number v-model:value="nGroups" :min="2" :max="20" style="width: 120px" />
+      </n-form-item>
+
+      <!-- 中性化 -->
+      <n-form-item label="中性化" style="margin-top: 8px">
+        <n-checkbox v-model:checked="neutralize">
+          行业+市值中性化（默认开启，评估时同时输出原始和中性化后指标）
+        </n-checkbox>
       </n-form-item>
 
       <!-- 提交按钮 -->

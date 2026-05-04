@@ -40,6 +40,13 @@ export interface EvalRun {
    *  文本（与 error_message 互补；success / failed 都可能写）。 */
   feedback_text?: string | null
   metrics?: EvalMetrics | null
+
+  /** 中性化后指标（neutralize=true 时后端会写入） */
+  neut_ic_mean?: number
+  neut_ic_ir?: number
+  neut_rank_ic_mean?: number
+  neut_rank_ic_ir?: number
+  neut_long_short_annret?: number
 }
 
 /** 创建评估任务 */
