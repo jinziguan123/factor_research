@@ -14,6 +14,7 @@ export interface EvalMetrics {
   ic_win_rate?: number | null
   ic_t_stat?: number | null
   rank_ic_mean?: number | null
+  rank_ic_ir?: number | null
   turnover_mean?: number | null
   long_short_sharpe?: number | null
   long_short_annret?: number | null

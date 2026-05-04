@@ -23,6 +23,7 @@ import ValueHistogram from '@/components/charts/ValueHistogram.vue'
 import EquityCurveChart from '@/components/charts/EquityCurveChart.vue'
 import IcDecayChart from '@/components/charts/IcDecayChart.vue'
 import RankAutocorrChart from '@/components/charts/RankAutocorrChart.vue'
+import StyleExposureChart from '@/components/charts/StyleExposureChart.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -648,6 +649,38 @@ const rankIcMeanDiverged = computed(() =>
             {{ longShortNEffective }} 天
           </n-descriptions-item>
         </n-descriptions>
+
+        <!-- 中性化对比 -->
+        <n-card v-if="evalRun?.neut_ic_mean != null" title="中性化效果对比" style="margin-top: 16px" size="small">
+          <n-descriptions bordered :column="3" label-placement="left" size="small">
+            <n-descriptions-item label="IC Mean">
+              {{ fmtNum(metrics.ic_mean) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_ic_mean) }}</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="IC IR">
+              {{ fmtNum(metrics.ic_ir) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_ic_ir) }}</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="Rank IC Mean">
+              {{ fmtNum(metrics.rank_ic_mean) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_rank_ic_mean) }}</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="Rank IC IR">
+              {{ fmtNum(metrics.rank_ic_ir) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_rank_ic_ir) }}</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="Long-Short 年化收益">
+              {{ fmtPct(metrics.long_short_annret) }} → <span style="color: #5dade2">{{ fmtPct(evalRun.neut_long_short_annret) }}</span>
+            </n-descriptions-item>
+          </n-descriptions>
+          <p style="color: #848E9C; font-size: 12px; margin-top: 8px">
+            中性化剥离行业和市值暴露后的真实 alpha。若中性化后 IC 接近 0，说明因子超额主要来自行业/市值暴露。
+          </p>
+        </n-card>
+
+        <!-- 风格暴露度 -->
+        <n-card v-if="payload?.attribution" title="风格暴露度" style="margin-top: 16px" size="small">
+          <StyleExposureChart :attribution="payload.attribution" />
+          <p style="color: #848E9C; font-size: 12px; margin-top: 8px">
+            每日截面回归 alpha ~ β_size*Size + β_value*Value + ...，暴露度越大说明因子在该风格上载荷越高。
+          </p>
+        </n-card>
 
         <!-- 样本内 / 样本外对比：仅当 eval 时传了 split_date 才渲染 -->
         <template v-if="hasSplit">
