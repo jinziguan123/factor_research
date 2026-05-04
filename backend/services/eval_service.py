@@ -756,17 +756,23 @@ def run_eval(run_id: str, body: dict) -> None:
         ):
             F = cached
         else:
+            log.info("eval %s: computing factor (%d symbols)...", run_id, len(symbols))
             F = factor.compute(ctx, params)
+            log.info("eval %s: factor compute done (shape=%s)", run_id, F.shape)
             # 空结果不写缓存（避免把"计算失败或池全部过滤"的空宽表固化进来，下次还会被
             # 第二个条件 cached.empty 拒掉，逻辑上无害；但写入 0 行也没意义）。
             if not F.empty:
+                log.info("eval %s: saving factor values to ClickHouse...", run_id)
                 data.save_factor_values(body["factor_id"], version, phash, F)
+                log.info("eval %s: factor values saved", run_id)
         _set_status(run_id, progress=40)
         check_abort("eval", run_id)  # close 加载 + 指标计算前最后一次机会
 
+        log.info("eval %s: loading close prices (qfq)...", run_id)
         close = data.load_panel(
             symbols, start.date(), end.date(), field="close", adjust="qfq"
         )
+        log.info("eval %s: close loaded (shape=%s)", run_id, close.shape)
         fwd_periods = [int(x) for x in body.get("forward_periods", [1, 5, 10])]
         neutralize = bool(body.get("neutralize", True))
 
