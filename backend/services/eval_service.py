@@ -768,6 +768,7 @@ def run_eval(run_id: str, body: dict) -> None:
             symbols, start.date(), end.date(), field="close", adjust="qfq"
         )
         fwd_periods = [int(x) for x in body.get("forward_periods", [1, 5, 10])]
+        neutralize = bool(body.get("neutralize", True))
 
         _set_status(run_id, progress=70)
         # 所有横截面/分组/多空/换手/体检 逻辑都在 evaluate_factor_panel 内完成，
@@ -779,6 +780,29 @@ def run_eval(run_id: str, body: dict) -> None:
             n_groups=n_groups_req,
             split_date=body.get("split_date"),
         )
+
+        # --- neutralization ---
+        neut_payload = None
+        neut_structured = None
+        if neutralize:
+            try:
+                mktcap = data.load_market_cap(symbols, start.date(), end.date())
+                industry = data.load_industry(symbols, end.date())
+                if not mktcap.empty and not industry.empty:
+                    from backend.services.neutralization import NeutralizationService
+
+                    neut_svc = NeutralizationService()
+                    F_neut = neut_svc.neutralize(F, mktcap, industry)
+                    neut_payload, neut_structured = evaluate_factor_panel(
+                        F_neut, close,
+                        forward_periods=fwd_periods,
+                        n_groups=n_groups_req,
+                        split_date=body.get("split_date"),
+                    )
+                    log.info("Neutralization complete for run_id=%s: IC(raw)=%.4f IC(neut)=%.4f",
+                             run_id, structured.get("ic_mean", 0), neut_structured.get("ic_mean", 0))
+            except Exception as e:
+                log.warning("Neutralization failed for run_id=%s: %s", run_id, e)
 
         # 个股时序评估：对每只股票独立计算 IC / Hit Rate / 自相关
         _set_status(run_id, progress=85)
@@ -804,6 +828,7 @@ def run_eval(run_id: str, body: dict) -> None:
             payload["time_series"] = None
 
         _set_status(run_id, progress=90)
+        payload_json = json.dumps(payload, ensure_ascii=False, allow_nan=False)
         with mysql_conn() as c:
             with c.cursor() as cur:
                 cur.execute(
@@ -811,8 +836,11 @@ def run_eval(run_id: str, body: dict) -> None:
                     REPLACE INTO fr_factor_eval_metrics
                     (run_id, ic_mean, ic_std, ic_ir, ic_win_rate, ic_t_stat,
                      rank_ic_mean, rank_ic_std, rank_ic_ir,
-                     turnover_mean, long_short_sharpe, long_short_annret, payload_json)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     turnover_mean, long_short_sharpe, long_short_annret,
+                     neut_ic_mean, neut_ic_ir, neut_rank_ic_mean, neut_rank_ic_ir,
+                     neut_long_short_annret, neut_payload_json,
+                     payload_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         run_id,
@@ -827,10 +855,13 @@ def run_eval(run_id: str, body: dict) -> None:
                         structured["turnover_mean"],
                         structured["long_short_sharpe"],
                         structured["long_short_annret"],
-                        # ensure_ascii=False 保留中文；payload 内已经把 NaN 全部
-                        # 转成 None（_series_to_obj / _df_to_obj / value_hist 处理），
-                        # 但为了 belt-and-suspenders 也用 allow_nan=False 让异常尽早暴露。
-                        json.dumps(payload, ensure_ascii=False, allow_nan=False),
+                        neut_structured.get("ic_mean") if neut_structured else None,
+                        neut_structured.get("ic_ir") if neut_structured else None,
+                        neut_structured.get("rank_ic_mean") if neut_structured else None,
+                        neut_structured.get("rank_ic_ir") if neut_structured else None,
+                        neut_structured.get("long_short_annret") if neut_structured else None,
+                        json.dumps(neut_payload, default=str) if neut_payload else None,
+                        payload_json,
                     ),
                 )
             c.commit()

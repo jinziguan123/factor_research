@@ -42,6 +42,7 @@ class CreateEvalIn(BaseModel):
     forward_periods: list[int] = [1, 5, 10]
     n_groups: int = Field(default=5, ge=2, le=20)
     split_date: date | None = None
+    neutralize: bool = Field(default=True, description="是否做行业+市值中性化")
 
     @model_validator(mode="after")
     def _check_split_date(self) -> "CreateEvalIn":
