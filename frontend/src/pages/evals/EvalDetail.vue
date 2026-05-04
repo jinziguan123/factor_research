@@ -798,7 +798,6 @@ const rankIcMeanDiverged = computed(() =>
             </tbody>
           </n-table>
         </template>
-      </template>
         </n-tab-pane>
         <n-tab-pane name="time_series" tab="个股时序">
       <!-- 个股时序评估：对每只股票独立计算 IC / Hit Rate / 自相关 -->
