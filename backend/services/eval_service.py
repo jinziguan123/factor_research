@@ -804,6 +804,46 @@ def run_eval(run_id: str, body: dict) -> None:
             except Exception as e:
                 log.warning("Neutralization failed for run_id=%s: %s", run_id, e)
 
+        # --- style factor attribution ---
+        attribution = None
+        try:
+            from backend.services.attribution import AttributionService
+            from backend.runtime.factor_registry import FactorRegistry
+            reg2 = FactorRegistry()
+            reg2.scan_and_register()
+
+            style_ids = ["size_mv", "value_ep", "momentum_12m1m", "volatility_60d", "liquidity_20d"]
+            style_panels: dict[str, pd.DataFrame] = {}
+            style_display: dict[str, str] = {}
+
+            svc_attr = DataService()
+            for sid in style_ids:
+                try:
+                    sf = reg2.get(sid)
+                    sctx = FactorContext(
+                        data=svc_attr,
+                        symbols=symbols,
+                        start_date=start,
+                        end_date=end,
+                        warmup_days=sf.required_warmup(sf.default_params),
+                    )
+                    spanel = sf.compute(sctx, sf.default_params)
+                    if not spanel.empty:
+                        style_panels[sid] = spanel
+                        style_display[sid] = sf.display_name
+                except Exception as e2:
+                    log.debug("Style factor %s compute failed, skipping: %s", sid, e2)
+
+            if len(style_panels) >= 3:
+                # Rename keys to display_name for readability in frontend
+                renamed = {style_display.get(k, k): v for k, v in style_panels.items()}
+                attr_svc = AttributionService()
+                attribution = attr_svc.decompose(F, renamed)
+                log.info("Attribution complete for run_id=%s: mean R²=%.4f",
+                         run_id, attribution.r_squared.mean())
+        except Exception as e:
+            log.warning("Attribution failed for run_id=%s: %s", run_id, e)
+
         # 个股时序评估：对每只股票独立计算 IC / Hit Rate / 自相关
         _set_status(run_id, progress=85)
         try:
@@ -828,6 +868,19 @@ def run_eval(run_id: str, body: dict) -> None:
             payload["time_series"] = None
 
         _set_status(run_id, progress=90)
+        # Attach attribution results to payload
+        if attribution is not None:
+            payload["attribution"] = {
+                "exposures": {
+                    name: [float(v) if v is not None and not np.isnan(float(v)) else None
+                           for v in series.values]
+                    for name, series in attribution.exposures.items()
+                },
+                "r_squared": [float(v) if v is not None and not np.isnan(float(v)) else None
+                              for v in attribution.r_squared.values],
+                "dates": [d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+                          for d in attribution.r_squared.index],
+            }
         payload_json = json.dumps(payload, ensure_ascii=False, allow_nan=False)
         with mysql_conn() as c:
             with c.cursor() as cur:
