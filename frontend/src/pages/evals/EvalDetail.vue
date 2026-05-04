@@ -464,7 +464,14 @@ const rankIcMeanDiverged = computed(() =>
 
       <!-- 任务基本信息 -->
       <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" size="small" class="info-desc" style="margin-bottom: 16px">
-        <n-descriptions-item label="因子">{{ factorDisplayMap[evalRun.factor_id] || evalRun.factor_id }}</n-descriptions-item>
+        <n-descriptions-item label="因子">
+          <a
+            style="cursor: pointer; color: #5AC8FA"
+            @click="router.push(`/factors/${evalRun.factor_id}`)"
+          >
+            {{ factorDisplayMap[evalRun.factor_id] || evalRun.factor_id }}
+          </a>
+        </n-descriptions-item>
         <n-descriptions-item label="股票池">
           {{ lookupPoolName(evalRun.pool_id) }}
           <span style="color: #848E9C; font-size: 12px; margin-left: 4px">#{{ evalRun.pool_id }}</span>
