@@ -463,7 +463,7 @@ const rankIcMeanDiverged = computed(() =>
       </n-modal>
 
       <!-- 任务基本信息 -->
-      <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" style="margin-bottom: 24px">
+      <n-descriptions v-if="evalRun" bordered :column="3" label-placement="left" size="small" class="info-desc" style="margin-bottom: 16px">
         <n-descriptions-item label="因子">{{ factorDisplayMap[evalRun.factor_id] || evalRun.factor_id }}</n-descriptions-item>
         <n-descriptions-item label="股票池">
           {{ lookupPoolName(evalRun.pool_id) }}
@@ -476,6 +476,55 @@ const rankIcMeanDiverged = computed(() =>
           <code style="font-size: 12px">{{ JSON.stringify(paramsDisplay) }}</code>
         </n-descriptions-item>
       </n-descriptions>
+
+      <!-- 评估指标（紧贴基本信息下方） -->
+      <template v-if="evalRun?.status === 'success' && metrics">
+        <n-alert
+          v-if="longShortSampleInsufficient"
+          type="warning"
+          title="多空组合有效样本数过少"
+          style="margin-bottom: 12px"
+        >
+          多空组合有效样本仅 <b>{{ longShortNEffective }}</b> 天（&lt; {{ LS_SAMPLE_WARN_THRESHOLD }} 天），下方多空 Sharpe / 年化统计意义有限。
+        </n-alert>
+        <n-descriptions bordered :column="3" label-placement="left" size="small" class="metrics-desc" style="margin-bottom: 16px">
+          <n-descriptions-item label="IC 均值">{{ fmtNum(metrics.ic_mean) }}</n-descriptions-item>
+          <n-descriptions-item label="IC IR">{{ fmtNum(metrics.ic_ir) }}</n-descriptions-item>
+          <n-descriptions-item label="IC 胜率">{{ fmtPct(metrics.ic_win_rate) }}</n-descriptions-item>
+          <n-descriptions-item label="Rank IC 均值">{{ fmtNum(metrics.rank_ic_mean) }}</n-descriptions-item>
+          <n-descriptions-item label="多空 Sharpe">{{ fmtNum(metrics.long_short_sharpe, 2) }}</n-descriptions-item>
+          <n-descriptions-item label="多空年化收益">{{ fmtPct(metrics.long_short_annret) }}</n-descriptions-item>
+          <n-descriptions-item label="平均换手率">{{ fmtPct(metrics.turnover_mean) }}</n-descriptions-item>
+          <n-descriptions-item v-if="longShortNEffective !== null" label="多空有效样本数">
+            {{ longShortNEffective }} 天
+          </n-descriptions-item>
+        </n-descriptions>
+
+        <!-- 中性化对比 -->
+        <n-alert
+          v-if="evalRun?.neut_ic_mean != null"
+          type="info"
+          :show-icon="false"
+          style="margin-bottom: 12px"
+        >
+          <n-descriptions bordered :column="3" label-placement="left" size="small" class="metrics-desc">
+            <n-descriptions-item label="中性化 IC Mean">
+              {{ fmtNum(metrics.ic_mean) }} → <b style="color: #5dade2">{{ fmtNum(evalRun.neut_ic_mean) }}</b>
+            </n-descriptions-item>
+            <n-descriptions-item label="中性化 IC IR">
+              {{ fmtNum(metrics.ic_ir) }} → <b style="color: #5dade2">{{ fmtNum(evalRun.neut_ic_ir) }}</b>
+            </n-descriptions-item>
+            <n-descriptions-item label="中性化 Rank IC">
+              {{ fmtNum(metrics.rank_ic_mean) }} → <b style="color: #5dade2">{{ fmtNum(evalRun.neut_rank_ic_mean) }}</b>
+            </n-descriptions-item>
+          </n-descriptions>
+        </n-alert>
+
+        <!-- 风格暴露度 -->
+        <n-card v-if="payload?.attribution" title="风格暴露度" size="small" style="margin-bottom: 16px">
+          <StyleExposureChart :attribution="payload.attribution" />
+        </n-card>
+      </template>
 
       <!-- Tab 切换：横截面评估 / 个股时序 -->
       <n-tabs v-if="evalRun?.status === 'success'" v-model:value="activeTab" type="segment" style="margin-bottom: 16px">
@@ -494,7 +543,7 @@ const rankIcMeanDiverged = computed(() =>
 
       <!-- 图表区域（仅成功时展示） -->
       <template v-if="evalRun?.status === 'success' && payload">
-        <n-grid :cols="3" :x-gap="16" :y-gap="16" style="margin-bottom: 24px">
+        <n-grid :cols="3" :x-gap="12" :y-gap="12" style="margin-bottom: 16px">
           <!-- IC 累计曲线（自动选第一个可用 forward_period） -->
           <n-grid-item>
             <chart-card :title="`IC (${icPeriod ?? '-'}d)`">
@@ -573,7 +622,7 @@ const rankIcMeanDiverged = computed(() =>
           v-if="payload.ic || payload.rank_ic"
           title="IC 随前瞻期衰减 / 半衰期"
           size="small"
-          style="margin-bottom: 24px"
+          style="margin-bottom: 16px"
         >
           <ic-decay-chart :ic="payload.ic" :rank-ic="payload.rank_ic" />
         </n-card>
@@ -583,9 +632,9 @@ const rankIcMeanDiverged = computed(() =>
           v-if="payload.alphalens"
           title="Alphalens 增强视角"
           size="small"
-          style="margin-bottom: 24px"
+          style="margin-bottom: 16px"
         >
-          <n-grid :cols="3" :x-gap="16" :y-gap="16">
+          <n-grid :cols="3" :x-gap="12" :y-gap="12">
             <n-grid-item>
               <chart-card title="因子排名自相关">
                 <rank-autocorr-chart
@@ -632,7 +681,7 @@ const rankIcMeanDiverged = computed(() =>
       <template v-if="evalRun?.status === 'success' && health">
         <n-card
           size="small"
-          style="margin-bottom: 24px"
+          style="margin-bottom: 16px"
         >
           <template #header>
             <n-space align="center">
@@ -663,70 +712,7 @@ const rankIcMeanDiverged = computed(() =>
         </n-card>
       </template>
 
-      <!-- 结构化指标：独立 v-if（metrics 在 payload 缺失时仍可展示） -->
-      <template v-if="evalRun?.status === 'success' && metrics">
-        <h3 style="margin-bottom: 12px">评估指标</h3>
-        <!-- 多空有效样本 < 30 警示：rank 类因子 + qcut 退化的典型症状。
-             Sharpe / 年化在这种情况下会被 1-2 个极端日推成 ±6 / ±160%，不可信。
-             用 warning 而非 error：指标仍值得展示，但需告诉用户慎重解读。 -->
-        <n-alert
-          v-if="longShortSampleInsufficient"
-          type="warning"
-          title="多空组合有效样本数过少"
-          style="margin-bottom: 12px"
-        >
-          本次评估多空组合实际仅有 <b>{{ longShortNEffective }}</b> 个交易日可算（&lt; {{ LS_SAMPLE_WARN_THRESHOLD }} 天）。
-          下方的多空 Sharpe / 年化收益会被少数极端日主导，统计意义非常有限。
-          常见原因：因子值只有少量离散值（如 rank 类 / argmax 类），
-          qcut 分 5 组时大量 tied → top 或 bot 组频繁缺失。
-          建议换因子、减小 n_groups（如 3 组）、或用更大的股票池提高横截面分散度。
-        </n-alert>
-        <n-descriptions bordered :column="3" label-placement="left">
-          <n-descriptions-item label="IC 均值">{{ fmtNum(metrics.ic_mean) }}</n-descriptions-item>
-          <n-descriptions-item label="IC IR">{{ fmtNum(metrics.ic_ir) }}</n-descriptions-item>
-          <n-descriptions-item label="IC 胜率">{{ fmtPct(metrics.ic_win_rate) }}</n-descriptions-item>
-          <n-descriptions-item label="Rank IC 均值">{{ fmtNum(metrics.rank_ic_mean) }}</n-descriptions-item>
-          <n-descriptions-item label="多空 Sharpe">{{ fmtNum(metrics.long_short_sharpe, 2) }}</n-descriptions-item>
-          <n-descriptions-item label="多空年化收益">{{ fmtPct(metrics.long_short_annret) }}</n-descriptions-item>
-          <n-descriptions-item label="平均换手率">{{ fmtPct(metrics.turnover_mean) }}</n-descriptions-item>
-          <n-descriptions-item v-if="longShortNEffective !== null" label="多空有效样本数">
-            {{ longShortNEffective }} 天
-          </n-descriptions-item>
-        </n-descriptions>
-
-        <!-- 中性化对比 -->
-        <n-card v-if="evalRun?.neut_ic_mean != null" title="中性化效果对比" style="margin-top: 16px" size="small">
-          <n-descriptions bordered :column="3" label-placement="left" size="small">
-            <n-descriptions-item label="IC Mean">
-              {{ fmtNum(metrics.ic_mean) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_ic_mean) }}</span>
-            </n-descriptions-item>
-            <n-descriptions-item label="IC IR">
-              {{ fmtNum(metrics.ic_ir) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_ic_ir) }}</span>
-            </n-descriptions-item>
-            <n-descriptions-item label="Rank IC Mean">
-              {{ fmtNum(metrics.rank_ic_mean) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_rank_ic_mean) }}</span>
-            </n-descriptions-item>
-            <n-descriptions-item label="Rank IC IR">
-              {{ fmtNum(metrics.rank_ic_ir) }} → <span style="color: #5dade2">{{ fmtNum(evalRun.neut_rank_ic_ir) }}</span>
-            </n-descriptions-item>
-            <n-descriptions-item label="Long-Short 年化收益">
-              {{ fmtPct(metrics.long_short_annret) }} → <span style="color: #5dade2">{{ fmtPct(evalRun.neut_long_short_annret) }}</span>
-            </n-descriptions-item>
-          </n-descriptions>
-          <p style="color: #848E9C; font-size: 12px; margin-top: 8px">
-            中性化剥离行业和市值暴露后的真实 alpha。若中性化后 IC 接近 0，说明因子超额主要来自行业/市值暴露。
-          </p>
-        </n-card>
-
-        <!-- 风格暴露度 -->
-        <n-card v-if="payload?.attribution" title="风格暴露度" style="margin-top: 16px" size="small">
-          <StyleExposureChart :attribution="payload.attribution" />
-          <p style="color: #848E9C; font-size: 12px; margin-top: 8px">
-            每日截面回归 alpha ~ β_size*Size + β_value*Value + ...，暴露度越大说明因子在该风格上载荷越高。
-          </p>
-        </n-card>
-
-        <!-- 样本内 / 样本外对比：仅当 eval 时传了 split_date 才渲染 -->
+      <!-- 样本内 / 样本外对比：仅当 eval 时传了 split_date 才渲染 -->
         <template v-if="hasSplit">
           <h3 style="margin-top: 24px; margin-bottom: 12px">
             样本内 / 样本外对比
@@ -929,6 +915,16 @@ const rankIcMeanDiverged = computed(() =>
 </template>
 
 <style scoped>
+/* 基本信息 + 评估指标：label 加粗，value 用等宽字体 */
+.info-desc :deep(.n-descriptions-table-header),
+.metrics-desc :deep(.n-descriptions-table-header) {
+  font-weight: 600;
+  color: var(--n-text-color-2);
+}
+.info-desc :deep(.n-descriptions-table-content),
+.metrics-desc :deep(.n-descriptions-table-content) {
+  font-family: 'SF Mono', 'Consolas', monospace;
+}
 .ts-summary-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
