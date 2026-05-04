@@ -299,6 +299,29 @@ def get_factor(factor_id: str) -> dict:
         raise HTTPException(status_code=404, detail="factor not found")
     src = inspect.getsourcefile(inst.__class__)
     editable = bool(src) and _is_under_llm_dir(Path(src))
+
+    # Enrich with lineage fields from MySQL (not on Python class)
+    parent_factor_id: str | None = None
+    root_factor_id: str | None = None
+    generation: int = 1
+    is_sota: int = 0
+    try:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT parent_factor_id, root_factor_id, generation, is_sota "
+                    "FROM fr_factor_meta WHERE factor_id=%s",
+                    (factor_id,),
+                )
+                meta = cur.fetchone()
+                if meta:
+                    parent_factor_id = meta.get("parent_factor_id")
+                    root_factor_id = meta.get("root_factor_id")
+                    generation = int(meta.get("generation") or 1)
+                    is_sota = int(meta.get("is_sota") or 0)
+    except Exception:
+        pass  # MySQL unavailable → keep defaults
+
     return ok(
         {
             "factor_id": inst.factor_id,
@@ -311,6 +334,10 @@ def get_factor(factor_id: str) -> dict:
             "supported_freqs": list(inst.supported_freqs),
             "version": reg.current_version(factor_id),
             "editable": editable,
+            "parent_factor_id": parent_factor_id,
+            "root_factor_id": root_factor_id,
+            "generation": generation,
+            "is_sota": is_sota,
         }
     )
 
