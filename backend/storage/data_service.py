@@ -306,7 +306,7 @@ class DataService:
             index="trade_date", columns="symbol", values="total_mv", aggfunc="last"
         ).sort_index()
         panel.columns.name = None
-        return panel
+        return panel.astype(float)
 
     def load_pb(
         self,
@@ -342,7 +342,7 @@ class DataService:
             index="trade_date", columns="symbol", values="pb", aggfunc="last"
         ).sort_index()
         panel.columns.name = None
-        return panel
+        return panel.astype(float)
 
     def load_industry(
         self,

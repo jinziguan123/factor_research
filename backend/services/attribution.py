@@ -42,18 +42,36 @@ class AttributionService:
 
         style_names = list(style_panels.keys())
 
+        # Pre-align all style panels once (not per-date) to avoid repeated reindex.
+        aligned_panels: dict[str, pd.DataFrame] = {}
+        for name in style_names:
+            aligned = style_panels[name].reindex(
+                index=common_dates, columns=common_symbols
+            )
+            aligned_panels[name] = aligned
+
         for d in common_dates:
             y = factor_panel.loc[d]
 
             X_cols = []
+            active_names = []
             for name in style_names:
-                panel = style_panels[name]
-                aligned = panel.reindex(index=common_dates, columns=common_symbols)
+                aligned = aligned_panels[name]
                 if d in aligned.index:
-                    X_cols.append(aligned.loc[d].values)
+                    row = aligned.loc[d]
+                    # Only include this style if it has at least some non-NaN values
+                    if row.notna().sum() > 0:
+                        X_cols.append(row.values)
+                        active_names.append(name)
 
-            if not X_cols:
-                for name in style_names:
+            # Fill NaN exposures for inactive styles
+            for name in style_names:
+                if name not in active_names:
+                    exposures[name].append(np.nan)
+
+            if len(X_cols) < 2:
+                # Need at least 2 style factors for meaningful regression
+                for name in active_names:
                     exposures[name].append(np.nan)
                 r2_list.append(np.nan)
                 residual.loc[d] = np.nan
@@ -62,8 +80,8 @@ class AttributionService:
             X = np.column_stack(X_cols)
             valid = ~y.isna() & ~np.isnan(X).any(axis=1)
 
-            if valid.sum() < len(style_names) + 2:
-                for name in style_names:
+            if valid.sum() < len(X_cols) + 2:
+                for name in active_names:
                     exposures[name].append(np.nan)
                 r2_list.append(np.nan)
                 residual.loc[d] = np.nan
@@ -77,14 +95,19 @@ class AttributionService:
                     X_valid, y_valid, rcond=None
                 )
             except np.linalg.LinAlgError:
-                for name in style_names:
+                for name in active_names:
                     exposures[name].append(np.nan)
                 r2_list.append(np.nan)
                 residual.loc[d] = np.nan
                 continue
 
-            for i, name in enumerate(style_names):
-                exposures[name].append(float(beta[i]) if i < len(beta) else np.nan)
+            # Map betas back to the full style_names list
+            beta_idx = 0
+            for name in style_names:
+                if name in active_names:
+                    exposures[name].append(float(beta[beta_idx]))
+                    beta_idx += 1
+                # else already appended NaN above
 
             y_hat = X_valid @ beta
             ss_res = float(np.sum((y_valid - y_hat) ** 2))

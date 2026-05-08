@@ -73,7 +73,7 @@ class NeutralizationService:
             X_frames: list[pd.DataFrame] = []
 
             if use_mktcap and market_cap is not None:
-                mc = market_cap.reindex(
+                mc = market_cap.astype(float).reindex(
                     index=factor_panel.index, columns=factor_panel.columns
                 )
                 if d in mc.index:

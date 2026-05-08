@@ -22,6 +22,6 @@ class ValueFactor(BaseFactor):
         pb = ctx.data.load_pb(ctx.symbols, data_start, data_end)
         if pb.empty:
             return pd.DataFrame()
-        pb = pb.reindex(index=pd.DatetimeIndex(sorted(pb.index)))
+        pb = pb.astype(float).reindex(index=pd.DatetimeIndex(sorted(pb.index)))
         result = 1.0 / pb.replace(0.0, np.nan)
         return result.loc[ctx.start_date:]

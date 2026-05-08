@@ -793,6 +793,7 @@ def run_eval(run_id: str, body: dict) -> None:
         # --- neutralization ---
         neut_payload = None
         neut_structured = None
+        F_neut = None
         if neutralize:
             try:
                 log.info("eval %s: loading market cap + industry for neutralization...", run_id)
@@ -843,16 +844,31 @@ def run_eval(run_id: str, body: dict) -> None:
                     if not spanel.empty:
                         style_panels[sid] = spanel
                         style_display[sid] = sf.display_name
+                    else:
+                        log.warning("Style factor %s returned empty panel, skipping", sid)
                 except Exception as e2:
-                    log.debug("Style factor %s compute failed, skipping: %s", sid, e2)
+                    log.warning("Style factor %s compute failed, skipping: %s", sid, e2)
 
-            if len(style_panels) >= 3:
+            log.info("eval %s: style factors computed: %d/%d succeeded (%s)",
+                     run_id, len(style_panels), len(style_ids),
+                     ", ".join(style_panels.keys()))
+
+            if len(style_panels) >= 2:
                 # Rename keys to display_name for readability in frontend
                 renamed = {style_display.get(k, k): v for k, v in style_panels.items()}
                 attr_svc = AttributionService()
-                attribution = attr_svc.decompose(F, renamed)
-                log.info("Attribution complete for run_id=%s: mean R²=%.4f",
-                         run_id, attribution.r_squared.mean())
+                # Use neutralized factor for attribution when neutralization is enabled,
+                # so the style exposures reflect the residual after removing style effects.
+                F_for_attr = F_neut if neutralize and F_neut is not None and not F_neut.empty else F
+                attribution = attr_svc.decompose(F_for_attr, renamed)
+                log.info("Attribution complete for run_id=%s: mean R²=%.4f, "
+                         "exposures=%d dates×%d styles",
+                         run_id, attribution.r_squared.mean(),
+                         len(attribution.r_squared),
+                         len(attribution.exposures))
+            else:
+                log.warning("eval %s: insufficient style factors (%d/5), "
+                            "skipping attribution. Need at least 2.", run_id, len(style_panels))
         except Exception as e:
             log.warning("Attribution failed for run_id=%s: %s", run_id, e)
 

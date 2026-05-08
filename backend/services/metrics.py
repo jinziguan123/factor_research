@@ -767,6 +767,8 @@ def per_symbol_summary(
     ac = factor_autocorr(factor)
     rows: list[dict] = []
     all_syms = set(ic.index) | set(hr.index) | set(ac.index)
+    if not all_syms:
+        return pd.DataFrame(columns=["ts_ic", "hit_rate", "autocorr", "n_samples", "ic_sign"]).rename_axis("symbol")
     for sym in sorted(all_syms):
         ic_v = ic.get(sym)
         hr_v = hr.get(sym)

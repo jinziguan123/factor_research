@@ -22,6 +22,6 @@ class SizeFactor(BaseFactor):
         mktcap = ctx.data.load_market_cap(ctx.symbols, data_start, data_end)
         if mktcap.empty:
             return pd.DataFrame()
-        mktcap = mktcap.reindex(index=pd.DatetimeIndex(sorted(mktcap.index)))
+        mktcap = mktcap.astype(float).reindex(index=pd.DatetimeIndex(sorted(mktcap.index)))
         result = np.log(mktcap.replace(0.0, np.nan))
         return result.loc[ctx.start_date:]

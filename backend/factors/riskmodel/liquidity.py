@@ -29,7 +29,7 @@ class Liquidity20d(BaseFactor):
             return pd.DataFrame()
 
         volume = volume.astype(float).sort_index()
-        mktcap = mktcap.reindex(index=volume.index, columns=volume.columns)
+        mktcap = mktcap.astype(float).reindex(index=volume.index, columns=volume.columns)
         turnover = volume / mktcap.replace(0.0, np.nan)
         result = turnover.rolling(window=20, min_periods=10).mean()
         return result.loc[ctx.start_date:]
