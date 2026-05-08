@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+import numpy as np
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
@@ -517,3 +518,231 @@ def trigger_sync_akshare_industry(bt: BackgroundTasks) -> dict:
     """从 akshare 同步申万行业分类到 fr_industry_history。"""
     bt.add_task(_run_sync_akshare_industry_safely)
     return ok({"message": "akshare industry sync submitted; see server logs"})
+
+
+# ---------------------------- historical PB + market cap backfill (baostock) ----------------------------
+
+
+class HistoricalBackfillIn(BaseModel):
+    """``POST /api/admin/market_data:backfill_historical`` 请求体。
+
+    使用 baostock 逐股拉取历史 PB（pbMRQ）+ 总市值（close × totalShare），
+    写入 fr_daily_pb / fr_daily_market_cap。长跑任务（~5000 股）。
+    """
+
+    start: date
+    end: date
+
+
+def _symbol_to_baostock(symbol: str) -> str | None:
+    """Convert '000001.SZ' -> 'sz.000001', '600000.SH' -> 'sh.600000'."""
+    parts = symbol.split(".")
+    if len(parts) != 2:
+        return None
+    code, exchange = parts
+    prefix = exchange.lower()
+    if prefix not in ("sz", "sh"):
+        return None
+    return f"{prefix}.{code}"
+
+
+def _safe_float_b(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return f if not (np.isnan(f) or np.isinf(f)) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _run_backfill_historical_safely(start: date, end: date) -> None:
+    try:
+        import pandas as pd
+
+        from backend.storage.mysql_client import mysql_conn
+
+        import baostock as bs  # noqa: PLC0415
+
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT symbol_id, symbol FROM stock_symbol")
+                all_symbols = cur.fetchall()
+
+        # Build list of (symbol_id, baostock_code)
+        symbol_list: list[tuple[int, str]] = []
+        for row in all_symbols:
+            sid = int(row["symbol_id"])
+            bs_code = _symbol_to_baostock(row["symbol"])
+            if bs_code:
+                symbol_list.append((sid, bs_code))
+
+        log.info(
+            "backfill_historical: %d symbols, range %s..%s",
+            len(symbol_list), start, end,
+        )
+
+        lg = bs.login()
+        if lg.error_code != "0":
+            log.error("baostock login failed: %s", lg.error_msg)
+            return
+
+        success = fail = skip = 0
+        batch_size = 100  # commit every N symbols
+
+        mv_batch: list[dict] = []
+        pb_batch: list[dict] = []
+
+        for idx, (sid, bs_code) in enumerate(symbol_list):
+            if idx % 200 == 0:
+                log.info(
+                    "backfill_historical progress: %d/%d (ok=%d fail=%d skip=%d)",
+                    idx, len(symbol_list), success, fail, skip,
+                )
+
+            try:
+                # Step 1: daily PB + close price
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,close,pbMRQ",
+                    start_date=start.isoformat(),
+                    end_date=end.isoformat(),
+                    frequency="d",
+                    adjustflag="3",  # unadjusted
+                )
+                if rs.error_code != "0":
+                    fail += 1
+                    continue
+
+                rows = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
+
+                if not rows:
+                    skip += 1
+                    continue
+
+                df = pd.DataFrame(rows, columns=["date", "close", "pbMRQ"])
+                df["close"] = pd.to_numeric(df["close"], errors="coerce")
+                df["pbMRQ"] = pd.to_numeric(df["pbMRQ"], errors="coerce")
+                df["trade_date"] = pd.to_datetime(df["date"]).dt.date
+
+                # Step 2: get total shares from profit data (quarterly)
+                shares_map: dict[str, float] = {}  # statDate -> totalShare
+                for year in range(start.year, end.year + 1):
+                    for quarter in range(1, 5):
+                        rp = bs.query_profit_data(
+                            code=bs_code, year=year, quarter=quarter
+                        )
+                        if rp.error_code != "0":
+                            continue
+                        while rp.next():
+                            prow = rp.get_row_data()
+                            # fields: code,pubDate,statDate,...,totalShare,liqaShare
+                            ts = _safe_float_b(prow[9])
+                            if ts is not None and ts > 0:
+                                stat_date = prow[2]  # YYYY-MM-DD
+                                pub_date = prow[1]   # YYYY-MM-DD
+                                # Use pubDate as availability date (PIT)
+                                if pub_date:
+                                    shares_map[pub_date] = ts
+
+                # Build daily shares series via forward-fill
+                # Sort by pub_date, then forward-fill onto trade dates
+                if shares_map:
+                    shares_series = pd.Series(shares_map)
+                    shares_series.index = pd.to_datetime(shares_series.index)
+                    shares_series = shares_series.sort_index()
+                    # Reindex to trade dates and forward-fill
+                    trade_dates = pd.to_datetime(df["date"])
+                    df["total_share"] = (
+                        shares_series
+                        .reindex(trade_dates, method="ffill")
+                        .values
+                    )
+                else:
+                    df["total_share"] = np.nan
+
+                # Compute market cap = close * total_share (in yuan)
+                df["total_mv"] = df["close"] * df["total_share"]
+
+                # Build insert rows
+                for _, r in df.iterrows():
+                    td = r["trade_date"]
+                    pb_val = _safe_float_b(r["pbMRQ"])
+                    mv_val = _safe_float_b(r["total_mv"])
+
+                    if pb_val is not None:
+                        pb_batch.append({
+                            "symbol_id": sid, "trade_date": td, "pb": pb_val,
+                        })
+                    if mv_val is not None:
+                        mv_batch.append({
+                            "symbol_id": sid, "trade_date": td,
+                            "total_mv": mv_val, "float_mv": None,
+                        })
+
+                success += 1
+
+            except Exception:
+                fail += 1
+                continue
+
+            # Batch commit
+            if (idx + 1) % batch_size == 0 and (mv_batch or pb_batch):
+                _flush_indicator_batch(mv_batch, pb_batch)
+                mv_batch, pb_batch = [], []
+
+        # Final flush
+        if mv_batch or pb_batch:
+            _flush_indicator_batch(mv_batch, pb_batch)
+
+        bs.logout()
+
+        log.info(
+            "backfill_historical done: success=%d fail=%d skip=%d total=%d",
+            success, fail, skip, len(symbol_list),
+        )
+    except Exception:
+        log.exception("backfill_historical failed")
+
+
+def _flush_indicator_batch(mv_rows: list[dict], pb_rows: list[dict]) -> None:
+    try:
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                if mv_rows:
+                    cur.executemany(
+                        "REPLACE INTO fr_daily_market_cap "
+                        "(symbol_id, trade_date, total_mv, float_mv) "
+                        "VALUES (%(symbol_id)s, %(trade_date)s, %(total_mv)s, %(float_mv)s)",
+                        mv_rows,
+                    )
+                if pb_rows:
+                    cur.executemany(
+                        "REPLACE INTO fr_daily_pb "
+                        "(symbol_id, trade_date, pb) "
+                        "VALUES (%(symbol_id)s, %(trade_date)s, %(pb)s)",
+                        pb_rows,
+                    )
+            c.commit()
+    except Exception:
+        log.exception("backfill_historical db flush failed (%d mv, %d pb)", len(mv_rows), len(pb_rows))
+
+
+@router.post("/market_data:backfill_historical")
+def trigger_backfill_historical(
+    body: HistoricalBackfillIn, bt: BackgroundTasks
+) -> dict:
+    """使用 baostock 批量回填历史 PB + 总市值。
+
+    长跑任务（~5000 股），BackgroundTasks 提交后立即返回，进度看 server log。
+    """
+    if body.start > body.end:
+        raise HTTPException(status_code=400, detail="start must be <= end")
+    bt.add_task(_run_backfill_historical_safely, body.start, body.end)
+    return ok({
+        "message": "historical backfill submitted; see server logs",
+        "start": body.start.isoformat(),
+        "end": body.end.isoformat(),
+    })

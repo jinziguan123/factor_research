@@ -300,21 +300,41 @@ async function handleSyncCalendar() {
 }
 
 // ---- 同步市值 + PB（akshare → fr_daily_market_cap / fr_daily_pb） ----
+const mktDataMode = ref<'daily' | 'historical'>('daily')
 const mktDataDate = ref<number | null>(Date.now())
+const mktDataDateRange = ref<[number, number] | null>(null)
 const mktDataLoading = ref(false)
 const mktDataSuccess = ref(false)
+
+const mktDataModeOptions = [
+  { label: '当日快照（stock_zh_a_spot_em）', value: 'daily' },
+  { label: '历史回填（baostock pbMRQ + totalShare）', value: 'historical' },
+]
 
 async function handleSyncMarketData() {
   mktDataLoading.value = true
   mktDataSuccess.value = false
   try {
-    const payload: { trade_date?: string } = {}
-    if (mktDataDate.value) {
-      payload.trade_date = new Date(mktDataDate.value).toISOString().slice(0, 10)
+    if (mktDataMode.value === 'daily') {
+      const payload: { trade_date?: string } = {}
+      if (mktDataDate.value) {
+        payload.trade_date = new Date(mktDataDate.value).toISOString().slice(0, 10)
+      }
+      await client.post('/admin/market_data:sync', payload)
+      mktDataSuccess.value = true
+      message.success('市值 + PB 当日同步任务已提交到后台')
+    } else {
+      if (!mktDataDateRange.value) {
+        message.warning('请选择回填日期范围')
+        mktDataLoading.value = false
+        return
+      }
+      const start = new Date(mktDataDateRange.value[0]).toISOString().slice(0, 10)
+      const end = new Date(mktDataDateRange.value[1]).toISOString().slice(0, 10)
+      await client.post('/admin/market_data:backfill_historical', { start, end })
+      mktDataSuccess.value = true
+      message.success('历史回填任务已提交到后台（长跑，~5000 股，请耐心等待）')
     }
-    await client.post('/admin/market_data:sync', payload)
-    mktDataSuccess.value = true
-    message.success('市值 + PB 同步任务已提交到后台')
   } catch (e: any) {
     message.error(e?.message || '提交失败')
   } finally {
@@ -522,28 +542,50 @@ async function handleSyncAkshareIndustry() {
     <!-- 同步市值 + PB（akshare → fr_daily_market_cap / fr_daily_pb） -->
     <n-card title="同步市值 + PB（akshare → fr_daily_market_cap / fr_daily_pb）" style="margin-bottom: 16px">
       <n-space vertical>
-        <n-alert type="info" :show-icon="false" style="margin-bottom: 4px">
-          从 akshare 全市场 spot 快照拉取总市值、流通市值和 PB，写入 fr_daily_market_cap 和 fr_daily_pb。
-          日频数据，默认取当日快照；历史回填请分别选日期多次执行。
+        <n-space align="center" :wrap-item="false" style="row-gap: 8px" wrap>
+          <span style="color: #666">模式：</span>
+          <n-select
+            v-model:value="mktDataMode"
+            :options="mktDataModeOptions"
+            style="width: 280px"
+          />
+        </n-space>
+        <n-alert v-if="mktDataMode === 'daily'" type="info" :show-icon="false" style="margin-bottom: 4px">
+          从 akshare 全市场 spot 快照拉取当日总市值、流通市值和 PB。
+        </n-alert>
+        <n-alert v-else type="warning" :show-icon="false" style="margin-bottom: 4px">
+          使用 baostock 逐股拉取历史 PB（pbMRQ）+ 总市值（close × totalShare）。
+          长跑任务（~5000 股），提交后在后台执行，进度看 server log。
         </n-alert>
         <n-space align="center" :wrap-item="false" style="row-gap: 8px" wrap>
-          <span style="color: #666">交易日期：</span>
-          <n-date-picker
-            v-model:value="mktDataDate"
-            type="date"
-            clearable
-            style="width: 200px"
-          />
+          <template v-if="mktDataMode === 'daily'">
+            <span style="color: #666">交易日期：</span>
+            <n-date-picker
+              v-model:value="mktDataDate"
+              type="date"
+              clearable
+              style="width: 200px"
+            />
+          </template>
+          <template v-else>
+            <span style="color: #666">回填范围：</span>
+            <n-date-picker
+              v-model:value="mktDataDateRange"
+              type="daterange"
+              clearable
+              style="width: 320px"
+            />
+          </template>
           <n-button
             type="primary"
             :loading="mktDataLoading"
             @click="handleSyncMarketData"
           >
-            执行同步
+            {{ mktDataMode === 'daily' ? '执行同步' : '开始回填' }}
           </n-button>
         </n-space>
         <n-alert v-if="mktDataSuccess" type="success" closable>
-          市值 + PB 同步任务已提交到后台，请查看服务器日志了解进度
+          任务已提交到后台，请查看服务器日志了解进度
         </n-alert>
       </n-space>
     </n-card>
