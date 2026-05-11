@@ -196,6 +196,17 @@ def _run_sync_baostock_industry_safely() -> None:
         log.exception("sync_baostock_industry failed")
 
 
+def _run_sync_sw_industry_safely() -> None:
+    """BackgroundTasks 回调：Akshare → fr_industry_current.sw_l1/l2/l3。"""
+    try:
+        from backend.adapters.akshare_industry import sync_sw_industry
+
+        result = sync_sw_industry()
+        log.info("sync_sw_industry ok: %s", result)
+    except Exception:  # noqa: BLE001
+        log.exception("sync_sw_industry failed")
+
+
 def _run_sync_baostock_index_constituent_safely(
     start: date | None,
     end: date | None,
@@ -379,6 +390,16 @@ def trigger_sync_baostock_industry(
     _ = body
     bt.add_task(_run_sync_baostock_industry_safely)
     return ok({"message": "baostock industry sync submitted; see server logs"})
+
+
+@router.post("/industry:sync_sw")
+def trigger_sync_sw_industry(bt: BackgroundTasks) -> dict:
+    """从 Akshare 同步申万行业归属到 fr_industry_current.sw_l1/l2/l3。
+
+    耗时约 8-10 分钟（遍历 367 个行业指数成分）。
+    """
+    bt.add_task(_run_sync_sw_industry_safely)
+    return ok({"message": "sw industry sync submitted (~8-10 min); see server logs"})
 
 
 @router.post("/index_constituent:sync_baostock")
