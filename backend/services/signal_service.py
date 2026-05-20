@@ -209,18 +209,21 @@ def compute_signal_window_natural_days(
 ) -> int:
     """signal 场景下，service 层应往前拉多少自然日的"因子值输出窗口"。
 
-    - 单因子 / equal / orthogonal_equal：只需要 ``as_of_date`` 这天的横截面就能
-      取末行 qcut，理论上 0 天就够；给 7 天 buffer 兜节假日。
+    - 单因子：只需要 ``as_of_date`` 这天的横截面就能取末行 qcut，
+      理论上 0 天就够；给 7 天 buffer 兜节假日。
     - ic_weighted：需要历史 IC 序列做加权，至少要 ic_lookback_days 个交易日
       的因子值输出 → 折成 ~1.5× 自然日 + buffer。
+    - equal / orthogonal_equal：分组只用末行，但子因子 IC + 贡献度需要
+      多天截面数据，与 ic_weighted 同理。
 
     注意：因子 ``compute`` 内部会**额外**往前推 ``required_warmup`` 去加载
     底层 K 线，所以最终拉的 K 线窗口 = ``natural_days + max(factor_warmup)``。
     本函数只决定 service 层的"输出窗口"。
     """
-    if method == "ic_weighted":
-        return int(ic_lookback_days * _IC_LOOKBACK_NATURAL_FACTOR) + _MIN_NATURAL_DAYS_BUFFER
-    return _MIN_NATURAL_DAYS_BUFFER
+    if method == "single":
+        return _MIN_NATURAL_DAYS_BUFFER
+    # equal / ic_weighted / orthogonal_equal 都需要子因子 IC，统一用 lookback 窗口
+    return int(ic_lookback_days * _IC_LOOKBACK_NATURAL_FACTOR) + _MIN_NATURAL_DAYS_BUFFER
 
 # spot DataFrame 字段 → factor.load_panel 的 field 参数 映射
 _SPOT_FIELD_BY_PANEL_FIELD = {

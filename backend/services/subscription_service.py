@@ -403,6 +403,8 @@ def prepare_subscription_refresh(
             if run_id_to_reuse:
                 # 复用：UPDATE 同一条 run，重置状态 + 同步最新订阅参数
                 # （订阅可能改了 top_n / refresh_interval 等，run 字段需要同步）
+                # 保留 payload_json / n_holdings_top / n_holdings_bot：
+                # 新一轮计算期间前端仍可展示上一轮结果，compute 完成后自然覆盖。
                 cur.execute(
                     """
                     UPDATE fr_signal_runs
@@ -418,10 +420,7 @@ def prepare_subscription_refresh(
                         progress=0,
                         error_message=NULL,
                         started_at=NULL,
-                        finished_at=NULL,
-                        n_holdings_top=NULL,
-                        n_holdings_bot=NULL,
-                        payload_json=NULL
+                        finished_at=NULL
                     WHERE run_id=%s
                     """,
                     (

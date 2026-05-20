@@ -3,7 +3,7 @@
 设计要点：
 - ``is_trading_day(date)`` 查 MySQL ``fr_trade_calendar``：
   - 周六 / 周日直接 False（无需查库）；
-  - 工作日查表，**无记录 = False**（保守 fail-safe，避免节假日空跑触发限流）。
+  - 工作日查表，无记录时自动从 baostock 补同步该日期，再重新查询。
 - ``determine_phase(now, today_is_trading_day)`` 纯函数：
   - 'idle'         非交易日 / 开盘前 / 午休 / 收盘归档后；
   - 'spot'         9:25-11:30 + 13:00-15:00；
@@ -29,12 +29,31 @@ _SPOT_AFTERNOON_START = time(13, 0)
 _SPOT_AFTERNOON_END = time(15, 0)
 _EOD_ARCHIVE_END = time(15, 30)
 
+# 已尝试过自动同步但仍未覆盖的日期，避免重复触发 baostock 登录
+_auto_synced: set[date] = set()
+
+
+def _auto_sync_calendar(d: date) -> None:
+    """尝试从 baostock 同步 [d, d] 的交易日历，失败静默忽略。"""
+    if d in _auto_synced:
+        return
+    _auto_synced.add(d)
+    try:
+        from backend.adapters.baostock.calendar import sync_calendar
+        from backend.adapters.baostock.client import baostock_session
+
+        with baostock_session():
+            result = sync_calendar(d, d, market="CN")
+        log.info("auto-synced fr_trade_calendar for %s: %s", d, result)
+    except Exception:  # noqa: BLE001
+        log.debug("auto-sync fr_trade_calendar for %s failed", d, exc_info=True)
+
 
 def is_trading_day(d: date) -> bool:
     """A 股 d 是否为交易日。
 
     周末直接 False（节省一次 DB 查询）；工作日查 ``fr_trade_calendar``，
-    无记录视为 False（fail-safe：日历未同步时 worker 不空跑）。
+    无记录时自动从 baostock 补同步该日期再重新查询。
     """
     # weekday(): Monday=0 ... Sunday=6
     if d.weekday() >= 5:
@@ -48,11 +67,18 @@ def is_trading_day(d: date) -> bool:
             )
             row = cur.fetchone()
     if row is None:
-        log.warning(
-            "fr_trade_calendar 缺 %s 的记录；保守视为非交易日，"
-            "请先同步交易日历（admin /api/admin/sync-calendar）",
-            d,
-        )
+        log.info("fr_trade_calendar 缺 %s，尝试自动同步...", d)
+        _auto_sync_calendar(d)
+        with mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT is_open FROM fr_trade_calendar "
+                    "WHERE market='CN' AND trade_date=%s",
+                    (d,),
+                )
+                row = cur.fetchone()
+    if row is None:
+        log.warning("fr_trade_calendar 自动同步后仍缺 %s，保守视为非交易日", d)
         return False
     return int(row["is_open"]) == 1
 

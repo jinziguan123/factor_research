@@ -175,6 +175,11 @@ const isRunning = computed(
   () => run.value?.status === 'pending' || run.value?.status === 'running',
 )
 
+// 是否有上一轮的旧结果（计算中时前端仍可展示）
+const hasStalePayload = computed(
+  () => isRunning.value && !!payload.value?.top?.length,
+)
+
 // ---- 实时刷新进度可视化（仅订阅 active 时渲染） ----
 // 1s tick 的当前时间戳，驱动倒计时 / 相对时间 reactive 更新。
 const nowMs = ref(Date.now())
@@ -660,8 +665,18 @@ const icColumns: DataTableColumns<IcRow> = [
         </span>
       </n-alert>
 
+      <n-alert
+        v-if="hasStalePayload"
+        type="info" size="small" :show-icon="true"
+        style="margin-bottom: 12px"
+      >
+        <span style="font-size: 13px">
+          🔄 新一轮计算进行中，以下为上一轮结果（计算完成后自动更新）
+        </span>
+      </n-alert>
+
       <n-grid
-        v-if="run?.status === 'success'"
+        v-if="run?.status === 'success' || hasStalePayload"
         :cols="2" :x-gap="16" :y-gap="16"
         responsive="screen" item-responsive
         style="margin-bottom: 16px"
@@ -693,7 +708,7 @@ const icColumns: DataTableColumns<IcRow> = [
       </n-grid>
 
       <n-card
-        v-if="run?.status === 'success' && icRows.length > 0"
+        v-if="(run?.status === 'success' || hasStalePayload) && icRows.length > 0"
         title="子因子 IC + 权重 + 贡献度"
         size="small"
         style="margin-bottom: 16px"

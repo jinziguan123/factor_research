@@ -240,14 +240,21 @@ def negate(body: NegateIn, bt: BackgroundTasks) -> dict:
        ``Neg``、display_name 加"（取负）"、hypothesis 加"已取负"前缀、
        compute 方法所有 return 包 USub）；
     3. 落盘到 ``backend/factors/llm_generated/<orig>_neg.py``；
-    4. 若 ``auto_eval_pool_id`` 给定，立即派发一次 IC 评估。
+    4. 注册血缘关系：取负因子与原因子同辈（generation 相同），共享 root；
+    5. 若 ``auto_eval_pool_id`` 给定，立即派发一次 IC 评估。
 
     错误：
     - 原因子不存在 / 源码读不到 → 404
-    - 反转后文件已存在（重复点） → 409
     - 反转后代码 AST 校验失败（罕见——原源码用了非白名单特性） → 400
+
+    幂等行为：文件已存在时不再生成，但仍补注册血缘关系并返回 200。
     """
     import inspect
+
+    from backend.services.factor_assistant import (
+        _read_factor_meta_for_evolve,
+        _update_lineage as _update_lineage_fn,
+    )
 
     reg = FactorRegistry()
     reg.scan_and_register()
@@ -264,20 +271,45 @@ def negate(body: NegateIn, bt: BackgroundTasks) -> dict:
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"读取原源码失败：{e}") from e
 
+    gen = None
     try:
         gen = negate_factor_save(body.factor_id, orig_code)
+        neg_factor_id = gen.factor_id
     except FactorAssistantError as e:
-        raise HTTPException(status_code=_map_error_to_status(e), detail=str(e)) from e
+        if "已存在" not in str(e):
+            raise HTTPException(status_code=_map_error_to_status(e), detail=str(e)) from e
+        # 文件已存在（重复点反向）：不再生成，但继续补血缘关系
+        neg_factor_id = f"{body.factor_id}_neg"
+
+    # 注册血缘关系：取负因子与原因子同辈，共享 root_factor_id
+    reg.scan_and_register()
+    parent_meta = _read_factor_meta_for_evolve(body.factor_id)
+    parent_generation = parent_meta["generation"]
+    parent_root = parent_meta["root_factor_id"] or body.factor_id
+
+    _update_lineage_fn(
+        factor_id=neg_factor_id,
+        parent_factor_id=body.factor_id,
+        parent_eval_run_id=None,
+        generation=parent_generation,
+        root_factor_id=parent_root,
+    )
 
     auto_eval_run_id: str | None = None
-    if body.auto_eval_pool_id is not None:
+    if body.auto_eval_pool_id is not None and gen is not None:
         auto_eval_run_id = _dispatch_auto_eval(
             gen.factor_id, body.auto_eval_pool_id, gen.default_params, bt,
         )
 
-    return ok(
-        {
-            "factor_id": gen.factor_id,
+    result: dict = {
+        "factor_id": neg_factor_id,
+        "parent_factor_id": body.factor_id,
+        "generation": parent_generation,
+        "root_factor_id": parent_root,
+        "auto_eval_run_id": auto_eval_run_id,
+    }
+    if gen is not None:
+        result.update({
             "display_name": gen.display_name,
             "category": gen.category,
             "description": gen.description,
@@ -285,9 +317,8 @@ def negate(body: NegateIn, bt: BackgroundTasks) -> dict:
             "default_params": gen.default_params,
             "code": gen.code,
             "saved_path": gen.saved_path,
-            "auto_eval_run_id": auto_eval_run_id,
-        }
-    )
+        })
+    return ok(result)
 
 
 # ---------------------------- L2.D 因子进化 ----------------------------
