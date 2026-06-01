@@ -249,10 +249,6 @@ function handleRefresh() {
   refreshKey.value++
 }
 
-watch(freq, () => {
-  // 切 freq 时若数据过旧，立刻触发一次查询，避免"图还停在上个频率"。
-  handleRefresh()
-})
 </script>
 
 <template>

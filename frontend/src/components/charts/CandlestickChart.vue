@@ -140,7 +140,7 @@ function calcVolumeProfile(indices: number[]): VPData | null {
   if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return null
 
   const range = hi - lo
-  const bucketCount = Math.max(20, Math.min(60, Math.round(range / (range * 0.02))))
+  const bucketCount = 25
   const bucketSize = range / bucketCount
   const buckets = new Array<number>(bucketCount).fill(0)
   const bucketColors = new Array<string>(bucketCount).fill(colors.value.up)
