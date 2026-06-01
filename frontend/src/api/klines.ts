@@ -47,6 +47,7 @@ export function useDailyKline(params: MaybeRefOrGetter<KlineQuery | null>) {
     },
     // 切换 symbol / 日期 / adjust 时立刻失效旧缓存，不显示过期数据。
     staleTime: 0,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -65,6 +66,7 @@ export function useMinuteKline(params: MaybeRefOrGetter<KlineQuery | null>) {
       return !!(p && p.symbol)
     },
     staleTime: 0,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -117,5 +119,6 @@ export function useFactorBars(
       return !!(q && q.symbol && fid)
     },
     staleTime: 0,
+    refetchOnWindowFocus: false,
   })
 }

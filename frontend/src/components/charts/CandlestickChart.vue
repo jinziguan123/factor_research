@@ -209,24 +209,19 @@ const option = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
   const layout = FACTOR_LAYOUT[N]
   const vpOn = props.showVolumeProfile
-  const klineRight = vpOn ? '35%' : 60
 
   // ---- grids ----
   const grids: any[] = [
-    { left: 60, right: klineRight, top: '5%', height: layout.klineH + '%' },
-    { left: 60, right: klineRight, top: layout.volTop + '%', height: layout.volH + '%' },
+    { left: 60, right: 60, top: '5%', height: layout.klineH + '%' },
+    { left: 60, right: 60, top: layout.volTop + '%', height: layout.volH + '%' },
   ]
   for (let i = 0; i < N; i++) {
     grids.push({
       left: 60,
-      right: klineRight,
+      right: 60,
       top: (layout.factorTop + i * layout.factorH) + '%',
       height: (layout.factorH - 1) + '%',
     })
-  }
-  // VP grid: right side, same top/height as K-line grid
-  if (vpOn) {
-    grids.push({ left: '68%', right: 20, top: '5%', height: layout.klineH + '%' })
   }
 
   // ---- xAxis ----
@@ -248,11 +243,9 @@ const option = computed(() => {
       axisLine: { show: isLast },
     })
   }
-  const vpGridIndex = 2 + N
-  if (vpOn) {
-    // VP hidden value xAxis (0~1 normalized volume)
-    xAxes.push({ type: 'value', gridIndex: vpGridIndex, show: false, min: 0, max: 1 })
-  }
+  // VP: hidden value xAxis on grid 0, for horizontal bar positioning
+  const vpXAxisIndex = 2 + N
+  xAxes.push({ type: 'value', gridIndex: 0, show: false, min: 0, max: 1 })
 
   // ---- yAxis ----
   const yAxes: any[] = [
@@ -270,25 +263,6 @@ const option = computed(() => {
       gridIndex: 2 + i, scale: true,
       axisLabel: { fontSize: 10 },
       splitLine: { show: false },
-    })
-  }
-  if (vpOn) {
-    // VP y-axis: right-side price scale, aligned to K-line y-axis via same min/max
-    const vp = volumeProfile.value
-    const allHighs = props.ohlc.map(d => d[1])
-    const allLows = props.ohlc.map(d => d[2])
-    const dataMin = Math.min(...allLows)
-    const dataMax = Math.max(...allHighs)
-    const pad = (dataMax - dataMin) * 0.03
-    const priceMin = vp ? vp.priceMin : dataMin
-    const priceMax = vp ? vp.priceMax : dataMax
-    yAxes.push({
-      gridIndex: vpGridIndex,
-      min: Math.min(dataMin - pad, priceMin),
-      max: Math.max(dataMax + pad, priceMax),
-      axisLabel: { fontSize: 10, formatter: (v: number) => v.toFixed(2) },
-      splitLine: { show: false },
-      position: 'right',
     })
   }
 
@@ -325,29 +299,33 @@ const option = computed(() => {
     })
   }
 
-  // Volume profile: dedicated grid on the right side
+  // Volume profile: overlay on K-line grid, same y-axis for perfect price alignment
   if (vpOn && volumeProfile.value) {
     const vp = volumeProfile.value
-    const vpXAxisIndex = xAxes.length - 1
+    const inst = chartRef.value as any
     series.push({
       name: 'VP',
       type: 'custom',
       xAxisIndex: vpXAxisIndex,
-      yAxisIndex: yAxes.length - 1,
+      yAxisIndex: 0,
       data: vp.bars.map(b => [b.width, b.y]),
       silent: true,
       renderItem(params: any, api: any) {
         const price = api.value(1)
         const volRatio = api.value(0)
-        const rightEdge = api.coord([1, price])
-        const leftEdge = api.coord([0, price])
-        const fullWidth = rightEdge[0] - leftEdge[0]
-        const pxWidth = Math.max(0, fullWidth * volRatio)
-        const barPxH = Math.max(1, api.size([0, vp.bucketSize])[1] * 0.85)
+        // 用 K 线 y 轴的网格边界来定位
+        const gridRect = params.coordSys?.x != null ? params.coordSys : null
+        if (!gridRect) return { type: 'group', children: [] }
+        const rightEdgeX = gridRect.x + gridRect.width
+        const pricePixel = inst ? inst.convertToPixel('grid', [0, price]) : null
+        if (!pricePixel) return { type: 'group', children: [] }
+        const barPxH = Math.max(1, (api.size ? api.size([0, vp.bucketSize])[1] : 10) * 0.85)
+        const maxBarWidth = gridRect.width * 0.3
+        const pxWidth = Math.max(0, maxBarWidth * volRatio)
         const bar = vp.bars.find(b => Math.abs(b.y - price) < 0.0001)
         return {
           type: 'rect',
-          shape: { x: rightEdge[0] - pxWidth, y: rightEdge[1] - barPxH / 2, width: pxWidth, height: barPxH },
+          shape: { x: rightEdgeX - pxWidth, y: pricePixel[1] - barPxH / 2, width: pxWidth, height: barPxH },
           style: {
             fill: bar?.color ?? '#5dade2',
             opacity: 0.45,
