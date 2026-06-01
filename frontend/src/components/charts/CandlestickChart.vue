@@ -20,13 +20,15 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { CandlestickChart, BarChart, LineChart } from 'echarts/charts'
+import { CandlestickChart, BarChart, LineChart, CustomChart } from 'echarts/charts'
 import {
   GridComponent,
   TooltipComponent,
   LegendComponent,
   DataZoomComponent,
   AxisPointerComponent,
+  BrushComponent,
+  ToolboxComponent,
 } from 'echarts/components'
 import VChart from 'vue-echarts'
 
@@ -35,11 +37,14 @@ use([
   CandlestickChart,
   BarChart,
   LineChart,
+  CustomChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
   DataZoomComponent,
   AxisPointerComponent,
+  BrushComponent,
+  ToolboxComponent,
 ])
 
 type ColorMode = 'a-share' | 'binance'
@@ -61,9 +66,15 @@ const props = withDefaults(
       dates: string[]
       values: (number | null)[]
     }[]
+    /** 是否显示成交量剖面。由父组件控制。 */
+    showVolumeProfile?: boolean
   }>(),
-  { colorMode: 'a-share', factorRows: () => [] },
+  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false },
 )
+
+const emit = defineEmits<{
+  (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
+}>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
 function fmtPrice(v: number | null | undefined): string {
@@ -111,6 +122,49 @@ const volumeData = computed(() =>
   }),
 )
 
+// ---- Volume Profile (成交量剖面) ----
+interface VPBar { y: number; width: number; color: string }
+interface VPData { bars: VPBar[]; bucketSize: number; priceMin: number; priceMax: number }
+
+const volumeProfile = ref<VPData | null>(null)
+const selectedRange = ref<{ startIdx: number; endIdx: number } | null>(null)
+
+function calcVolumeProfile(indices: number[]): VPData | null {
+  if (indices.length === 0) return null
+  let lo = Infinity, hi = -Infinity
+  for (const i of indices) {
+    const [, h, l] = props.ohlc[i] ?? [0, 0, 0, 0]
+    if (l < lo) lo = l
+    if (h > hi) hi = h
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return null
+
+  const range = hi - lo
+  const bucketCount = Math.max(20, Math.min(60, Math.round(range / (range * 0.02))))
+  const bucketSize = range / bucketCount
+  const buckets = new Array<number>(bucketCount).fill(0)
+  const bucketColors = new Array<string>(bucketCount).fill(colors.value.up)
+
+  for (const i of indices) {
+    const [o, h, l, c] = props.ohlc[i] ?? [0, 0, 0, 0]
+    const v = props.volumes[i] ?? 0
+    const typical = (h + l + c) / 3
+    const bi = Math.min(Math.floor((typical - lo) / bucketSize), bucketCount - 1)
+    buckets[bi] += v
+    if (c < o) bucketColors[bi] = colors.value.down
+  }
+
+  const maxVol = Math.max(...buckets)
+  if (maxVol <= 0) return null
+
+  const bars: VPBar[] = buckets.map((vol, i) => ({
+    y: lo + (i + 0.5) * bucketSize,
+    width: vol / maxVol,  // 归一化到 0-1，由 VP grid 自行缩放
+    color: bucketColors[i],
+  }))
+  return { bars, bucketSize, priceMin: lo, priceMax: hi }
+}
+
 // tooltip.formatter：中文标签 + 两位小数。
 // ECharts 传入的 params 是数组（trigger: 'axis'），一个元素对应一个 series。
 function tooltipFormatter(params: any[]): string {
@@ -154,19 +208,25 @@ function tooltipFormatter(params: any[]): string {
 const option = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
   const layout = FACTOR_LAYOUT[N]
+  const vpOn = props.showVolumeProfile
+  const klineRight = vpOn ? '35%' : 60
 
   // ---- grids ----
   const grids: any[] = [
-    { left: 60, right: 60, top: '5%', height: layout.klineH + '%' },
-    { left: 60, right: 60, top: layout.volTop + '%', height: layout.volH + '%' },
+    { left: 60, right: klineRight, top: '5%', height: layout.klineH + '%' },
+    { left: 60, right: klineRight, top: layout.volTop + '%', height: layout.volH + '%' },
   ]
   for (let i = 0; i < N; i++) {
     grids.push({
       left: 60,
-      right: 60,
+      right: klineRight,
       top: (layout.factorTop + i * layout.factorH) + '%',
       height: (layout.factorH - 1) + '%',
     })
+  }
+  // VP grid: right side, same top/height as K-line grid
+  if (vpOn) {
+    grids.push({ left: '68%', right: 20, top: '5%', height: layout.klineH + '%' })
   }
 
   // ---- xAxis ----
@@ -188,6 +248,11 @@ const option = computed(() => {
       axisLine: { show: isLast },
     })
   }
+  const vpGridIndex = 2 + N
+  if (vpOn) {
+    // VP hidden value xAxis (0~1 normalized volume)
+    xAxes.push({ type: 'value', gridIndex: vpGridIndex, show: false, min: 0, max: 1 })
+  }
 
   // ---- yAxis ----
   const yAxes: any[] = [
@@ -205,6 +270,25 @@ const option = computed(() => {
       gridIndex: 2 + i, scale: true,
       axisLabel: { fontSize: 10 },
       splitLine: { show: false },
+    })
+  }
+  if (vpOn) {
+    // VP y-axis: right-side price scale, aligned to K-line y-axis via same min/max
+    const vp = volumeProfile.value
+    const allHighs = props.ohlc.map(d => d[1])
+    const allLows = props.ohlc.map(d => d[2])
+    const dataMin = Math.min(...allLows)
+    const dataMax = Math.max(...allHighs)
+    const pad = (dataMax - dataMin) * 0.03
+    const priceMin = vp ? vp.priceMin : dataMin
+    const priceMax = vp ? vp.priceMax : dataMax
+    yAxes.push({
+      gridIndex: vpGridIndex,
+      min: Math.min(dataMin - pad, priceMin),
+      max: Math.max(dataMax + pad, priceMax),
+      axisLabel: { fontSize: 10, formatter: (v: number) => v.toFixed(2) },
+      splitLine: { show: false },
+      position: 'right',
     })
   }
 
@@ -241,6 +325,52 @@ const option = computed(() => {
     })
   }
 
+  // Volume profile: dedicated grid on the right side
+  if (vpOn && volumeProfile.value) {
+    const vp = volumeProfile.value
+    const vpXAxisIndex = xAxes.length - 1
+    series.push({
+      name: 'VP',
+      type: 'custom',
+      xAxisIndex: vpXAxisIndex,
+      yAxisIndex: yAxes.length - 1,
+      data: vp.bars.map(b => [b.width, b.y]),
+      silent: true,
+      renderItem(params: any, api: any) {
+        const price = api.value(1)
+        const volRatio = api.value(0)
+        const rightEdge = api.coord([1, price])
+        const leftEdge = api.coord([0, price])
+        const fullWidth = rightEdge[0] - leftEdge[0]
+        const pxWidth = Math.max(0, fullWidth * volRatio)
+        const barPxH = Math.max(1, api.size([0, vp.bucketSize])[1] * 0.85)
+        const bar = vp.bars.find(b => Math.abs(b.y - price) < 0.0001)
+        return {
+          type: 'rect',
+          shape: { x: rightEdge[0] - pxWidth, y: rightEdge[1] - barPxH / 2, width: pxWidth, height: barPxH },
+          style: {
+            fill: bar?.color ?? '#5dade2',
+            opacity: 0.45,
+            stroke: bar?.color ?? '#5dade2',
+            lineWidth: 0.3,
+          },
+        }
+      },
+      z: 5,
+    })
+  }
+
+  // Only include brush when VP toggle is on
+  const brushCfg = vpOn ? {
+    brush: {
+      xAxisIndex: 0,
+      brushStyle: { borderWidth: 1, color: 'rgba(90,140,255,0.08)', borderColor: 'rgba(90,140,255,0.4)' },
+      outOfBrush: { colorAlpha: 0.35 },
+      throttleType: 'debounce',
+      throttleDelay: 200,
+    },
+  } : {}
+
   return {
     animation: false,
     legend: { data: ['K 线', '成交量', ...(props.factorRows ?? []).map(r => r.name)], top: 5 },
@@ -256,10 +386,13 @@ const option = computed(() => {
     grid: grids,
     xAxis: xAxes,
     yAxis: yAxes,
-    dataZoom: [
-      { type: 'inside', xAxisIndex: allXAxisIndices, start: 0, end: 100 },
-      { type: 'slider', xAxisIndex: allXAxisIndices, top: '94%', start: 0, end: 100 },
-    ],
+    dataZoom: vpOn
+      ? [{ type: 'slider', xAxisIndex: allXAxisIndices, top: '94%', start: 0, end: 100 }]
+      : [
+          { type: 'inside', xAxisIndex: allXAxisIndices, start: 0, end: 100 },
+          { type: 'slider', xAxisIndex: allXAxisIndices, top: '94%', start: 0, end: 100 },
+        ],
+    ...brushCfg,
     series,
   }
 })
@@ -268,6 +401,32 @@ const chartHeight = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
   return (500 + N * 65) + 'px'
 })
+
+// ---- Volume Profile brush handler ----
+function onBrushSelected(params: any) {
+  if (!props.showVolumeProfile) return
+  const areas = params?.batch?.[0]?.areas
+  if (!areas || areas.length === 0) {
+    volumeProfile.value = null
+    selectedRange.value = null
+    emit('update:vpData', null)
+    return
+  }
+  const range = areas[0]?.coordRange?.[0]
+  if (!range || range.length < 2) {
+    volumeProfile.value = null
+    selectedRange.value = null
+    emit('update:vpData', null)
+    return
+  }
+  const startIdx = Math.min(range[0], range[1])
+  const endIdx = Math.max(range[0], range[1])
+  const indices: number[] = []
+  for (let i = startIdx; i <= endIdx; i++) indices.push(i)
+  volumeProfile.value = calcVolumeProfile(indices)
+  selectedRange.value = { startIdx, endIdx }
+  emit('update:vpData', { startIdx, endIdx })
+}
 
 // ---- 失焦修复 ----
 // 问题：鼠标悬停在 K 线图上时 alt+tab 切走、再切回来，canvas 会卡住不响应鼠标。
@@ -304,8 +463,26 @@ onBeforeUnmount(() => {
 
 // 颜色切换时 ECharts 会按新 option 重绘，但 tooltip 里残留的旧颜色箭头要顺便清掉。
 watch(() => props.colorMode, () => restoreChart())
+
+// VP 关闭时清除选区和数据
+watch(() => props.showVolumeProfile, (on) => {
+  if (!on) {
+    volumeProfile.value = null
+    selectedRange.value = null
+  }
+  // brush 需要通过 dispatchAction 显式激活
+  const inst = chartRef.value as any
+  if (!inst) return
+  if (on) {
+    setTimeout(() => {
+      inst.dispatchAction?.({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'rect', brushMode: 'single' } })
+    }, 100)
+  } else {
+    inst.dispatchAction?.({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'rect', brushMode: 'clear' } })
+  }
+})
 </script>
 
 <template>
-  <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" />
+  <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" />
 </template>

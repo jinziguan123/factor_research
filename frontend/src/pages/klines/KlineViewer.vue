@@ -162,6 +162,9 @@ function toggleColorMode() {
   colorMode.value = colorMode.value === 'a-share' ? 'binance' : 'a-share'
 }
 
+// 成交量剖面开关
+const showVolumeProfile = ref(false)
+
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
 const dailyRange = ref<[number, number]>([
@@ -333,6 +336,9 @@ watch(freq, () => {
         <n-button quaternary @click="toggleColorMode">
           {{ colorMode === 'a-share' ? '红涨绿跌 (A 股)' : '绿涨红跌 (币圈)' }}
         </n-button>
+        <n-button :type="showVolumeProfile ? 'primary' : 'default'" @click="showVolumeProfile = !showVolumeProfile">
+          VP {{ showVolumeProfile ? 'ON' : 'OFF' }}
+        </n-button>
       </n-space>
     </n-card>
 
@@ -348,6 +354,7 @@ watch(freq, () => {
           :volumes="chartData.volumes"
           :color-mode="colorMode"
           :factor-rows="factorRows"
+          :show-volume-profile="showVolumeProfile"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">
