@@ -1,0 +1,96 @@
+<script setup lang="ts">
+/**
+ * 图形检索记录列表（需求1 by_image 异步任务）。
+ * 列出历史检索任务，可进入详情查看结果、删除、或新建一次检索。
+ * 有 pending/running/aborting 任务时自动轮询刷新列表。
+ */
+import { h, watch, onUnmounted } from 'vue'
+import {
+  NPageHeader, NCard, NButton, NDataTable, NSpace, NPopconfirm,
+  useMessage, type DataTableColumns,
+} from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { usePatternRuns, useDeletePatternRun, type PatternRun } from '@/api/patternSearch'
+import StatusBadge from '@/components/layout/StatusBadge.vue'
+
+const router = useRouter()
+const message = useMessage()
+
+const { data: runs, refetch } = usePatternRuns()
+const del = useDeletePatternRun()
+
+// 有活跃任务时轮询列表。
+let pollTimer: number | null = null
+function maybeStartPolling() {
+  const rows = runs.value ?? []
+  const hasActive = rows.some(r =>
+    r.status === 'pending' || r.status === 'running' || r.status === 'aborting')
+  if (hasActive && pollTimer == null) {
+    pollTimer = window.setInterval(() => { refetch() }, 1500)
+  } else if (!hasActive && pollTimer != null) {
+    clearInterval(pollTimer); pollTimer = null
+  }
+}
+watch(runs, maybeStartPolling, { immediate: true })
+onUnmounted(() => { if (pollTimer != null) clearInterval(pollTimer) })
+
+async function onDelete(runId: string) {
+  try {
+    await del.mutateAsync(runId)
+    message.success('已删除')
+  } catch (e: any) {
+    message.error(e?.message || '删除失败')
+  }
+}
+
+const columns: DataTableColumns<PatternRun> = [
+  {
+    title: 'Run ID', key: 'run_id', width: 110,
+    render: (r) => h('code', { style: 'font-size:12px' }, r.run_id.slice(0, 8)),
+  },
+  { title: '股票池', key: 'pool_id', width: 90, render: (r) => `#${r.pool_id}` },
+  { title: '图数', key: 'num_images', width: 70 },
+  {
+    title: '截图', key: 'image_names', ellipsis: { tooltip: true },
+    render: (r) => (r.image_names ?? []).join('、') || '-',
+  },
+  {
+    title: '状态', key: 'status', width: 140,
+    render: (r) => h(StatusBadge, { status: r.status }),
+  },
+  { title: '进度', key: 'progress', width: 70, render: (r) => `${r.progress}%` },
+  { title: '创建时间', key: 'created_at', width: 180 },
+  {
+    title: '操作', key: 'actions', width: 160,
+    render: (r) => h(NSpace, { size: 8 }, () => [
+      h(NButton, { size: 'small', onClick: () => router.push(`/pattern/runs/${r.run_id}`) }, () => '查看'),
+      h(NPopconfirm, { onPositiveClick: () => onDelete(r.run_id) }, {
+        trigger: () => h(NButton, { size: 'small', type: 'error', tertiary: true }, () => '删除'),
+        default: () => '确认删除这条记录？',
+      }),
+    ]),
+  },
+]
+</script>
+
+<template>
+  <div>
+    <n-page-header title="图形检索记录" style="margin-bottom: 16px">
+      <template #subtitle>截图找相似股票的历史任务。后台异步执行，可随时回来看结果。</template>
+      <template #extra>
+        <n-button type="primary" @click="router.push('/pattern/new')">+ 新建图形检索</n-button>
+      </template>
+    </n-page-header>
+
+    <n-card>
+      <n-data-table
+        :columns="columns"
+        :data="runs ?? []"
+        :bordered="false"
+        :single-line="false"
+        size="small"
+        :row-key="(r: PatternRun) => r.run_id"
+      />
+    </n-card>
+  </div>
+</template>
