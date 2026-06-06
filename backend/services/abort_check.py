@@ -43,6 +43,7 @@ _ABORT_TABLES = {
     "grid_search": "fr_param_sensitivity_runs",
     "wf_backtest": "fr_backtest_runs",
     "composition": "fr_composition_runs",
+    "pattern_search": "fr_pattern_search_runs",
 }
 
 
