@@ -1,0 +1,33 @@
+"""pattern_search 引擎单测：归一化 / 相关系数 / DTW / shape_search 排序。
+
+纯数值，不依赖数据库 / 网络。
+"""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from backend.services.pattern_search import normalize_curve, TARGET_LEN
+
+
+def test_normalize_curve_resamples_to_target_len():
+    out = normalize_curve(np.array([1.0, 2.0, 3.0]))
+    assert out.shape == (TARGET_LEN,)
+
+
+def test_normalize_curve_is_scale_and_level_invariant():
+    # 同形状、不同价位与振幅，z-score 后应几乎相等
+    base = np.linspace(0, 1, 50) ** 2
+    a = normalize_curve(base * 10 + 100)
+    b = normalize_curve(base * 3 + 5)
+    assert np.allclose(a, b, atol=1e-6)
+
+
+def test_normalize_curve_constant_series_returns_zeros():
+    out = normalize_curve(np.full(20, 7.0))
+    assert np.allclose(out, 0.0)
+
+
+def test_normalize_curve_rejects_too_short():
+    with pytest.raises(ValueError):
+        normalize_curve(np.array([1.0]))
