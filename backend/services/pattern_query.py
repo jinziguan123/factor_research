@@ -1,0 +1,89 @@
+"""图形检索的两个查询入口（需求2 by_stock / 需求1 by_image）。
+
+引擎在 pattern_search.py；本模块负责取数、生成候选窗口、组织返回。
+"""
+from __future__ import annotations
+
+from datetime import date
+
+import numpy as np
+import pandas as pd
+
+from backend.services.pattern_search import (
+    Candidate,
+    Match,
+    normalize_curve,
+    shape_search,
+)
+
+DEFAULT_SCALES = [30, 60, 90, 120]
+_HISTORY_START = date(2005, 1, 1)
+
+
+def _match_to_dict(m: Match) -> dict:
+    return {
+        "label": m.label, "score": m.score, "scale": m.scale,
+        "start_date": m.start_date, "end_date": m.end_date, "curve": m.curve,
+    }
+
+
+def _suppress_overlaps(matches: list[Match], min_gap: int = 10) -> list[Match]:
+    """简单 NMS：按分数降序，丢弃与已保留窗口结束日太近的低分项。"""
+    kept: list[Match] = []
+    for m in sorted(matches, key=lambda x: x.score, reverse=True):
+        if all(abs((pd.Timestamp(m.end_date) - pd.Timestamp(k.end_date)).days) > min_gap for k in kept):
+            kept.append(m)
+    return kept
+
+
+def search_by_stock(
+    data, symbol: str,
+    window_start: str | None = None, window_end: str | None = None,
+    scales: list[int] | None = None, top_k: int = 20, step: int = 5,
+) -> dict:
+    """需求2：在 ``symbol`` 自身历史里找与查询窗口相似的图形。"""
+    scales = scales or DEFAULT_SCALES
+    bars = data.load_bars([symbol], _HISTORY_START, date.today(), freq="1d", adjust="qfq")
+    if not bars:
+        return {"query_curve": [], "matches": []}
+    close = next(iter(bars.values()))["close"].dropna()
+    closes = close.to_numpy(dtype=float)
+    dates = [d.strftime("%Y-%m-%d") for d in close.index]
+    n = len(closes)
+    if n < min(scales):
+        return {"query_curve": [], "matches": []}
+
+    # 查询窗口：未指定则取最近 60 日
+    if window_start and window_end:
+        mask = np.asarray(
+            (close.index >= pd.Timestamp(window_start)) & (close.index <= pd.Timestamp(window_end))
+        )
+        q_prices = closes[mask]
+        q_lo = int(np.argmax(mask))
+        q_hi = q_lo + len(q_prices)
+    else:
+        q_prices = closes[-60:]
+        q_lo, q_hi = n - 60, n
+    if len(q_prices) < 2:
+        return {"query_curve": [], "matches": []}
+    query_curve = normalize_curve(q_prices)
+
+    # 候选：各尺度滑窗，排除与查询窗重叠的
+    candidates: list[Candidate] = []
+    for scale in scales:
+        if scale > n:
+            continue
+        for lo in range(0, n - scale + 1, step):
+            hi = lo + scale
+            if not (hi <= q_lo or lo >= q_hi):  # 与查询窗重叠 → 跳过
+                continue
+            candidates.append(Candidate(
+                label=f"{symbol}@{dates[lo]}", prices=closes[lo:hi], scale=scale,
+                start_date=dates[lo], end_date=dates[hi - 1],
+            ))
+    matches = shape_search(query_curve, candidates, top_k=top_k * 3)
+    matches = _suppress_overlaps(matches)[:top_k]
+    return {
+        "query_curve": [round(float(v), 4) for v in query_curve],
+        "matches": [_match_to_dict(m) for m in matches],
+    }
