@@ -33,3 +33,19 @@ def test_by_image_endpoint(monkeypatch):
                        json={"image": "data:image/png;base64,x", "pool_id": 1, "scales": [60], "top_k": 5})
     assert resp.status_code == 200
     assert resp.json()["data"]["matches"][0]["label"] == "AAA.SZ"
+
+
+def test_by_image_endpoint_multi_images(monkeypatch):
+    seen = {}
+
+    def _fake(data, pool_id, images=None, image=None, **kw):
+        seen["images"] = images
+        seen["image"] = image
+        return {"query_curve": [0.0, 1.0], "query_curves": [[0.0, 1.0], [1.0, 0.0]], "matches": []}
+    monkeypatch.setattr(router_mod, "search_by_image", _fake)
+    resp = client.post("/api/pattern_search/by_image",
+                       json={"images": ["data:image/png;base64,a", "data:image/png;base64,b"],
+                             "pool_id": 1, "scales": [60], "top_k": 5})
+    assert resp.status_code == 200
+    assert seen["images"] == ["data:image/png;base64,a", "data:image/png;base64,b"]
+    assert len(resp.json()["data"]["query_curves"]) == 2
