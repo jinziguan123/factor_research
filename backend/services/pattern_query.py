@@ -123,3 +123,41 @@ def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np
         raise ValueError("LLM 返回的折线点不足 2 个")
     ys = np.array([float(p[1]) for p in pts], dtype=float)
     return normalize_curve(ys)
+
+
+def search_by_image(
+    data, image: str, pool_id: int, hint: str | None = None,
+    scales: list[int] | None = None, top_k: int = 20,
+) -> dict:
+    """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。"""
+    scales = scales or DEFAULT_SCALES
+    query_curve = extract_curve_from_image(image, hint=hint)
+    symbols = data.resolve_pool(pool_id)
+    if not symbols:
+        return {"query_curve": [round(float(v), 4) for v in query_curve], "matches": []}
+    bars = data.load_bars(symbols, _HISTORY_START, date.today(), freq="1d", adjust="qfq")
+    candidates: list[Candidate] = []
+    for sym, df in bars.items():
+        close = df["close"].dropna()
+        closes = close.to_numpy(dtype=float)
+        dates = [d.strftime("%Y-%m-%d") for d in close.index]
+        n = len(closes)
+        for scale in scales:
+            if scale > n:
+                continue
+            seg = closes[-scale:]  # 最近窗口
+            candidates.append(Candidate(
+                label=sym, prices=seg, scale=scale,
+                start_date=dates[-scale], end_date=dates[-1],
+            ))
+    matches = shape_search(query_curve, candidates, top_k=top_k * 2)
+    # 同股多尺度只保留最佳
+    best: dict[str, Match] = {}
+    for m in matches:
+        if m.label not in best or m.score > best[m.label].score:
+            best[m.label] = m
+    final = sorted(best.values(), key=lambda x: x.score, reverse=True)[:top_k]
+    return {
+        "query_curve": [round(float(v), 4) for v in query_curve],
+        "matches": [_match_to_dict(m) for m in final],
+    }

@@ -65,3 +65,31 @@ def test_extract_curve_rejects_too_few_points(monkeypatch):
     monkeypatch.setattr(pq2, "_call_openai_compatible", lambda messages, **kw: '{"points": [[0,0.1]]}')
     with pytest.raises(ValueError):
         pq2.extract_curve_from_image("data:image/png;base64,xxx")
+
+
+class _FakePool:
+    def __init__(self, panels):  # panels: dict[symbol, np.ndarray]
+        self._panels = panels
+    def resolve_pool(self, pool_id):
+        return list(self._panels)
+    def load_bars(self, symbols, start, end, freq="1d", adjust="qfq"):
+        out = {}
+        for s in symbols:
+            df = pd.DataFrame({"close": self._panels[s]})
+            df.index = pd.date_range("2024-01-01", periods=len(self._panels[s]), freq="B")
+            df.index.name = "trade_date"
+            out[s] = df
+        return out
+
+
+def test_search_by_image_ranks_similar_pool_member(monkeypatch):
+    arc = np.sin(np.linspace(0, np.pi, 60))
+    panels = {
+        "AAA.SZ": np.tile(arc, 3) * 5 + 100,      # 含圆弧
+        "BBB.SZ": np.linspace(10, 1, 180),         # 单调下跌
+    }
+    monkeypatch.setattr(pq2, "_call_openai_compatible",
+                        lambda messages, **kw: '{"points": ' + str([[i/59, float(v)] for i, v in enumerate(arc)]) + '}')
+    res = pq2.search_by_image(_FakePool(panels), image="data:image/png;base64,x", pool_id=1, scales=[60], top_k=2)
+    assert res["matches"][0]["label"].startswith("AAA")
+    assert len(res["query_curve"]) > 0
