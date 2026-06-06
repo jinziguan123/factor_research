@@ -33,7 +33,11 @@ def _suppress_overlaps(matches: list[Match], min_gap: int = 10) -> list[Match]:
     """简单 NMS：按分数降序，丢弃与已保留窗口结束日太近的低分项。"""
     kept: list[Match] = []
     for m in sorted(matches, key=lambda x: x.score, reverse=True):
-        if all(abs((pd.Timestamp(m.end_date) - pd.Timestamp(k.end_date)).days) > min_gap for k in kept):
+        if m.end_date is None:
+            kept.append(m)  # 无日期无法判重叠，直接保留，避免 NaT 比较把它静默丢弃
+            continue
+        if all(abs((pd.Timestamp(m.end_date) - pd.Timestamp(k.end_date)).days) > min_gap
+               for k in kept if k.end_date is not None):
             kept.append(m)
     return kept
 
@@ -121,7 +125,14 @@ def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np
     pts = obj.get("points", [])
     if len(pts) < 2:
         raise ValueError("LLM 返回的折线点不足 2 个")
+    xs = np.array([float(p[0]) for p in pts], dtype=float)
     ys = np.array([float(p[1]) for p in pts], dtype=float)
+    # 模型给的 x 可能非等距：按 x 排序后重采样到均匀时间网格，避免把时间轴拉伸/压缩。
+    order = np.argsort(xs)
+    xs, ys = xs[order], ys[order]
+    if xs[-1] > xs[0]:
+        grid = np.linspace(xs[0], xs[-1], len(ys))
+        ys = np.interp(grid, xs, ys)
     return normalize_curve(ys)
 
 

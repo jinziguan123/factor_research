@@ -112,6 +112,8 @@ def shape_search(
     """
     if not candidates:
         return []
+    # 精排池至少要能容下 top_k，否则相关系数粗筛会把结果数压在 prefilter_k 以下。
+    prefilter_k = max(prefilter_k, top_k)
     norm = np.vstack([normalize_curve(c.prices) for c in candidates])
     corr = correlation_scores(query_curve, norm)
     k = min(prefilter_k, len(candidates))
