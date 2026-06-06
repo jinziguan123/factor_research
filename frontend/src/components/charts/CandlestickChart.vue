@@ -16,8 +16,15 @@
  *
  * 失焦修复：visibilitychange（alt+tab 回来）时主动 hideTip + resize，
  * 避免 axisPointer 卡在旧坐标、canvas 尺寸错位导致整个图不响应鼠标。
+ *
+ * dataZoom 管理策略：
+ * - dataZoom 不放在 computed option 里，而是通过 dispatchAction 独立管理。
+ * - 原因：option 是 computed，VP 变化会触发整个 option 重算 → vue-echarts setOption
+ *   → ECharts 内部 reset dataZoom → 缩放位置丢失。
+ * - dataZoomRange ref 追踪当前位置，用户操作 slider 时更新，VP 重绘后通过
+ *   dispatchAction 恢复。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { CandlestickChart, BarChart, LineChart, CustomChart } from 'echarts/charts'
@@ -74,7 +81,6 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
-  (e: 'find-similar', payload: { start: string; end: string }): void
 }>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -99,12 +105,12 @@ const colors = computed(() => {
 // All values are percentages; K-line grid top is '5%' (legend space).
 // Gaps: ~2-3% between K-line/volume and volume/first-factor.
 const FACTOR_LAYOUT: Record<number, { klineH: number; volTop: number; volH: number; factorTop: number; factorH: number }> = {
-  0: { klineH: 55, volTop: 62, volH: 15, factorTop: 0, factorH: 0 },
-  1: { klineH: 46, volTop: 54, volH: 13, factorTop: 70, factorH: 18 },
-  2: { klineH: 40, volTop: 48, volH: 11, factorTop: 62, factorH: 13 },
-  3: { klineH: 36, volTop: 44, volH: 10, factorTop: 57, factorH: 10 },
-  4: { klineH: 33, volTop: 41, volH: 9,  factorTop: 53, factorH: 9  },
-  5: { klineH: 30, volTop: 38, volH: 8,  factorTop: 49, factorH: 8  },
+  0: { klineH: 62, volTop: 70, volH: 20, factorTop: 0, factorH: 0 },
+  1: { klineH: 50, volTop: 58, volH: 16, factorTop: 76, factorH: 18 },
+  2: { klineH: 44, volTop: 52, volH: 14, factorTop: 68, factorH: 13 },
+  3: { klineH: 38, volTop: 46, volH: 12, factorTop: 62, factorH: 10 },
+  4: { klineH: 34, volTop: 42, volH: 11, factorTop: 57, factorH: 9  },
+  5: { klineH: 30, volTop: 38, volH: 10, factorTop: 52, factorH: 8  },
 }
 
 // ECharts 要的是 [open, close, low, high]；重排。
@@ -130,23 +136,9 @@ interface VPData { bars: VPBar[]; bucketSize: number; priceMin: number; priceMax
 const volumeProfile = ref<VPData | null>(null)
 const selectedRange = ref<{ startIdx: number; endIdx: number } | null>(null)
 
-// 框选段是否可用于「找相似」：需要有选区且至少 2 个交易日。
-const hasSelection = computed(
-  () => selectedRange.value != null && selectedRange.value.endIdx > selectedRange.value.startIdx,
-)
-
-// 把当前框选段映射成 trade_date（只取日期部分，分钟线 "YYYY-MM-DD HH:MM" → "YYYY-MM-DD"），
-// emit 给父组件去调 by_stock 检索。
-function emitFindSimilar() {
-  const sel = selectedRange.value
-  if (!sel) return
-  const lo = Math.max(0, sel.startIdx)
-  const hi = Math.min(props.categories.length - 1, sel.endIdx)
-  const start = (props.categories[lo] ?? '').split(' ')[0]
-  const end = (props.categories[hi] ?? '').split(' ')[0]
-  if (!start || !end) return
-  emit('find-similar', { start, end })
-}
+// dataZoom 位置追踪：option 里声明 dataZoom 组件（slider 才能渲染），
+// 但 start/end 不写死，由 watch(option) + dispatchAction 在每次重算后恢复。
+const dataZoomRange = ref({ start: 0, end: 100 })
 
 function calcVolumeProfile(indices: number[]): VPData | null {
   if (indices.length === 0) return null
@@ -178,21 +170,19 @@ function calcVolumeProfile(indices: number[]): VPData | null {
 
   const bars: VPBar[] = buckets.map((vol, i) => ({
     y: lo + (i + 0.5) * bucketSize,
-    width: vol / maxVol,  // 归一化到 0-1，由 VP grid 自行缩放
+    width: vol / maxVol,
     color: bucketColors[i],
   }))
   return { bars, bucketSize, priceMin: lo, priceMax: hi }
 }
 
 // tooltip.formatter：中文标签 + 两位小数。
-// ECharts 传入的 params 是数组（trigger: 'axis'），一个元素对应一个 series。
 function tooltipFormatter(params: any[]): string {
   if (!Array.isArray(params) || params.length === 0) return ''
   const axisValue = params[0].axisValue ?? ''
   const lines: string[] = [`<div style="margin-bottom:4px;font-weight:600">${axisValue}</div>`]
   for (const p of params) {
     if (p.seriesType === 'candlestick') {
-      // p.data = [index, open, close, low, high]；调用 ECharts 拿到的 seriesIndex 下的数据
       const raw = p.data ?? []
       const open = raw[1]
       const close = raw[2]
@@ -224,6 +214,7 @@ function tooltipFormatter(params: any[]): string {
   return lines.join('')
 }
 
+// ---- computed option：dataZoom 声明但不含 start/end，由 watch(option) + dispatchAction 恢复位置 ----
 const option = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
   const layout = FACTOR_LAYOUT[N]
@@ -286,7 +277,6 @@ const option = computed(() => {
   }
 
   // ---- series ----
-  const allXAxisIndices = Array.from({ length: 2 + N }, (_, i) => i)
   const series: any[] = [
     {
       name: 'K 线', type: 'candlestick', data: candleData.value,
@@ -332,7 +322,6 @@ const option = computed(() => {
       renderItem(params: any, api: any) {
         const price = api.value(1)
         const volRatio = api.value(0)
-        // 用 K 线 y 轴的网格边界来定位
         const gridRect = params.coordSys?.x != null ? params.coordSys : null
         if (!gridRect) return { type: 'group', children: [] }
         const rightEdgeX = gridRect.x + gridRect.width
@@ -368,6 +357,10 @@ const option = computed(() => {
     },
   } : {}
 
+  // dataZoom 必须声明在 option 里（slider 才能渲染），但 start/end 不影响
+  // 实际位置由 watch(option) + dispatchAction 恢复。
+  const allXAxisIndices = Array.from({ length: 2 + N }, (_, i) => i)
+
   return {
     animation: false,
     legend: { data: ['K 线', '成交量', ...(props.factorRows ?? []).map(r => r.name)], top: 5 },
@@ -384,10 +377,10 @@ const option = computed(() => {
     xAxis: xAxes,
     yAxis: yAxes,
     dataZoom: vpOn
-      ? [{ type: 'slider', xAxisIndex: allXAxisIndices, top: '94%', start: 0, end: 100 }]
+      ? [{ type: 'slider', xAxisIndex: allXAxisIndices, top: '94%' }]
       : [
-          { type: 'inside', xAxisIndex: allXAxisIndices, start: 0, end: 100 },
-          { type: 'slider', xAxisIndex: allXAxisIndices, top: '94%', start: 0, end: 100 },
+          { type: 'inside', xAxisIndex: allXAxisIndices },
+          { type: 'slider', xAxisIndex: allXAxisIndices, top: '94%' },
         ],
     ...brushCfg,
     series,
@@ -396,26 +389,45 @@ const option = computed(() => {
 
 const chartHeight = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
-  return (500 + N * 65) + 'px'
+  return (620 + N * 65) + 'px'
 })
+
+// ---- dataZoom dispatchAction 管理 ----
+const chartRef = ref<InstanceType<typeof VChart> | null>(null)
+
+function getInst() {
+  return chartRef.value as any
+}
+
+/** 通过 dispatchAction 设置 dataZoom（slider + inside） */
+function applyDataZoom(start: number, end: number) {
+  const inst = getInst()
+  if (!inst) return
+  inst.dispatchAction?.({
+    type: 'dataZoom',
+    dataZoomIndex: 0,
+    start,
+    end,
+  })
+}
+
+/** 用户拖动 slider 时记录位置 */
+function onDataZoom(params: any) {
+  const batch = params?.batch
+  if (!batch || batch.length === 0) return
+  const zoom = batch[0]
+  if (zoom?.start != null && zoom?.end != null) {
+    dataZoomRange.value = { start: zoom.start, end: zoom.end }
+  }
+}
 
 // ---- Volume Profile brush handler ----
 function onBrushSelected(params: any) {
   if (!props.showVolumeProfile) return
   const areas = params?.batch?.[0]?.areas
-  if (!areas || areas.length === 0) {
-    volumeProfile.value = null
-    selectedRange.value = null
-    emit('update:vpData', null)
-    return
-  }
+  if (!areas || areas.length === 0) return
   const range = areas[0]?.coordRange?.[0]
-  if (!range || range.length < 2) {
-    volumeProfile.value = null
-    selectedRange.value = null
-    emit('update:vpData', null)
-    return
-  }
+  if (!range || range.length < 2) return
   const startIdx = Math.min(range[0], range[1])
   const endIdx = Math.max(range[0], range[1])
   const indices: number[] = []
@@ -423,22 +435,20 @@ function onBrushSelected(params: any) {
   volumeProfile.value = calcVolumeProfile(indices)
   selectedRange.value = { startIdx, endIdx }
   emit('update:vpData', { startIdx, endIdx })
+  // option 重算后 vue-echarts 会 setOption，可能重置 dataZoom
+  // 用 setTimeout 等 setOption 完成后再恢复
+  setTimeout(() => {
+    applyDataZoom(dataZoomRange.value.start, dataZoomRange.value.end)
+  }, 100)
 }
 
 // ---- 失焦修复 ----
-// 问题：鼠标悬停在 K 线图上时 alt+tab 切走、再切回来，canvas 会卡住不响应鼠标。
-// 根因：浏览器 tab 不可见时 ECharts 的 axisPointer/tooltip 状态没有被清，
-// 重新 visible 后 pointer 仍以"离开前的坐标"驱动，事件流像断了一样。
-// 修复：visibilitychange 变 visible 时主动 hideTip + resize 重建渲染状态。
-const chartRef = ref<InstanceType<typeof VChart> | null>(null)
-
 function restoreChart() {
-  const inst = chartRef.value as any
+  const inst = getInst()
   if (!inst) return
   try {
     inst.dispatchAction?.({ type: 'hideTip' })
     inst.dispatchAction?.({ type: 'updateAxisPointer', currTrigger: 'leave' })
-    // resize 触发一次全量重绘，修复 canvas 丢事件 / 尺寸漂移。
     inst.resize?.()
   } catch {
     // 如果还没挂载就忽略。
@@ -449,9 +459,22 @@ function onVisibilityChange() {
   if (document.visibilityState === 'visible') restoreChart()
 }
 
+// ---- 挂载后初始化 dataZoom ----
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('focus', restoreChart)
+  // 首次挂载后设置 dataZoom（此时 option 已 setOption，dataZoom 不存在，需手动添加）
+  nextTick(() => {
+    const inst = getInst()
+    if (!inst) return
+    // 添加 dataZoom slider
+    inst.dispatchAction?.({
+      type: 'dataZoom',
+      dataZoomIndex: 0,
+      start: 0,
+      end: 100,
+    })
+  })
 })
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange)
@@ -467,8 +490,7 @@ watch(() => props.showVolumeProfile, (on) => {
     volumeProfile.value = null
     selectedRange.value = null
   }
-  // brush 需要通过 dispatchAction 显式激活
-  const inst = chartRef.value as any
+  const inst = getInst()
   if (!inst) return
   if (on) {
     setTimeout(() => {
@@ -478,24 +500,16 @@ watch(() => props.showVolumeProfile, (on) => {
     inst.dispatchAction?.({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'rect', brushMode: 'clear' } })
   }
 })
+
+// option 变化后（VP 添加/移除、数据更新等），恢复 dataZoom 位置
+// vue-echarts 通过 nextTick 异步调 setOption → ECharts 重建 dataZoom 重置到 0-100
+// 用 100ms setTimeout 等 setOption 完成后再 dispatchAction 恢复。
+watch(option, () => {
+  const { start, end } = dataZoomRange.value
+  setTimeout(() => applyDataZoom(start, end), 100)
+})
 </script>
 
 <template>
-  <div class="kline-wrap">
-    <button v-if="hasSelection" class="find-similar-btn" @click="emitFindSimilar">
-      🔍 找相似
-    </button>
-    <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" />
-  </div>
+  <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" @datazoom="onDataZoom" />
 </template>
-
-<style scoped>
-.kline-wrap { position: relative; }
-.find-similar-btn {
-  position: absolute; top: 6px; right: 12px; z-index: 10;
-  padding: 4px 12px; font-size: 13px; cursor: pointer;
-  background: #2080f0; color: #fff; border: none; border-radius: 4px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
-}
-.find-similar-btn:hover { background: #4098fc; }
-</style>
