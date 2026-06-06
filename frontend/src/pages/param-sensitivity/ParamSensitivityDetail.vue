@@ -284,9 +284,10 @@ const gsColumns: DataTableColumns<any> = [
 
 const gsResults = computed<any[]>(() => {
   const raw = run.value?.results ?? []
-  return raw.map((r: any) => ({
+  return raw.map((r: any, i: number) => ({
     ...r,
     params_display: r.params ? JSON.stringify(r.params) : (r.error ?? '-'),
+    __rowKey: i,  // n-data-table 的 row-key 只接收 row，用显式序号保证唯一
   }))
 })
 
@@ -389,7 +390,7 @@ function fmtValues(v: number[] | Record<string, number[]> | null | undefined): s
             :single-line="false"
             size="small"
             :max-height="500"
-            :row-key="(_r: any, idx: number) => idx"
+            :row-key="(row: any) => row.__rowKey"
           />
         </n-card>
       </template>

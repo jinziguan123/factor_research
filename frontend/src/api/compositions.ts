@@ -36,7 +36,7 @@ export interface CompositionRun {
   freq: string
   start_date: string
   end_date: string
-  method: 'equal' | 'ic_weighted' | 'orthogonal_equal'
+  method: 'equal' | 'ic_weighted' | 'orthogonal_equal' | 'ml_lgb'
   factor_items: CompositionFactorItem[]
   n_groups: number
   forward_periods: number[] | string

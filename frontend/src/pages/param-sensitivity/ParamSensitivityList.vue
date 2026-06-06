@@ -76,8 +76,15 @@ const statusOptions = [
 const { lookup: lookupPoolName } = usePoolNameMap()
 
 // values 列可能是数组或 null（老记录），统一格式成 "10 / 20 / 30 / 40" 展示。
-function fmtValues(v: number[] | null | undefined): string {
-  if (!v || !Array.isArray(v) || v.length === 0) return '-'
+function fmtValues(v: number[] | Record<string, number[]> | null | undefined): string {
+  if (!v) return '-'
+  // dict 格式（栅格搜索多参数）：{"window":[5,10,20],"skip":[0,5]}
+  if (!Array.isArray(v)) {
+    const entries = Object.entries(v)
+    if (entries.length === 0) return '-'
+    return entries.map(([k, vals]) => `${k}=[${(vals as number[]).join(', ')}]`).join('  ')
+  }
+  if (v.length === 0) return '-'
   if (v.length <= 6) return v.join(' / ')
   return `${v.slice(0, 5).join(' / ')} … 共 ${v.length} 个`
 }
