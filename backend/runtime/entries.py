@@ -77,3 +77,10 @@ def grid_search_entry(run_id: str, body: dict) -> None:
     from backend.services.grid_search_service import run_grid_search
 
     run_grid_search(run_id, body)
+
+
+def pattern_search_entry(run_id: str, body: dict) -> None:
+    """图形相似度检索（截图找相似股票 by_image）任务入口。"""
+    from backend.services.pattern_search_run_service import run_pattern_search_by_image
+
+    run_pattern_search_by_image(run_id, body)
