@@ -31,3 +31,36 @@ def test_normalize_curve_constant_series_returns_zeros():
 def test_normalize_curve_rejects_too_short():
     with pytest.raises(ValueError):
         normalize_curve(np.array([1.0]))
+
+
+from backend.services.pattern_search import correlation_scores, dtw_similarity
+
+
+def _norm(x):
+    return normalize_curve(np.asarray(x, dtype=float))
+
+
+def test_correlation_identical_is_one():
+    q = _norm(np.linspace(0, 1, 60) ** 2)
+    score = correlation_scores(q, q.reshape(1, -1))[0]
+    assert score == pytest.approx(1.0, abs=1e-6)
+
+
+def test_correlation_inverted_is_negative():
+    base = np.linspace(0, 1, 60) ** 2
+    q = _norm(base)
+    inv = _norm(-base)
+    score = correlation_scores(q, inv.reshape(1, -1))[0]
+    assert score < -0.9
+
+
+def test_dtw_phase_shift_still_high():
+    # 相位平移：相关系数会掉，DTW 应仍判为高度相似
+    n = 128
+    a = np.zeros(n); a[40:60] = np.hanning(20)
+    b = np.zeros(n); b[60:80] = np.hanning(20)
+    qa, qb = _norm(a), _norm(b)
+    corr = correlation_scores(qa, qb.reshape(1, -1))[0]
+    sim = dtw_similarity(qa, qb)
+    assert sim > corr  # DTW 对相位错位更鲁棒
+    assert sim > 0.5
