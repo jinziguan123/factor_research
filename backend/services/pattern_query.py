@@ -16,6 +16,7 @@ from backend.services.pattern_search import (
     Match,
     normalize_curve,
     shape_search,
+    shape_search_multi,
 )
 
 DEFAULT_SCALES = [30, 60, 90, 120]
@@ -26,6 +27,7 @@ def _match_to_dict(m: Match) -> dict:
     return {
         "label": m.label, "score": m.score, "scale": m.scale,
         "start_date": m.start_date, "end_date": m.end_date, "curve": m.curve,
+        "sub_scores": m.sub_scores,
     }
 
 
@@ -137,15 +139,36 @@ def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np
 
 
 def search_by_image(
-    data, image: str, pool_id: int, hint: str | None = None,
-    scales: list[int] | None = None, top_k: int = 20,
+    data, pool_id: int,
+    images: list[str] | None = None, image: str | None = None,
+    hint: str | None = None,
+    scales: list[int] | None = None, top_k: int = 20, agg: str = "min",
 ) -> dict:
-    """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。"""
+    """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。
+
+    支持一张或多张截图：多张时综合成一个查询，要求候选「对每张都像」
+    （``agg="min"`` 交集语义，默认）。``image``/``images`` 二选一，便于兼容旧调用。
+    """
     scales = scales or DEFAULT_SCALES
-    query_curve = extract_curve_from_image(image, hint=hint)
+    # 归一化入参：image 与 images 合并成一个非空列表。
+    imgs = list(images) if images else []
+    if image:
+        imgs.append(image)
+    if not imgs:
+        raise ValueError("至少需要一张截图")
+    query_curves = [extract_curve_from_image(img, hint=hint) for img in imgs]
+    curves_out = [[round(float(v), 4) for v in qc] for qc in query_curves]
+
+    def _empty():
+        return {
+            "query_curve": curves_out[0],  # 兼容单图前端
+            "query_curves": curves_out,
+            "matches": [],
+        }
+
     symbols = data.resolve_pool(pool_id)
     if not symbols:
-        return {"query_curve": [round(float(v), 4) for v in query_curve], "matches": []}
+        return _empty()
     bars = data.load_bars(symbols, _HISTORY_START, date.today(), freq="1d", adjust="qfq")
     candidates: list[Candidate] = []
     for sym, df in bars.items():
@@ -161,7 +184,7 @@ def search_by_image(
                 label=sym, prices=seg, scale=scale,
                 start_date=dates[-scale], end_date=dates[-1],
             ))
-    matches = shape_search(query_curve, candidates, top_k=top_k * 2)
+    matches = shape_search_multi(query_curves, candidates, top_k=top_k * 2, agg=agg)
     # 同股多尺度只保留最佳
     best: dict[str, Match] = {}
     for m in matches:
@@ -169,6 +192,7 @@ def search_by_image(
             best[m.label] = m
     final = sorted(best.values(), key=lambda x: x.score, reverse=True)[:top_k]
     return {
-        "query_curve": [round(float(v), 4) for v in query_curve],
+        "query_curve": curves_out[0],
+        "query_curves": curves_out,
         "matches": [_match_to_dict(m) for m in final],
     }

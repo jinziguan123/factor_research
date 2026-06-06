@@ -93,3 +93,28 @@ def test_search_by_image_ranks_similar_pool_member(monkeypatch):
     res = pq2.search_by_image(_FakePool(panels), image="data:image/png;base64,x", pool_id=1, scales=[60], top_k=2)
     assert res["matches"][0]["label"].startswith("AAA")
     assert len(res["query_curve"]) > 0
+
+
+def test_search_by_image_multi_images_aggregates(monkeypatch):
+    arc = np.sin(np.linspace(0, np.pi, 60))
+    panels = {
+        "AAA.SZ": np.tile(arc, 3) * 5 + 100,      # 含圆弧，对两张图都像
+        "BBB.SZ": np.linspace(10, 1, 180),         # 单调下跌
+    }
+    # 两张截图都被识别成圆弧
+    monkeypatch.setattr(pq2, "_call_openai_compatible",
+                        lambda messages, **kw: '{"points": ' + str([[i/59, float(v)] for i, v in enumerate(arc)]) + '}')
+    res = pq2.search_by_image(
+        _FakePool(panels), images=["data:image/png;base64,a", "data:image/png;base64,b"],
+        pool_id=1, scales=[60], top_k=2,
+    )
+    assert res["matches"][0]["label"].startswith("AAA")
+    # 返回每张图的查询曲线
+    assert len(res["query_curves"]) == 2
+    # 每条匹配带对两张图的分项
+    assert len(res["matches"][0]["sub_scores"]) == 2
+
+
+def test_search_by_image_requires_at_least_one_image():
+    with pytest.raises(ValueError):
+        pq2.search_by_image(_FakePool({}), pool_id=1)

@@ -34,17 +34,20 @@ def post_by_stock(req: ByStockReq) -> dict:
 
 
 class ByImageReq(BaseModel):
-    image: str            # data URI
     pool_id: int
+    images: list[str] | None = None   # 多张 data URI（综合检索）
+    image: str | None = None          # 单张 data URI（兼容旧调用）
     hint: str | None = None
     scales: list[int] | None = None
     top_k: int = 20
+    agg: str = "min"                  # 多图聚合：min=对每张都像 / mean=平均
 
 
 @router.post("/by_image")
 def post_by_image(req: ByImageReq) -> dict:
     res = search_by_image(
-        DataService(), image=req.image, pool_id=req.pool_id,
-        hint=req.hint, scales=req.scales, top_k=req.top_k,
+        DataService(), pool_id=req.pool_id,
+        images=req.images, image=req.image,
+        hint=req.hint, scales=req.scales, top_k=req.top_k, agg=req.agg,
     )
     return ok(res)

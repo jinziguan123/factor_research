@@ -91,6 +91,8 @@ class Match:
     start_date: str | None
     end_date: str | None
     curve: list[float]  # 归一化后下采样的缩略曲线，供前端画 sparkline
+    # 多查询（多截图）检索时，对每条查询曲线的分项相似度；单查询时为空。
+    sub_scores: list[float] = field(default_factory=list)
 
 
 def _downsample(curve: np.ndarray, n: int = 48) -> list[float]:
@@ -135,6 +137,57 @@ def shape_search(
                 start_date=c.start_date,
                 end_date=c.end_date,
                 curve=_downsample(norm[i]),
+            )
+        )
+    return out
+
+
+def shape_search_multi(
+    query_curves: list[np.ndarray],
+    candidates: list[Candidate],
+    top_k: int = 20,
+    prefilter_k: int = 50,
+    agg: str = "min",
+) -> list[Match]:
+    """多查询（多截图）形状检索：要求候选「对每条查询曲线都像」。
+
+    每个候选先对各条 query 算 DTW 相似度（分项），再按 ``agg`` 聚合成总分：
+    - ``"min"``（默认）：取最小分项 = 交集语义，任一条不像总分就低；
+    - ``"mean"``：取平均分项 = 加权语义，更宽松。
+
+    粗筛用「各 query 相关系数的最大值」作并集保留，避免某条 query 把对它弱、
+    但对其它 query 强的候选过早淘汰。返回的 Match 带 ``sub_scores`` 分项。
+    """
+    if not candidates or not query_curves:
+        return []
+    prefilter_k = max(prefilter_k, top_k)
+    norm = np.vstack([normalize_curve(c.prices) for c in candidates])
+    # 粗筛依据：对每条 query 的相关系数取逐候选最大值。
+    corr_max = np.full(len(candidates), -np.inf)
+    for q in query_curves:
+        corr_max = np.maximum(corr_max, correlation_scores(q, norm))
+    k = min(prefilter_k, len(candidates))
+    cand_idx = (
+        np.argpartition(-corr_max, k - 1)[:k] if k < len(candidates) else np.arange(len(candidates))
+    )
+    scored: list[tuple[int, float, list[float]]] = []
+    for i in cand_idx:
+        subs = [dtw_similarity(q, norm[i]) for q in query_curves]
+        total = min(subs) if agg == "min" else float(np.mean(subs))
+        scored.append((int(i), float(total), subs))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    out: list[Match] = []
+    for i, total, subs in scored[:top_k]:
+        c = candidates[i]
+        out.append(
+            Match(
+                label=c.label,
+                score=round(float(total), 4),
+                scale=c.scale,
+                start_date=c.start_date,
+                end_date=c.end_date,
+                curve=_downsample(norm[i]),
+                sub_scores=[round(float(s), 4) for s in subs],
             )
         )
     return out

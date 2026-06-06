@@ -32,6 +32,9 @@ const rows = computed(() => props.matches)
       <div class="meta">
         <div class="label">{{ m.label }}</div>
         <div class="sub">{{ m.start_date }} ~ {{ m.end_date }} · {{ m.scale }}日</div>
+        <div v-if="m.sub_scores && m.sub_scores.length > 1" class="subscores">
+          <span v-for="(s, i) in m.sub_scores" :key="i">图{{ i + 1 }} {{ (s * 100).toFixed(0) }}%</span>
+        </div>
       </div>
       <div class="score">{{ (m.score * 100).toFixed(1) }}%</div>
     </div>
@@ -45,6 +48,7 @@ const rows = computed(() => props.matches)
 .meta { flex: 1; min-width: 0; }
 .label { font-weight: 600; }
 .sub { font-size: 12px; opacity: 0.6; }
+.subscores { font-size: 11px; opacity: 0.55; display: flex; gap: 8px; margin-top: 2px; }
 .score { font-variant-numeric: tabular-nums; font-weight: 700; color: #e6584a; }
 .empty { padding: 24px; text-align: center; opacity: 0.5; }
 </style>
