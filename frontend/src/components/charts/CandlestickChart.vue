@@ -74,6 +74,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
+  (e: 'find-similar', payload: { start: string; end: string }): void
 }>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -128,6 +129,24 @@ interface VPData { bars: VPBar[]; bucketSize: number; priceMin: number; priceMax
 
 const volumeProfile = ref<VPData | null>(null)
 const selectedRange = ref<{ startIdx: number; endIdx: number } | null>(null)
+
+// 框选段是否可用于「找相似」：需要有选区且至少 2 个交易日。
+const hasSelection = computed(
+  () => selectedRange.value != null && selectedRange.value.endIdx > selectedRange.value.startIdx,
+)
+
+// 把当前框选段映射成 trade_date（只取日期部分，分钟线 "YYYY-MM-DD HH:MM" → "YYYY-MM-DD"），
+// emit 给父组件去调 by_stock 检索。
+function emitFindSimilar() {
+  const sel = selectedRange.value
+  if (!sel) return
+  const lo = Math.max(0, sel.startIdx)
+  const hi = Math.min(props.categories.length - 1, sel.endIdx)
+  const start = (props.categories[lo] ?? '').split(' ')[0]
+  const end = (props.categories[hi] ?? '').split(' ')[0]
+  if (!start || !end) return
+  emit('find-similar', { start, end })
+}
 
 function calcVolumeProfile(indices: number[]): VPData | null {
   if (indices.length === 0) return null
@@ -462,5 +481,21 @@ watch(() => props.showVolumeProfile, (on) => {
 </script>
 
 <template>
-  <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" />
+  <div class="kline-wrap">
+    <button v-if="hasSelection" class="find-similar-btn" @click="emitFindSimilar">
+      🔍 找相似
+    </button>
+    <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" />
+  </div>
 </template>
+
+<style scoped>
+.kline-wrap { position: relative; }
+.find-similar-btn {
+  position: absolute; top: 6px; right: 12px; z-index: 10;
+  padding: 4px 12px; font-size: 13px; cursor: pointer;
+  background: #2080f0; color: #fff; border: none; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+.find-similar-btn:hover { background: #4098fc; }
+</style>

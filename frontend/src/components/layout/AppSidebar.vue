@@ -43,6 +43,7 @@ const menuOptions: MenuOption[] = [
     key: 'group-data',
     children: [
       { label: 'K 线查看', key: '/klines' },
+      { label: '图形检索', key: '/pattern' },
       { label: '数据健康度', key: '/data/health' },
       { label: '指数成分', key: '/data/indices' },
       { label: '财报探查', key: '/data/fundamentals/profit' },

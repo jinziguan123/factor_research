@@ -41,6 +41,7 @@ from backend.api.routers import (
     indices,
     metrics_endpoint,
     param_sensitivity,
+    pattern_search,
     pools,
     signal_subscriptions,
     signals,
@@ -345,3 +346,4 @@ app.include_router(indices.router)
 app.include_router(fundamentals.router)
 app.include_router(factor_assistant.router)
 app.include_router(metrics_endpoint.router)
+app.include_router(pattern_search.router)

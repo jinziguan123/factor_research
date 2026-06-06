@@ -5,7 +5,8 @@
  * - 右上角切换复权方式可以直接对比"前复权后"与"原始"的序列差异，方便验证 qfq 是否跑错。
  * - 分钟线自动把默认窗口限制到最近 5 个交易日（后端硬上限 10 个交易日）。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NPageHeader, NCard, NInput, NButton, NSelect, NDatePicker,
   NSpace, NAlert, NSpin, NTag, NDrawer, NDrawerContent,
@@ -13,7 +14,9 @@ import {
 } from 'naive-ui'
 import { useDailyKline, useMinuteKline, useFactorBars, type FactorBarQuery } from '@/api/klines'
 import { useFactors } from '@/api/factors'
+import { useByStockSearch, type PatternResult, type PatternMatch } from '@/api/patternSearch'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
+import MatchResultList from '@/components/pattern/MatchResultList.vue'
 
 const message = useMessage()
 
@@ -249,6 +252,65 @@ function handleRefresh() {
   refreshKey.value++
 }
 
+// --- 图形相似度检索（需求2：个股历史自相似）---
+const similarSearch = useByStockSearch()
+const showSimilarDrawer = ref(false)
+const similarResult = ref<PatternResult | null>(null)
+
+async function onFindSimilar(payload: { start: string; end: string }) {
+  if (!symbol.value.trim()) {
+    message.warning('请输入股票代码')
+    return
+  }
+  try {
+    similarResult.value = await similarSearch.mutateAsync({
+      symbol: symbol.value.trim().toUpperCase(),
+      window_start: payload.start,
+      window_end: payload.end,
+    })
+    showSimilarDrawer.value = true
+    if (similarResult.value.matches.length === 0) {
+      message.info('未找到相似图形')
+    }
+  } catch (e: any) {
+    message.error(e?.message || '检索失败')
+  }
+}
+
+function dateToTs(d: string): number {
+  const [y, m, day] = d.split('-').map(Number)
+  return new Date(y, (m ?? 1) - 1, day ?? 1).getTime()
+}
+
+// 跨股跳转入口：图形检索页带 symbol/start/end query 进来时定位到对应股票与区间。
+const route = useRoute()
+function applyRouteQuery() {
+  const q = route.query
+  const sym = typeof q.symbol === 'string' ? q.symbol : ''
+  if (!sym) return
+  symbol.value = sym.toUpperCase()
+  freq.value = '1d'
+  const start = typeof q.start === 'string' ? q.start : ''
+  const end = typeof q.end === 'string' ? q.end : ''
+  if (start && end) {
+    const DAY = 86_400_000
+    dailyRange.value = [dateToTs(start) - 20 * DAY, dateToTs(end) + 20 * DAY]
+  }
+}
+onMounted(applyRouteQuery)
+// 同一页内 query 变化（已在 /klines 时再次跳转）也要响应。
+watch(() => route.query, applyRouteQuery)
+
+// 点击某条匹配：把日线窗口跳到该历史段（前后各留 20 天上下文）并刷新。
+function jumpToMatch(m: PatternMatch) {
+  if (!m.start_date || !m.end_date) return
+  const DAY = 86_400_000
+  freq.value = '1d'
+  dailyRange.value = [dateToTs(m.start_date) - 20 * DAY, dateToTs(m.end_date) + 20 * DAY]
+  showSimilarDrawer.value = false
+  handleRefresh()
+}
+
 </script>
 
 <template>
@@ -351,12 +413,25 @@ function handleRefresh() {
           :color-mode="colorMode"
           :factor-rows="factorRows"
           :show-volume-profile="showVolumeProfile"
+          @find-similar="onFindSimilar"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">
         暂无数据，请检查股票代码 / 日期区间。
       </n-alert>
     </n-spin>
+
+    <!-- 图形相似度检索结果抽屉 -->
+    <n-drawer v-model:show="showSimilarDrawer" :width="420" placement="right">
+      <n-drawer-content title="相似图形（本股历史）" closable>
+        <template v-if="similarResult">
+          <div style="font-size:12px;opacity:.6;margin-bottom:8px">
+            框选段在 {{ symbol }} 自身历史中的相似走势，按相似度降序。点击跳转到对应区间。
+          </div>
+          <match-result-list :matches="similarResult.matches" @open="jumpToMatch" />
+        </template>
+      </n-drawer-content>
+    </n-drawer>
 
     <!-- Parameter editing drawer -->
     <n-drawer v-model:show="showParamDrawer" :width="360" placement="right">
