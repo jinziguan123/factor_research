@@ -21,3 +21,15 @@ def test_by_stock_endpoint(monkeypatch):
     body = resp.json()
     assert body["code"] == 0
     assert body["data"]["matches"][0]["score"] == 0.95
+
+
+def test_by_image_endpoint(monkeypatch):
+    def _fake(data, image, pool_id, **kw):
+        return {"query_curve": [0.0, 1.0], "matches": [
+            {"label": "AAA.SZ", "score": 0.9, "scale": 60,
+             "start_date": "2024-01-01", "end_date": "2024-03-25", "curve": [0.0, 1.0]}]}
+    monkeypatch.setattr(router_mod, "search_by_image", _fake)
+    resp = client.post("/api/pattern_search/by_image",
+                       json={"image": "data:image/png;base64,x", "pool_id": 1, "scales": [60], "top_k": 5})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["matches"][0]["label"] == "AAA.SZ"
