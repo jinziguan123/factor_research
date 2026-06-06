@@ -249,7 +249,7 @@ CREATE TABLE IF NOT EXISTS `fr_param_sensitivity_runs` (
 CREATE TABLE IF NOT EXISTS `fr_pattern_search_runs` (
   `run_id`        varchar(64)       NOT NULL,
   `pool_id`       bigint unsigned   NOT NULL,
-  `image_names`   varchar(1000)     DEFAULT NULL COMMENT '上传截图文件名 JSON 数组',
+  `image_names`   text COMMENT '上传截图文件名 JSON 数组',
   `num_images`    smallint unsigned NOT NULL DEFAULT 0,
   `hint`          text,
   `scales_json`   varchar(200)      DEFAULT NULL,
