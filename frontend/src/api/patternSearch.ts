@@ -10,9 +10,11 @@ export interface PatternMatch {
   start_date: string | null
   end_date: string | null
   curve: number[]
+  sub_scores?: number[]   // 多图检索时对每张图的分项相似度
 }
 export interface PatternResult {
   query_curve: number[]
+  query_curves?: number[][]  // 多图检索时每张图的查询曲线
   matches: PatternMatch[]
 }
 export interface ByStockReq {
@@ -33,11 +35,13 @@ export function useByStockSearch() {
 }
 
 export interface ByImageReq {
-  image: string
   pool_id: number
+  images?: string[]   // 多张截图（综合检索）
+  image?: string      // 单张（兼容）
   hint?: string
   scales?: number[]
   top_k?: number
+  agg?: 'min' | 'mean'
 }
 export function useByImageSearch() {
   return useMutation({
