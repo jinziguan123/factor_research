@@ -88,3 +88,43 @@ def test_shape_search_ranks_planted_match_first():
 def test_shape_search_empty_candidates():
     q = normalize_curve(np.linspace(0, 1, 30))
     assert shape_search(q, [], top_k=5) == []
+
+
+from backend.services.pattern_search import shape_search_multi
+
+
+def test_shape_search_multi_requires_all_queries_similar():
+    arc = np.sin(np.linspace(0, np.pi, 80))
+    down = np.linspace(1, 0, 80)
+    q_arc = normalize_curve(arc)
+    q_down = normalize_curve(down)
+    candidates = [
+        Candidate(label="arc_only", prices=arc * 5 + 100, scale=80),
+        Candidate(label="down_only", prices=down, scale=80),
+    ]
+    # 两条查询：一条圆弧、一条下跌。min 聚合下，谁都不该拿到高分（无候选同时像两者）。
+    out = shape_search_multi([q_arc, q_down], candidates, top_k=2)
+    assert isinstance(out[0], Match)
+    # 每条结果都带 sub_scores（对每条 query 的分项）
+    assert len(out[0].sub_scores) == 2
+    # min 聚合分 = 两个分项里的较小者
+    assert out[0].score == pytest.approx(min(out[0].sub_scores), abs=1e-6)
+
+
+def test_shape_search_multi_ranks_match_to_all_queries_first():
+    arc = np.sin(np.linspace(0, np.pi, 80))
+    q1 = normalize_curve(arc)
+    q2 = normalize_curve(arc * 2 + 50)  # 同形状不同价位
+    candidates = [
+        Candidate(label="line", prices=np.linspace(0, 1, 80), scale=80),
+        Candidate(label="planted", prices=arc * 3 + 10, scale=80),  # 对两条 query 都像
+    ]
+    out = shape_search_multi([q1, q2], candidates, top_k=2)
+    assert out[0].label == "planted"
+    assert out[0].score > 0.9
+
+
+def test_shape_search_multi_empty():
+    q = normalize_curve(np.linspace(0, 1, 30))
+    assert shape_search_multi([q], [], top_k=5) == []
+    assert shape_search_multi([], [Candidate(label="x", prices=np.linspace(0, 1, 80), scale=80)], top_k=5) == []
