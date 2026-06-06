@@ -4,11 +4,13 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import numpy as np
 import pandas as pd
 
+from backend.services.factor_assistant import _call_openai_compatible
 from backend.services.pattern_search import (
     Candidate,
     Match,
@@ -87,3 +89,37 @@ def search_by_stock(
         "query_curve": [round(float(v), 4) for v in query_curve],
         "matches": [_match_to_dict(m) for m in matches],
     }
+
+
+_EXTRACT_SYSTEM = (
+    "你是金融图表解析助手。用户给一张股票走势截图，请提取其【价格主曲线】的形状，"
+    "输出 JSON：{\"points\": [[x,y], ...], \"trend\": \"一句话趋势描述\"}。"
+    "x 为时间归一化到 [0,1]（从左到右递增），y 为价格归一化到 [0,1]（越高价越大）。"
+    "采样 30~60 个点，覆盖整体轮廓即可。忽略均线、成交量、坐标轴与水印。只输出 JSON。"
+)
+
+
+def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np.ndarray:
+    """调视觉 LLM 把截图提取成归一化折线 → normalize_curve。"""
+    user_text = "请提取这张走势图的价格主曲线。"
+    if hint:
+        user_text += f"\n用户提示（用于纠偏）：{hint}"
+    # chat_completions 协议的图文混合分片
+    messages = [
+        {"role": "system", "content": _EXTRACT_SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": user_text},
+            {"type": "image_url", "image_url": {"url": image_data_uri}},
+        ]},
+    ]
+    raw = _call_openai_compatible(messages)
+    text = raw.strip()
+    if text.startswith("```"):
+        text = "\n".join(text.splitlines()[1:])
+        text = text.rsplit("```", 1)[0]
+    obj = json.loads(text)
+    pts = obj.get("points", [])
+    if len(pts) < 2:
+        raise ValueError("LLM 返回的折线点不足 2 个")
+    ys = np.array([float(p[1]) for p in pts], dtype=float)
+    return normalize_curve(ys)

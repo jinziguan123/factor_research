@@ -47,3 +47,21 @@ def test_search_by_stock_default_window_uses_recent():
     s = _make_series()
     res = pq.search_by_stock(_FakeData(s), symbol="000001.SZ", scales=[60], top_k=3, step=10)
     assert len(res["query_curve"]) > 0
+
+
+from backend.services import pattern_query as pq2
+
+
+def test_extract_curve_from_image_parses_polyline(monkeypatch):
+    # 桩：返回一段归一化折线 JSON
+    fake = '{"points": [[0,0.1],[0.5,0.9],[1.0,0.3]], "trend": "先涨后跌"}'
+    monkeypatch.setattr(pq2, "_call_openai_compatible", lambda messages, **kw: fake)
+    curve = pq2.extract_curve_from_image("data:image/png;base64,xxx", hint="圆弧顶")
+    from backend.services.pattern_search import TARGET_LEN
+    assert curve.shape == (TARGET_LEN,)
+
+
+def test_extract_curve_rejects_too_few_points(monkeypatch):
+    monkeypatch.setattr(pq2, "_call_openai_compatible", lambda messages, **kw: '{"points": [[0,0.1]]}')
+    with pytest.raises(ValueError):
+        pq2.extract_curve_from_image("data:image/png;base64,xxx")
