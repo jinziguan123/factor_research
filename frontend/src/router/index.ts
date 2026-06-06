@@ -25,6 +25,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/signals/new', component: () => import('@/pages/signals/SignalCreate.vue') },
   { path: '/signals/:runId', component: () => import('@/pages/signals/SignalDetail.vue') },
   { path: '/klines', component: () => import('@/pages/klines/KlineViewer.vue') },
+  { path: '/pattern', component: () => import('@/pages/pattern/PatternSearch.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
   { path: '/data/health', component: () => import('@/pages/data/DataHealth.vue') },
   { path: '/data/indices', component: () => import('@/pages/data/IndexBrowser.vue') },

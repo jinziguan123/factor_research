@@ -5,7 +5,8 @@
  * - 右上角切换复权方式可以直接对比"前复权后"与"原始"的序列差异，方便验证 qfq 是否跑错。
  * - 分钟线自动把默认窗口限制到最近 5 个交易日（后端硬上限 10 个交易日）。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   NPageHeader, NCard, NInput, NButton, NSelect, NDatePicker,
   NSpace, NAlert, NSpin, NTag, NDrawer, NDrawerContent,
@@ -280,6 +281,25 @@ function dateToTs(d: string): number {
   const [y, m, day] = d.split('-').map(Number)
   return new Date(y, (m ?? 1) - 1, day ?? 1).getTime()
 }
+
+// 跨股跳转入口：图形检索页带 symbol/start/end query 进来时定位到对应股票与区间。
+const route = useRoute()
+function applyRouteQuery() {
+  const q = route.query
+  const sym = typeof q.symbol === 'string' ? q.symbol : ''
+  if (!sym) return
+  symbol.value = sym.toUpperCase()
+  freq.value = '1d'
+  const start = typeof q.start === 'string' ? q.start : ''
+  const end = typeof q.end === 'string' ? q.end : ''
+  if (start && end) {
+    const DAY = 86_400_000
+    dailyRange.value = [dateToTs(start) - 20 * DAY, dateToTs(end) + 20 * DAY]
+  }
+}
+onMounted(applyRouteQuery)
+// 同一页内 query 变化（已在 /klines 时再次跳转）也要响应。
+watch(() => route.query, applyRouteQuery)
 
 // 点击某条匹配：把日线窗口跳到该历史段（前后各留 20 天上下文）并刷新。
 function jumpToMatch(m: PatternMatch) {
