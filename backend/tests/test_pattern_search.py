@@ -64,3 +64,27 @@ def test_dtw_phase_shift_still_high():
     sim = dtw_similarity(qa, qb)
     assert sim > corr  # DTW 对相位错位更鲁棒
     assert sim > 0.5
+
+
+from backend.services.pattern_search import Candidate, Match, shape_search
+
+
+def test_shape_search_ranks_planted_match_first():
+    target = np.sin(np.linspace(0, np.pi, 80))  # 圆弧顶形状
+    query = normalize_curve(target)
+    rng = np.linspace(0, 1, 80)
+    candidates = [
+        Candidate(label="noise1", prices=np.cumsum(np.ones(80)), scale=80),
+        Candidate(label="line", prices=rng, scale=80),
+        Candidate(label="planted", prices=target * 5 + 100, scale=80),  # 同形状不同价位
+        Candidate(label="vshape", prices=-target, scale=80),
+    ]
+    out = shape_search(query, candidates, top_k=4)
+    assert isinstance(out[0], Match)
+    assert out[0].label == "planted"
+    assert out[0].score > 0.9
+
+
+def test_shape_search_empty_candidates():
+    q = normalize_curve(np.linspace(0, 1, 30))
+    assert shape_search(q, [], top_k=5) == []

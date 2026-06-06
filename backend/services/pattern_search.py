@@ -71,3 +71,68 @@ def dtw_similarity(query: np.ndarray, cand: np.ndarray, band_ratio: float = 0.15
     band = max(1, int(query.shape[0] * band_ratio))
     dist = _dtw_band(query, cand, band)
     return 1.0 / (1.0 + math.sqrt(dist / query.shape[0]))
+
+
+@dataclass
+class Candidate:
+    """一个候选窗口。prices 为原始价格（未归一化）。"""
+    label: str
+    prices: np.ndarray
+    scale: int
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+@dataclass
+class Match:
+    label: str
+    score: float
+    scale: int
+    start_date: str | None
+    end_date: str | None
+    curve: list[float]  # 归一化后下采样的缩略曲线，供前端画 sparkline
+
+
+def _downsample(curve: np.ndarray, n: int = 48) -> list[float]:
+    if curve.shape[0] <= n:
+        return [round(float(v), 4) for v in curve]
+    idx = np.linspace(0, curve.shape[0] - 1, n).astype(int)
+    return [round(float(v), 4) for v in curve[idx]]
+
+
+def shape_search(
+    query_curve: np.ndarray,
+    candidates: list[Candidate],
+    top_k: int = 20,
+    prefilter_k: int = 50,
+) -> list[Match]:
+    """对候选窗口做形状检索：相关系数粗筛 Top-K → DTW 精排 → 取 top_k。
+
+    query_curve 必须已是 normalize_curve 的输出（定长 z-score）。
+    """
+    if not candidates:
+        return []
+    norm = np.vstack([normalize_curve(c.prices) for c in candidates])
+    corr = correlation_scores(query_curve, norm)
+    k = min(prefilter_k, len(candidates))
+    # 取相关系数最高的 k 个进入 DTW 精排（argpartition 比全排序快）
+    cand_idx = np.argpartition(-corr, k - 1)[:k] if k < len(candidates) else np.arange(len(candidates))
+    scored = []
+    for i in cand_idx:
+        sim = dtw_similarity(query_curve, norm[i])
+        scored.append((int(i), sim))
+    scored.sort(key=lambda t: t[1], reverse=True)
+    out: list[Match] = []
+    for i, sim in scored[:top_k]:
+        c = candidates[i]
+        out.append(
+            Match(
+                label=c.label,
+                score=round(float(sim), 4),
+                scale=c.scale,
+                start_date=c.start_date,
+                end_date=c.end_date,
+                curve=_downsample(norm[i]),
+            )
+        )
+    return out
