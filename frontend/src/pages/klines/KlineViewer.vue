@@ -165,8 +165,9 @@ function toggleColorMode() {
   colorMode.value = colorMode.value === 'a-share' ? 'binance' : 'a-share'
 }
 
-// 成交量剖面开关
-const showVolumeProfile = ref(false)
+// 成交量剖面开关（跨页面保持状态）
+const showVolumeProfile = ref(localStorage.getItem('kline_vp_on') === 'true')
+watch(showVolumeProfile, (v) => localStorage.setItem('kline_vp_on', String(v)))
 
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
