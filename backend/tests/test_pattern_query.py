@@ -67,6 +67,48 @@ def test_extract_curve_rejects_too_few_points(monkeypatch):
         pq2.extract_curve_from_image("data:image/png;base64,xxx")
 
 
+def _capture_messages(monkeypatch):
+    """让 _call_openai_compatible 把收到的 messages 录下来，返回桩值。"""
+    seen = {}
+    def _fake(messages, **kw):
+        seen["messages"] = messages
+        return '{"points": [[0,0.1],[1,0.9]]}'
+    monkeypatch.setattr(pq2, "_call_openai_compatible", _fake)
+    return seen
+
+
+def test_extract_curve_encodes_image_for_anthropic(monkeypatch):
+    # 关键回归：anthropic_messages 协议下图片必须是 {"type":"image","source":{base64}}，
+    # 否则图片被服务端丢弃（线上 bug：模型看不到图只能瞎猜）。
+    monkeypatch.setattr(pq2.settings, "openai_api_protocol", "anthropic_messages")
+    seen = _capture_messages(monkeypatch)
+    pq2.extract_curve_from_image("data:image/png;base64,QUJD", hint="圆弧顶")
+    parts = seen["messages"][1]["content"]
+    img = [p for p in parts if p.get("type") == "image"]
+    assert len(img) == 1
+    assert img[0]["source"]["type"] == "base64"
+    assert img[0]["source"]["media_type"] == "image/png"
+    assert img[0]["source"]["data"] == "QUJD"  # 剥掉了 data: 前缀
+
+
+def test_extract_curve_encodes_image_for_responses(monkeypatch):
+    monkeypatch.setattr(pq2.settings, "openai_api_protocol", "responses")
+    seen = _capture_messages(monkeypatch)
+    pq2.extract_curve_from_image("data:image/png;base64,QUJD")
+    parts = seen["messages"][1]["content"]
+    img = [p for p in parts if p.get("type") == "input_image"]
+    assert len(img) == 1 and img[0]["image_url"] == "data:image/png;base64,QUJD"
+
+
+def test_extract_curve_encodes_image_for_chat_completions(monkeypatch):
+    monkeypatch.setattr(pq2.settings, "openai_api_protocol", "chat_completions")
+    seen = _capture_messages(monkeypatch)
+    pq2.extract_curve_from_image("data:image/png;base64,QUJD")
+    parts = seen["messages"][1]["content"]
+    img = [p for p in parts if p.get("type") == "image_url"]
+    assert len(img) == 1 and img[0]["image_url"]["url"] == "data:image/png;base64,QUJD"
+
+
 class _FakePool:
     def __init__(self, panels):  # panels: dict[symbol, np.ndarray]
         self._panels = panels
