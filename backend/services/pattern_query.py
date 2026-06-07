@@ -10,6 +10,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from backend.config import settings
 from backend.services.factor_assistant import _call_openai_compatible
 from backend.services.pattern_search import (
     Candidate,
@@ -105,18 +106,49 @@ _EXTRACT_SYSTEM = (
 )
 
 
+def _image_user_content(text: str, image_data_uri: str, protocol: str) -> list[dict]:
+    """按 LLM 协议构造「文本 + 图片」的 user content 分片。
+
+    三套协议的图片词表完全不同，用错会导致图片被服务端静默丢弃（模型表现为
+    「看不到图」只能瞎猜）。与 factor_assistant._build_user_content 保持一致：
+    - responses：input_text / input_image（image_url 直接给 data URI）
+    - anthropic_messages：text / image（source 用 base64，需剥掉 data: 前缀）
+    - chat_completions（默认）：text / image_url
+    """
+    if protocol == "responses":
+        return [
+            {"type": "input_text", "text": text},
+            {"type": "input_image", "image_url": image_data_uri},
+        ]
+    if protocol == "anthropic_messages":
+        media_type = "image/png"
+        data = image_data_uri
+        if image_data_uri.startswith("data:"):
+            header, b64 = image_data_uri.split(",", 1)
+            if ";" in header:
+                media_type = header.split(":")[1].split(";")[0]
+            data = b64
+        return [
+            {"type": "text", "text": text},
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+        ]
+    # chat_completions
+    return [
+        {"type": "text", "text": text},
+        {"type": "image_url", "image_url": {"url": image_data_uri}},
+    ]
+
+
 def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np.ndarray:
     """调视觉 LLM 把截图提取成归一化折线 → normalize_curve。"""
     user_text = "请提取这张走势图的价格主曲线。"
     if hint:
         user_text += f"\n用户提示（用于纠偏）：{hint}"
-    # chat_completions 协议的图文混合分片
+    # 图片分片格式随 OPENAI_API_PROTOCOL 变化，按协议正确编码，否则图片会被丢弃。
+    proto = (settings.openai_api_protocol or "chat_completions").lower()
     messages = [
         {"role": "system", "content": _EXTRACT_SYSTEM},
-        {"role": "user", "content": [
-            {"type": "text", "text": user_text},
-            {"type": "image_url", "image_url": {"url": image_data_uri}},
-        ]},
+        {"role": "user", "content": _image_user_content(user_text, image_data_uri, proto)},
     ]
     raw = _call_openai_compatible(messages)
     text = raw.strip()
