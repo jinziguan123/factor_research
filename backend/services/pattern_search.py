@@ -102,15 +102,31 @@ def _downsample(curve: np.ndarray, n: int = 48) -> list[float]:
     return [round(float(v), 4) for v in curve[idx]]
 
 
+# 综合评分里 DTW 的权重；剩余给（正）相关系数。
+# 动机：DTW 能靠弯折时间轴把走势差异很大的曲线也对齐成低距离 → 假阳性高分。
+# 相关系数不弯折时间轴，能识别这类"被强行对齐但整体不像"的候选，把它分数压低。
+_DTW_WEIGHT = 0.6
+
+
+def _blend_score(dtw_sim: float, corr: float) -> float:
+    """融合 DTW 相似度与相关系数 → 最终分。
+
+    corr 取 ``max(0, corr)``：负相关（反相形态）不该因 DTW 弯折拿高分。
+    """
+    return _DTW_WEIGHT * dtw_sim + (1.0 - _DTW_WEIGHT) * max(0.0, corr)
+
+
 def shape_search(
     query_curve: np.ndarray,
     candidates: list[Candidate],
     top_k: int = 20,
     prefilter_k: int = 50,
+    min_score: float = 0.0,
 ) -> list[Match]:
-    """对候选窗口做形状检索：相关系数粗筛 Top-K → DTW 精排 → 取 top_k。
+    """对候选窗口做形状检索：相关系数粗筛 Top-K → DTW+相关系数综合精排 → 取 top_k。
 
     query_curve 必须已是 normalize_curve 的输出（定长 z-score）。
+    ``min_score``>0 时丢弃综合分低于阈值的结果（过滤"勉强像"的候选）。
     """
     if not candidates:
         return []
@@ -124,15 +140,18 @@ def shape_search(
     scored = []
     for i in cand_idx:
         sim = dtw_similarity(query_curve, norm[i])
-        scored.append((int(i), sim))
+        score = _blend_score(sim, float(corr[i]))
+        scored.append((int(i), score))
     scored.sort(key=lambda t: t[1], reverse=True)
     out: list[Match] = []
-    for i, sim in scored[:top_k]:
+    for i, score in scored[:top_k]:
+        if score < min_score:
+            continue
         c = candidates[i]
         out.append(
             Match(
                 label=c.label,
-                score=round(float(sim), 4),
+                score=round(float(score), 4),
                 scale=c.scale,
                 start_date=c.start_date,
                 end_date=c.end_date,
@@ -148,6 +167,7 @@ def shape_search_multi(
     top_k: int = 20,
     prefilter_k: int = 50,
     agg: str = "min",
+    min_score: float = 0.0,
 ) -> list[Match]:
     """多查询（多截图）形状检索：要求候选「对每条查询曲线都像」。
 
@@ -162,22 +182,29 @@ def shape_search_multi(
         return []
     prefilter_k = max(prefilter_k, top_k)
     norm = np.vstack([normalize_curve(c.prices) for c in candidates])
-    # 粗筛依据：对每条 query 的相关系数取逐候选最大值。
+    # 每条 query 的相关系数数组；粗筛用逐候选最大值（并集保留）。
+    corr_list = [correlation_scores(q, norm) for q in query_curves]
     corr_max = np.full(len(candidates), -np.inf)
-    for q in query_curves:
-        corr_max = np.maximum(corr_max, correlation_scores(q, norm))
+    for corr in corr_list:
+        corr_max = np.maximum(corr_max, corr)
     k = min(prefilter_k, len(candidates))
     cand_idx = (
         np.argpartition(-corr_max, k - 1)[:k] if k < len(candidates) else np.arange(len(candidates))
     )
     scored: list[tuple[int, float, list[float]]] = []
     for i in cand_idx:
-        subs = [dtw_similarity(q, norm[i]) for q in query_curves]
+        # 每条 query 的分项 = DTW 与该 query 相关系数的综合，压制 DTW 假阳性。
+        subs = [
+            _blend_score(dtw_similarity(q, norm[i]), float(corr_list[qi][i]))
+            for qi, q in enumerate(query_curves)
+        ]
         total = min(subs) if agg == "min" else float(np.mean(subs))
         scored.append((int(i), float(total), subs))
     scored.sort(key=lambda t: t[1], reverse=True)
     out: list[Match] = []
     for i, total, subs in scored[:top_k]:
+        if total < min_score:
+            continue
         c = candidates[i]
         out.append(
             Match(

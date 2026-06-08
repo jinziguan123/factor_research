@@ -49,6 +49,7 @@ def search_by_stock(
     data, symbol: str,
     window_start: str | None = None, window_end: str | None = None,
     scales: list[int] | None = None, top_k: int = 20, step: int = 5,
+    min_score: float = 0.0,
 ) -> dict:
     """需求2：在 ``symbol`` 自身历史里找与查询窗口相似的图形。"""
     scales = scales or DEFAULT_SCALES
@@ -90,7 +91,7 @@ def search_by_stock(
                 label=f"{symbol}@{dates[lo]}", prices=closes[lo:hi], scale=scale,
                 start_date=dates[lo], end_date=dates[hi - 1],
             ))
-    matches = shape_search(query_curve, candidates, top_k=top_k * 3)
+    matches = shape_search(query_curve, candidates, top_k=top_k * 3, min_score=min_score)
     matches = _suppress_overlaps(matches)[:top_k]
     return {
         "query_curve": [round(float(v), 4) for v in query_curve],
@@ -175,6 +176,7 @@ def search_by_image(
     images: list[str] | None = None, image: str | None = None,
     hint: str | None = None,
     scales: list[int] | None = None, top_k: int = 20, agg: str = "min",
+    min_score: float = 0.0,
 ) -> dict:
     """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。
 
@@ -216,7 +218,7 @@ def search_by_image(
                 label=sym, prices=seg, scale=scale,
                 start_date=dates[-scale], end_date=dates[-1],
             ))
-    matches = shape_search_multi(query_curves, candidates, top_k=top_k * 2, agg=agg)
+    matches = shape_search_multi(query_curves, candidates, top_k=top_k * 2, agg=agg, min_score=min_score)
     # 同股多尺度只保留最佳
     best: dict[str, Match] = {}
     for m in matches:

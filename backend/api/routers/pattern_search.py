@@ -38,6 +38,7 @@ class ByStockReq(BaseModel):
     window_end: str | None = None
     scales: list[int] | None = None
     top_k: int = 20
+    min_score: float = 0.0   # 综合相似度阈值，低于此分不返回（0=不过滤）
 
 
 @router.post("/by_stock")
@@ -45,7 +46,7 @@ def post_by_stock(req: ByStockReq) -> dict:
     res = search_by_stock(
         DataService(), symbol=req.symbol,
         window_start=req.window_start, window_end=req.window_end,
-        scales=req.scales, top_k=req.top_k,
+        scales=req.scales, top_k=req.top_k, min_score=req.min_score,
     )
     return ok(res)
 
@@ -62,6 +63,7 @@ class ByImageReq(BaseModel):
     scales: list[int] | None = None
     top_k: int = 20
     agg: str = "min"                  # 多图聚合：min=对每张都像 / mean=平均
+    min_score: float = 0.0            # 综合相似度阈值，低于此分不返回（0=不过滤）
 
 
 @router.post("/by_image")

@@ -128,3 +128,39 @@ def test_shape_search_multi_empty():
     q = normalize_curve(np.linspace(0, 1, 30))
     assert shape_search_multi([q], [], top_k=5) == []
     assert shape_search_multi([], [Candidate(label="x", prices=np.linspace(0, 1, 80), scale=80)], top_k=5) == []
+
+
+from backend.services.pattern_search import _blend_score
+
+
+def test_blend_score_suppresses_negative_correlation():
+    # DTW 分相同，但相关系数为负（反相形态）的综合分必须更低。
+    high = _blend_score(0.8, 0.9)
+    low = _blend_score(0.8, -0.9)
+    assert high > low
+    # 负相关被 clamp 到 0，综合分 = 0.6*0.8
+    assert low == pytest.approx(0.6 * 0.8, abs=1e-9)
+
+
+def test_shape_search_ranks_true_shape_above_inverted():
+    # 反相曲线即使 DTW 距离不大，综合评分也应排在同形曲线之后。
+    target = np.sin(np.linspace(0, np.pi, 80))
+    query = normalize_curve(target)
+    candidates = [
+        Candidate(label="inverted", prices=-target, scale=80),
+        Candidate(label="same", prices=target * 3 + 50, scale=80),
+    ]
+    out = shape_search(query, candidates, top_k=2)
+    assert out[0].label == "same"
+
+
+def test_shape_search_min_score_filters():
+    target = np.sin(np.linspace(0, np.pi, 80))
+    query = normalize_curve(target)
+    candidates = [
+        Candidate(label="same", prices=target * 3 + 50, scale=80),
+        Candidate(label="inverted", prices=-target, scale=80),
+    ]
+    # 阈值很高时只留下高度相似的
+    out = shape_search(query, candidates, top_k=2, min_score=0.8)
+    assert [m.label for m in out] == ["same"]

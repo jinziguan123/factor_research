@@ -7,7 +7,7 @@
 import { computed, ref } from 'vue'
 import {
   NPageHeader, NCard, NSelect, NInput, NButton, NUpload, NSpace,
-  NRadioGroup, NRadioButton, useMessage, type UploadFileInfo,
+  NRadioGroup, NRadioButton, NSlider, useMessage, type UploadFileInfo,
 } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { usePools } from '@/api/pools'
@@ -21,6 +21,7 @@ const files = ref<{ id: string; uri: string; name: string }[]>([])
 const hint = ref('')
 const poolId = ref<number | null>(null)
 const agg = ref<'min' | 'mean'>('min')
+const minScorePct = ref(0)   // 最低相似度百分比，0=不过滤
 
 const { data: pools } = usePools()
 const create = useCreateImageSearch()
@@ -66,6 +67,7 @@ async function run() {
       pool_id: poolId.value,
       hint: hint.value || undefined,
       agg: agg.value,
+      min_score: minScorePct.value > 0 ? minScorePct.value / 100 : undefined,
     })
     message.success('任务已创建，正在后台检索…')
     router.push({ path: `/pattern/runs/${res.run_id}` })
@@ -116,6 +118,10 @@ async function run() {
             <n-radio-button value="mean">平均（宽松）</n-radio-button>
           </n-radio-group>
         </n-space>
+        <div style="max-width: 360px">
+          <span style="font-size: 13px; opacity: 0.7">最低相似度：{{ minScorePct }}%（0=不过滤，调高可只看高度相似的）</span>
+          <n-slider v-model:value="minScorePct" :min="0" :max="90" :step="5" />
+        </div>
         <n-button type="primary" :loading="create.isPending.value" @click="run">
           创建检索任务
         </n-button>

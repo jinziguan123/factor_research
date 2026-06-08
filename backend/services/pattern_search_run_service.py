@@ -81,6 +81,7 @@ def run_pattern_search_by_image(run_id: str, body: dict) -> None:
             scales=body.get("scales"),
             top_k=body.get("top_k", 20),
             agg=body.get("agg", "min"),
+            min_score=body.get("min_score", 0.0),
         )
 
         check_abort("pattern_search", run_id)
