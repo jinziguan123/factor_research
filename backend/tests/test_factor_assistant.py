@@ -857,6 +857,20 @@ def _capture_anthropic_payload(monkeypatch):
     return captured
 
 
+def test_anthropic_payload_always_includes_messages(monkeypatch):
+    """回归：anthropic 请求体必须带上 messages（曾因改 max_tokens 误删导致 400）。"""
+    captured = _capture_anthropic_payload(monkeypatch)
+    monkeypatch.setattr(fa.settings, "openai_max_tokens", None)
+    msgs = [
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+    ]
+    fa._call_anthropic_messages(msgs)
+    # system 抽到顶层，user 必须留在 messages 里（非空）
+    assert captured["payload"]["messages"] == [msgs[1]]
+    assert captured["payload"]["system"] == "你是助手"
+
+
 def test_anthropic_payload_uses_configured_max_tokens(monkeypatch):
     """配置了 OPENAI_MAX_TOKENS 时，anthropic 请求体应带上该值。"""
     captured = _capture_anthropic_payload(monkeypatch)
@@ -864,6 +878,7 @@ def test_anthropic_payload_uses_configured_max_tokens(monkeypatch):
     out = fa._call_anthropic_messages([{"role": "user", "content": "hi"}])
     assert out == "ok"
     assert captured["payload"]["max_tokens"] == 16384
+    assert captured["payload"]["messages"] == [{"role": "user", "content": "hi"}]
 
 
 def test_anthropic_payload_omits_max_tokens_by_default(monkeypatch):
@@ -872,3 +887,4 @@ def test_anthropic_payload_omits_max_tokens_by_default(monkeypatch):
     monkeypatch.setattr(fa.settings, "openai_max_tokens", None)
     fa._call_anthropic_messages([{"role": "user", "content": "hi"}])
     assert "max_tokens" not in captured["payload"]
+    assert captured["payload"]["messages"] == [{"role": "user", "content": "hi"}]

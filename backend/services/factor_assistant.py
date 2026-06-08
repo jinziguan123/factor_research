@@ -479,6 +479,7 @@ def _call_anthropic_messages(messages: list[dict]) -> str:
 
     payload: dict = {
         "model": settings.openai_model,
+        "messages": user_assistant,
         "stream": False,
     }
     # 默认不带 max_tokens，交给服务端默认上限；仅当 OPENAI_MAX_TOKENS 显式配置时才发。
