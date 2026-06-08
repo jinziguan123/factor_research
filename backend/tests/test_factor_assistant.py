@@ -845,8 +845,7 @@ def test_router_maps_existing_file_to_409(tmp_path, monkeypatch):
 # ---------------------------- max_tokens 可配置 ----------------------------
 
 
-def test_anthropic_payload_uses_configured_max_tokens(monkeypatch):
-    """anthropic_messages 协议的 max_tokens 应取 settings.openai_max_tokens（可由 env 配）。"""
+def _capture_anthropic_payload(monkeypatch):
     captured = {}
 
     def _fake_post(url, payload):
@@ -854,9 +853,22 @@ def test_anthropic_payload_uses_configured_max_tokens(monkeypatch):
         return {"content": [{"type": "text", "text": "ok"}]}
 
     monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
-    monkeypatch.setattr(fa.settings, "openai_max_tokens", 16384)
     monkeypatch.setattr(fa, "_post_and_validate", _fake_post)
+    return captured
 
+
+def test_anthropic_payload_uses_configured_max_tokens(monkeypatch):
+    """配置了 OPENAI_MAX_TOKENS 时，anthropic 请求体应带上该值。"""
+    captured = _capture_anthropic_payload(monkeypatch)
+    monkeypatch.setattr(fa.settings, "openai_max_tokens", 16384)
     out = fa._call_anthropic_messages([{"role": "user", "content": "hi"}])
     assert out == "ok"
     assert captured["payload"]["max_tokens"] == 16384
+
+
+def test_anthropic_payload_omits_max_tokens_by_default(monkeypatch):
+    """默认（None）时请求体不带 max_tokens，交给服务端默认上限。"""
+    captured = _capture_anthropic_payload(monkeypatch)
+    monkeypatch.setattr(fa.settings, "openai_max_tokens", None)
+    fa._call_anthropic_messages([{"role": "user", "content": "hi"}])
+    assert "max_tokens" not in captured["payload"]

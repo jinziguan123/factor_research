@@ -479,11 +479,11 @@ def _call_anthropic_messages(messages: list[dict]) -> str:
 
     payload: dict = {
         "model": settings.openai_model,
-        # anthropic 协议 max_tokens 是必填；走 OPENAI_MAX_TOKENS 配置（默认 4096）。
-        # 带 thinking 的推理模型太小会在思考阶段截断、产不出 JSON，可调大。
-        "max_tokens": settings.openai_max_tokens,
         "stream": False,
     }
+    # 默认不带 max_tokens，交给服务端默认上限；仅当 OPENAI_MAX_TOKENS 显式配置时才发。
+    if settings.openai_max_tokens is not None:
+        payload["max_tokens"] = settings.openai_max_tokens
     if system_text:
         payload["system"] = system_text
 
