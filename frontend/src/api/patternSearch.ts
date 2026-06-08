@@ -46,6 +46,7 @@ export interface ByImageReq {
   scales?: number[]
   top_k?: number
   agg?: 'min' | 'mean'
+  min_score?: number   // 综合相似度阈值 0~1，低于此分不返回
 }
 
 export type RunStatus = 'pending' | 'running' | 'success' | 'failed' | 'aborting' | 'aborted'
