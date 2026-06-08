@@ -115,6 +115,10 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     # LLM 调用超时（秒）；设大一点容忍中转偶发 RTT 抖动。
     openai_timeout_s: float = Field(default=60.0, alias="OPENAI_TIMEOUT_S")
+    # 单次响应最大生成 token 数。anthropic_messages 协议必须显式带；带 thinking 的
+    # 推理模型（如 mimo / deepseek-r1）若设太小会在思考阶段就撞上限、产不出 JSON。
+    # 默认 4096 保持历史行为；遇到截断把它调大（如 8192 / 16384）。
+    openai_max_tokens: int = Field(default=4096, alias="OPENAI_MAX_TOKENS")
     # 是否在请求里带 response_format={type: json_object}（chat_completions 协议）
     # / text.format={type: json_object}（responses 协议）。默认 True；少数老代理
     # 不兼容时可手动关掉走 prompt 约束。
