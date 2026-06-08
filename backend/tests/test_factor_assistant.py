@@ -840,3 +840,23 @@ def test_router_maps_existing_file_to_409(tmp_path, monkeypatch):
             json={"description": "又一个测试因子"},
         )
     assert r.status_code == 409
+
+
+# ---------------------------- max_tokens 可配置 ----------------------------
+
+
+def test_anthropic_payload_uses_configured_max_tokens(monkeypatch):
+    """anthropic_messages 协议的 max_tokens 应取 settings.openai_max_tokens（可由 env 配）。"""
+    captured = {}
+
+    def _fake_post(url, payload):
+        captured["payload"] = payload
+        return {"content": [{"type": "text", "text": "ok"}]}
+
+    monkeypatch.setattr(fa.settings, "openai_api_key", "sk-test")
+    monkeypatch.setattr(fa.settings, "openai_max_tokens", 16384)
+    monkeypatch.setattr(fa, "_post_and_validate", _fake_post)
+
+    out = fa._call_anthropic_messages([{"role": "user", "content": "hi"}])
+    assert out == "ok"
+    assert captured["payload"]["max_tokens"] == 16384
