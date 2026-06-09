@@ -67,6 +67,49 @@ def test_extract_curve_rejects_too_few_points(monkeypatch):
         pq2.extract_curve_from_image("data:image/png;base64,xxx")
 
 
+def test_extract_curve_multi_sample_takes_median(monkeypatch):
+    from backend.services.pattern_search import TARGET_LEN
+    monkeypatch.setattr(pq2.settings, "openai_vision_samples", 3)
+    calls = {"n": 0}
+    # 三次采样：两条上升、一条下降（离群）。逐点中位数应贴近上升，离群被压掉。
+    rising = '{"points": ' + str([[i / 9, i / 9] for i in range(10)]) + '}'
+    falling = '{"points": ' + str([[i / 9, 1 - i / 9] for i in range(10)]) + '}'
+
+    def _fake(messages, **kw):
+        calls["n"] += 1
+        return falling if calls["n"] == 2 else rising
+
+    monkeypatch.setattr(pq2, "_call_openai_compatible", _fake)
+    out = pq2.extract_curve_from_image("data:image/png;base64,x")
+    assert calls["n"] == 3              # 真的采样了 3 次
+    assert out.shape == (TARGET_LEN,)
+    # 中位数贴近"上升"形状：末点应明显高于首点
+    assert out[-1] > out[0]
+
+
+def test_extract_curve_multi_sample_tolerates_partial_failures(monkeypatch):
+    from backend.services.pattern_search import TARGET_LEN
+    monkeypatch.setattr(pq2.settings, "openai_vision_samples", 3)
+    calls = {"n": 0}
+
+    def _fake(messages, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return "garbage not json"   # 第一次坏掉
+        return '{"points": [[0,0.1],[0.5,0.9],[1,0.3]]}'
+
+    monkeypatch.setattr(pq2, "_call_openai_compatible", _fake)
+    out = pq2.extract_curve_from_image("data:image/png;base64,x")
+    assert out.shape == (TARGET_LEN,)   # 有成功采样就能出结果
+
+
+def test_extract_curve_multi_sample_all_fail_raises(monkeypatch):
+    monkeypatch.setattr(pq2.settings, "openai_vision_samples", 2)
+    monkeypatch.setattr(pq2, "_call_openai_compatible", lambda messages, **kw: "garbage")
+    with pytest.raises(Exception):
+        pq2.extract_curve_from_image("data:image/png;base64,x")
+
+
 def _capture_messages(monkeypatch):
     """让 _call_openai_compatible 把收到的 messages 录下来，返回桩值。"""
     seen = {}

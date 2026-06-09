@@ -140,13 +140,11 @@ def _image_user_content(text: str, image_data_uri: str, protocol: str) -> list[d
     ]
 
 
-def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np.ndarray:
-    """调视觉 LLM 把截图提取成归一化折线 → normalize_curve。"""
+def _extract_curve_once(image_data_uri: str, hint: str | None, proto: str) -> np.ndarray:
+    """调一次视觉 LLM，把截图提取成归一化折线 → normalize_curve。"""
     user_text = "请提取这张走势图的价格主曲线。"
     if hint:
         user_text += f"\n用户提示（用于纠偏）：{hint}"
-    # 图片分片格式随 OPENAI_API_PROTOCOL 变化，按协议正确编码，否则图片会被丢弃。
-    proto = (settings.openai_api_protocol or "chat_completions").lower()
     messages = [
         {"role": "system", "content": _EXTRACT_SYSTEM},
         {"role": "user", "content": _image_user_content(user_text, image_data_uri, proto)},
@@ -169,6 +167,34 @@ def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np
         grid = np.linspace(xs[0], xs[-1], len(ys))
         ys = np.interp(grid, xs, ys)
     return normalize_curve(ys)
+
+
+def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np.ndarray:
+    """截图 → 归一化折线。
+
+    视觉 LLM 每次识别有随机噪声。``OPENAI_VISION_SAMPLES`` > 1 时对同一张图提取多次、
+    **逐点取中位数**（自一致性），平掉抖动与偶发坏识别；个别采样失败会被跳过，只要有
+    一次成功即可。默认采样 1 次（单次，行为不变）。
+    """
+    # 图片分片格式随 OPENAI_API_PROTOCOL 变化，按协议正确编码，否则图片会被丢弃。
+    proto = (settings.openai_api_protocol or "chat_completions").lower()
+    n = max(1, int(settings.openai_vision_samples or 1))
+    if n == 1:
+        return _extract_curve_once(image_data_uri, hint, proto)
+
+    curves: list[np.ndarray] = []
+    last_err: Exception | None = None
+    for _ in range(n):
+        try:
+            curves.append(_extract_curve_once(image_data_uri, hint, proto))
+        except Exception as e:  # noqa: BLE001 - 单次失败容忍，多数票兜底
+            last_err = e
+    if not curves:
+        # 全部采样都失败：把最后一次错误抛出去，交给上层落 failed 终态。
+        raise last_err if last_err is not None else ValueError("截图提取全部失败")
+    # 逐点中位数后再 z-score 归一，保证 mean≈0/std≈1（下游 corr/DTW 依赖此前提）。
+    median = np.median(np.vstack(curves), axis=0)
+    return normalize_curve(median)
 
 
 def search_by_image(

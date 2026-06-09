@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     # 交给服务端用自己的默认上限——避免给长输出（如因子代码、thinking 模型）
     # 凭空加截断。只有明确遇到需要限制时才在 env 里设一个正整数。
     openai_max_tokens: int | None = Field(default=None, alias="OPENAI_MAX_TOKENS")
+    # 截图→折线提取的「自一致性」采样次数。视觉 LLM 每次识别有随机噪声；设为 N>1
+    # 时对同一张图提取 N 次、逐点取中位数，平掉抖动与偶发坏识别。默认 1（单次，行为不变）。
+    # 代价：每张图 N 倍 LLM 调用。建议 3。
+    openai_vision_samples: int = Field(default=1, alias="OPENAI_VISION_SAMPLES")
     # 是否在请求里带 response_format={type: json_object}（chat_completions 协议）
     # / text.format={type: json_object}（responses 协议）。默认 True；少数老代理
     # 不兼容时可手动关掉走 prompt 约束。
