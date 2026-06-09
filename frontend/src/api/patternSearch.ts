@@ -35,6 +35,25 @@ export function useByStockSearch() {
   })
 }
 
+// 相似K线选股：用一段真实走势在股票池里找走势最像的「其他」股票（同步，无截图/LLM）。
+export interface ByWindowReq {
+  symbol: string
+  pool_id: number
+  window_start?: string
+  window_end?: string
+  scales?: number[]
+  top_k?: number
+  min_score?: number
+}
+export function useByWindowSearch() {
+  return useMutation({
+    mutationFn: async (req: ByWindowReq): Promise<PatternResult> => {
+      const { data } = await client.post('/pattern_search/by_window', req)
+      return data as PatternResult
+    },
+  })
+}
+
 // ---------------------------- 需求1 by_image：异步任务 ----------------------------
 
 export interface ByImageReq {

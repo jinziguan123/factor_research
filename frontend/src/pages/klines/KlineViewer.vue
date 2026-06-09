@@ -6,15 +6,18 @@
  * - 分钟线自动把默认窗口限制到最近 5 个交易日（后端硬上限 10 个交易日）。
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NInput, NButton, NSelect, NDatePicker,
   NSpace, NAlert, NSpin, NTag, NDrawer, NDrawerContent,
-  NForm, NFormItem, NInputNumber, useMessage,
+  NForm, NFormItem, NInputNumber, NTabs, NTabPane, useMessage,
 } from 'naive-ui'
 import { useDailyKline, useMinuteKline, useFactorBars, type FactorBarQuery } from '@/api/klines'
 import { useFactors } from '@/api/factors'
-import { useByStockSearch, type PatternResult, type PatternMatch } from '@/api/patternSearch'
+import { usePools } from '@/api/pools'
+import {
+  useByStockSearch, useByWindowSearch, type PatternResult, type PatternMatch,
+} from '@/api/patternSearch'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
 
@@ -253,16 +256,29 @@ function handleRefresh() {
   refreshKey.value++
 }
 
-// --- 图形相似度检索（需求2：个股历史自相似）---
+// --- 图形相似度检索 ---
+// 框选一段走势后，提供两种检索：
+//   本股历史（by_stock）：在这只股票自己的历史里找相似形态；
+//   股票池选股（by_window）：用这段真实走势，在所选股票池里找走势最像的「别的」股票。
+const router = useRouter()
 const similarSearch = useByStockSearch()
+const windowSearch = useByWindowSearch()
 const showSimilarDrawer = ref(false)
-const similarResult = ref<PatternResult | null>(null)
+const similarResult = ref<PatternResult | null>(null)        // 本股历史
+const windowResult = ref<PatternResult | null>(null)         // 股票池选股
+const brushedWindow = ref<{ start: string; end: string } | null>(null)
+const poolId = ref<number | null>(null)
+const { data: pools } = usePools()
+const poolOptions = () =>
+  (pools.value ?? []).map(p => ({ label: `${p.pool_name} (#${p.pool_id})`, value: p.pool_id }))
 
 async function onFindSimilar(payload: { start: string; end: string }) {
   if (!symbol.value.trim()) {
     message.warning('请输入股票代码')
     return
   }
+  brushedWindow.value = payload
+  windowResult.value = null
   try {
     similarResult.value = await similarSearch.mutateAsync({
       symbol: symbol.value.trim().toUpperCase(),
@@ -271,11 +287,37 @@ async function onFindSimilar(payload: { start: string; end: string }) {
     })
     showSimilarDrawer.value = true
     if (similarResult.value.matches.length === 0) {
-      message.info('未找到相似图形')
+      message.info('本股历史未找到相似图形')
     }
   } catch (e: any) {
     message.error(e?.message || '检索失败')
   }
+}
+
+// 股票池选股：用框选的这段走势，在所选池里找别的相似股票。
+async function runPoolSearch() {
+  if (!brushedWindow.value) { message.warning('请先在 K 线上框选一段走势'); return }
+  if (poolId.value == null) { message.warning('请选择股票池'); return }
+  try {
+    windowResult.value = await windowSearch.mutateAsync({
+      symbol: symbol.value.trim().toUpperCase(),
+      pool_id: poolId.value,
+      window_start: brushedWindow.value.start,
+      window_end: brushedWindow.value.end,
+    })
+    if (windowResult.value.matches.length === 0) message.info('该股票池里没找到相似股票')
+  } catch (e: any) {
+    message.error(e?.message || '检索失败')
+  }
+}
+
+// 跨股跳转：点击池内某只相似股票 → 切到那只股票的对应区间。
+function openPoolMatch(m: PatternMatch) {
+  showSimilarDrawer.value = false
+  router.push({
+    path: '/klines',
+    query: { symbol: m.label, start: m.start_date ?? undefined, end: m.end_date ?? undefined },
+  })
 }
 
 function dateToTs(d: string): number {
@@ -423,14 +465,34 @@ function jumpToMatch(m: PatternMatch) {
     </n-spin>
 
     <!-- 图形相似度检索结果抽屉 -->
-    <n-drawer v-model:show="showSimilarDrawer" :width="420" placement="right">
-      <n-drawer-content title="相似图形（本股历史）" closable>
-        <template v-if="similarResult">
-          <div style="font-size:12px;opacity:.6;margin-bottom:8px">
-            框选段在 {{ symbol }} 自身历史中的相似走势，按相似度降序。点击跳转到对应区间。
-          </div>
-          <match-result-list :matches="similarResult.matches" @open="jumpToMatch" />
-        </template>
+    <n-drawer v-model:show="showSimilarDrawer" :width="440" placement="right">
+      <n-drawer-content title="走势相似检索" closable>
+        <n-tabs type="line" animated>
+          <n-tab-pane name="self" tab="本股历史">
+            <div style="font-size:12px;opacity:.6;margin-bottom:8px">
+              框选段在 {{ symbol }} 自身历史中的相似走势，按相似度降序。点击跳转到对应区间。
+            </div>
+            <match-result-list v-if="similarResult" :matches="similarResult.matches" @open="jumpToMatch" />
+          </n-tab-pane>
+          <n-tab-pane name="pool" tab="股票池选股">
+            <div style="font-size:12px;opacity:.6;margin-bottom:8px">
+              用框选的这段走势，在所选股票池里找走势最像的「其他」股票（前复权、无截图噪声）。
+            </div>
+            <n-space align="center" :size="8" style="margin-bottom:12px">
+              <n-select
+                v-model:value="poolId"
+                :options="poolOptions()"
+                placeholder="选择股票池"
+                filterable
+                style="width: 220px"
+              />
+              <n-button type="primary" size="small" :loading="windowSearch.isPending.value" @click="runPoolSearch">
+                选股
+              </n-button>
+            </n-space>
+            <match-result-list v-if="windowResult" :matches="windowResult.matches" @open="openPoolMatch" />
+          </n-tab-pane>
+        </n-tabs>
       </n-drawer-content>
     </n-drawer>
 
