@@ -75,12 +75,15 @@ const props = withDefaults(
     }[]
     /** 是否显示成交量剖面。由父组件控制。 */
     showVolumeProfile?: boolean
+    /** 框选找相似模式。开启后可在图上拖拽框选一段走势，冒出「找相似」按钮。 */
+    selectMode?: boolean
   }>(),
-  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false },
+  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false },
 )
 
 const emit = defineEmits<{
   (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
+  (e: 'find-similar', payload: { start: string; end: string }): void
 }>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -135,6 +138,23 @@ interface VPData { bars: VPBar[]; bucketSize: number; priceMin: number; priceMax
 
 const volumeProfile = ref<VPData | null>(null)
 const selectedRange = ref<{ startIdx: number; endIdx: number } | null>(null)
+
+// 框选了至少 2 天 → 显示「找相似」按钮。
+const hasSelection = computed(
+  () => selectedRange.value != null && selectedRange.value.endIdx > selectedRange.value.startIdx,
+)
+
+// 把框选段映射成 trade_date（分钟线 "YYYY-MM-DD HH:MM" 取日期部分），emit 给父组件检索。
+function emitFindSimilar() {
+  const sel = selectedRange.value
+  if (!sel) return
+  const lo = Math.max(0, sel.startIdx)
+  const hi = Math.min(props.categories.length - 1, sel.endIdx)
+  const start = (props.categories[lo] ?? '').split(' ')[0]
+  const end = (props.categories[hi] ?? '').split(' ')[0]
+  if (!start || !end) return
+  emit('find-similar', { start, end })
+}
 
 // dataZoom 位置追踪：option 里声明 dataZoom 组件（slider 才能渲染），
 // 但 start/end 不写死，由 watch(option) + dispatchAction 在每次重算后恢复。
@@ -346,8 +366,9 @@ const option = computed(() => {
     })
   }
 
-  // Only include brush when VP toggle is on
-  const brushCfg = vpOn ? {
+  // VP 或框选模式任一开启时启用 brush
+  const brushOn = vpOn || props.selectMode
+  const brushCfg = brushOn ? {
     brush: {
       xAxisIndex: 0,
       brushStyle: { borderWidth: 1, color: 'rgba(90,140,255,0.08)', borderColor: 'rgba(90,140,255,0.4)' },
@@ -423,20 +444,22 @@ function onDataZoom(params: any) {
 
 // ---- Volume Profile brush handler ----
 function onBrushSelected(params: any) {
-  if (!props.showVolumeProfile) return
+  if (!props.showVolumeProfile && !props.selectMode) return
   const areas = params?.batch?.[0]?.areas
   if (!areas || areas.length === 0) return
   const range = areas[0]?.coordRange?.[0]
   if (!range || range.length < 2) return
   const startIdx = Math.min(range[0], range[1])
   const endIdx = Math.max(range[0], range[1])
-  const indices: number[] = []
-  for (let i = startIdx; i <= endIdx; i++) indices.push(i)
-  volumeProfile.value = calcVolumeProfile(indices)
   selectedRange.value = { startIdx, endIdx }
-  emit('update:vpData', { startIdx, endIdx })
-  // option 重算后 vue-echarts 会 setOption，可能重置 dataZoom
-  // 用 setTimeout 等 setOption 完成后再恢复
+  // VP 开启时才算成交量剖面；框选找相似模式只需要 selectedRange。
+  if (props.showVolumeProfile) {
+    const indices: number[] = []
+    for (let i = startIdx; i <= endIdx; i++) indices.push(i)
+    volumeProfile.value = calcVolumeProfile(indices)
+    emit('update:vpData', { startIdx, endIdx })
+  }
+  // option 重算后 vue-echarts 会 setOption，可能重置 dataZoom；等 setOption 完成后再恢复。
   setTimeout(() => {
     applyDataZoom(dataZoomRange.value.start, dataZoomRange.value.end)
   }, 100)
@@ -484,21 +507,23 @@ onBeforeUnmount(() => {
 // 颜色切换时 ECharts 会按新 option 重绘，但 tooltip 里残留的旧颜色箭头要顺便清掉。
 watch(() => props.colorMode, () => restoreChart())
 
-// VP 关闭时清除选区和数据
-watch(() => props.showVolumeProfile, (on) => {
-  if (!on) {
-    volumeProfile.value = null
-    selectedRange.value = null
-  }
+// VP / 框选模式任一开启 → 激活 brush 光标；都关闭 → 清光标与选区。
+function syncBrushCursor() {
   const inst = getInst()
   if (!inst) return
-  if (on) {
-    setTimeout(() => {
-      inst.dispatchAction?.({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'rect', brushMode: 'single' } })
-    }, 100)
-  } else {
-    inst.dispatchAction?.({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'rect', brushMode: 'clear' } })
-  }
+  const on = props.showVolumeProfile || props.selectMode
+  setTimeout(() => {
+    inst.dispatchAction?.({
+      type: 'takeGlobalCursor', key: 'brush',
+      brushOption: on ? { brushType: 'rect', brushMode: 'single' } : { brushType: 'rect', brushMode: 'clear' },
+    })
+  }, 100)
+}
+
+watch([() => props.showVolumeProfile, () => props.selectMode], ([vp, sel]) => {
+  if (!vp) volumeProfile.value = null        // VP 关 → 清成交量剖面叠加
+  if (!vp && !sel) selectedRange.value = null  // 两个都关 → 连选区一起清
+  syncBrushCursor()
 })
 
 // option 变化后（VP 添加/移除、数据更新等），恢复 dataZoom 位置
@@ -511,5 +536,21 @@ watch(option, () => {
 </script>
 
 <template>
-  <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" @datazoom="onDataZoom" />
+  <div class="kline-wrap">
+    <button v-if="hasSelection" class="find-similar-btn" @click="emitFindSimilar">
+      🔍 找相似
+    </button>
+    <v-chart ref="chartRef" :option="option" autoresize :style="{ width: '100%', height: chartHeight }" @brushselected="onBrushSelected" @datazoom="onDataZoom" />
+  </div>
 </template>
+
+<style scoped>
+.kline-wrap { position: relative; }
+.find-similar-btn {
+  position: absolute; top: 6px; right: 12px; z-index: 10;
+  padding: 4px 12px; font-size: 13px; cursor: pointer;
+  background: #2080f0; color: #fff; border: none; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+}
+.find-similar-btn:hover { background: #4098fc; }
+</style>

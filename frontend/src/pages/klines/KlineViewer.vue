@@ -172,6 +172,9 @@ function toggleColorMode() {
 const showVolumeProfile = ref(localStorage.getItem('kline_vp_on') === 'true')
 watch(showVolumeProfile, (v) => localStorage.setItem('kline_vp_on', String(v)))
 
+// 框选找相似模式：开启后可在 K 线上拖拽框选一段走势，图右上角冒出「找相似」按钮。
+const selectMode = ref(false)
+
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
 const dailyRange = ref<[number, number]>([
@@ -440,6 +443,9 @@ function jumpToMatch(m: PatternMatch) {
         <n-button :type="showVolumeProfile ? 'primary' : 'default'" @click="showVolumeProfile = !showVolumeProfile">
           VP {{ showVolumeProfile ? 'ON' : 'OFF' }}
         </n-button>
+        <n-button :type="selectMode ? 'primary' : 'default'" @click="selectMode = !selectMode">
+          🔍 框选找相似 {{ selectMode ? 'ON' : 'OFF' }}
+        </n-button>
       </n-space>
     </n-card>
 
@@ -456,6 +462,7 @@ function jumpToMatch(m: PatternMatch) {
           :color-mode="colorMode"
           :factor-rows="factorRows"
           :show-volume-profile="showVolumeProfile"
+          :select-mode="selectMode"
           @find-similar="onFindSimilar"
         />
       </n-card>
