@@ -200,6 +200,26 @@ def test_search_by_image_multi_images_aggregates(monkeypatch):
     assert len(res["matches"][0]["sub_scores"]) == 2
 
 
+def test_search_by_window_finds_similar_pool_member():
+    arc = np.sin(np.linspace(0, np.pi, 60))
+    panels = {
+        "QQQ.SZ": np.tile(arc, 3) * 4 + 80,   # 查询股，最近 60 日是圆弧
+        "AAA.SZ": np.tile(arc, 3) * 5 + 100,  # 同形（应排第一）
+        "BBB.SZ": np.linspace(10, 1, 180),    # 单调下跌
+    }
+    res = pq2.search_by_window(_FakePool(panels), symbol="QQQ.SZ", pool_id=1, scales=[60], top_k=5)
+    assert len(res["query_curve"]) > 0
+    labels = [m["label"] for m in res["matches"]]
+    assert "QQQ.SZ" not in labels          # 查询自身被排除
+    assert labels[0] == "AAA.SZ"           # 同形态的池内股票排第一
+
+
+def test_search_by_window_empty_pool():
+    arc = np.sin(np.linspace(0, np.pi, 60))
+    res = pq2.search_by_window(_FakePool({"QQQ.SZ": np.tile(arc, 3)}), symbol="QQQ.SZ", pool_id=1, scales=[60])
+    assert res["matches"] == []            # 池里只有自己，排除后无候选
+
+
 def test_search_by_image_requires_at_least_one_image():
     with pytest.raises(ValueError):
         pq2.search_by_image(_FakePool({}), pool_id=1)

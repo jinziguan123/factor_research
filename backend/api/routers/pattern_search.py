@@ -22,7 +22,7 @@ from pydantic import BaseModel
 from backend.api.schemas import ok
 from backend.runtime.entries import pattern_search_entry
 from backend.runtime.task_pool import submit
-from backend.services.pattern_query import search_by_stock
+from backend.services.pattern_query import search_by_stock, search_by_window
 from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
 
@@ -45,6 +45,30 @@ class ByStockReq(BaseModel):
 def post_by_stock(req: ByStockReq) -> dict:
     res = search_by_stock(
         DataService(), symbol=req.symbol,
+        window_start=req.window_start, window_end=req.window_end,
+        scales=req.scales, top_k=req.top_k, min_score=req.min_score,
+    )
+    return ok(res)
+
+
+# ---------------------------- 相似K线选股：用真实走势在池里找别的股（同步） ----------------------------
+
+
+class ByWindowReq(BaseModel):
+    symbol: str                        # 查询走势来自哪只股票
+    pool_id: int                       # 在哪个股票池里选股
+    window_start: str | None = None    # 查询窗口；不传取该股最近 60 日
+    window_end: str | None = None
+    scales: list[int] | None = None
+    top_k: int = 20
+    min_score: float = 0.0
+
+
+@router.post("/by_window")
+def post_by_window(req: ByWindowReq) -> dict:
+    """用一段真实走势在股票池里找走势最像的其他股票（无截图、无 LLM，秒级同步返回）。"""
+    res = search_by_window(
+        DataService(), symbol=req.symbol, pool_id=req.pool_id,
         window_start=req.window_start, window_end=req.window_end,
         scales=req.scales, top_k=req.top_k, min_score=req.min_score,
     )

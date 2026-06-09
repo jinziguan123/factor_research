@@ -149,3 +149,27 @@ def test_delete_run(monkeypatch):
     resp = client.delete("/api/pattern_search/runs/r1")
     assert resp.status_code == 200
     assert resp.json()["data"]["deleted"] is True
+
+
+# ---------------------------- 相似K线选股 by_window（同步） ----------------------------
+
+
+def test_by_window_endpoint(monkeypatch):
+    seen = {}
+
+    def _fake(data, symbol, pool_id, **kw):
+        seen.update({"symbol": symbol, "pool_id": pool_id, "kw": kw})
+        return {"query_curve": [0.0, 1.0], "matches": [
+            {"label": "AAA.SZ", "score": 0.92, "scale": 60,
+             "start_date": "2026-03-01", "end_date": "2026-05-20", "curve": [0.0, 1.0], "sub_scores": []}
+        ]}
+    monkeypatch.setattr(router_mod, "search_by_window", _fake)
+    resp = client.post("/api/pattern_search/by_window", json={
+        "symbol": "000001.SZ", "pool_id": 1,
+        "window_start": "2026-03-01", "window_end": "2026-05-20", "scales": [60], "top_k": 5,
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == 0
+    assert body["data"]["matches"][0]["label"] == "AAA.SZ"
+    assert seen["symbol"] == "000001.SZ" and seen["pool_id"] == 1

@@ -197,38 +197,21 @@ def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np
     return normalize_curve(median)
 
 
-def search_by_image(
-    data, pool_id: int,
-    images: list[str] | None = None, image: str | None = None,
-    hint: str | None = None,
-    scales: list[int] | None = None, top_k: int = 20, agg: str = "min",
-    min_score: float = 0.0,
-) -> dict:
-    """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。
+def _search_pool_by_curves(
+    data, pool_id: int, query_curves: list[np.ndarray],
+    scales: list[int], top_k: int, agg: str, min_score: float,
+    exclude_symbol: str | None = None,
+) -> list[dict]:
+    """池内检索内核：股票池每只股的「最近窗口」做候选 → 综合检索 → 同股取最佳。
 
-    支持一张或多张截图：多张时综合成一个查询，要求候选「对每张都像」
-    （``agg="min"`` 交集语义，默认）。``image``/``images`` 二选一，便于兼容旧调用。
+    供 search_by_image（截图）与 search_by_window（真实走势）共用。
+    ``exclude_symbol`` 用于把查询自身那只股票从候选里排除。
     """
-    scales = scales or DEFAULT_SCALES
-    # 归一化入参：image 与 images 合并成一个非空列表。
-    imgs = list(images) if images else []
-    if image:
-        imgs.append(image)
-    if not imgs:
-        raise ValueError("至少需要一张截图")
-    query_curves = [extract_curve_from_image(img, hint=hint) for img in imgs]
-    curves_out = [[round(float(v), 4) for v in qc] for qc in query_curves]
-
-    def _empty():
-        return {
-            "query_curve": curves_out[0],  # 兼容单图前端
-            "query_curves": curves_out,
-            "matches": [],
-        }
-
     symbols = data.resolve_pool(pool_id)
+    if exclude_symbol:
+        symbols = [s for s in symbols if s != exclude_symbol]
     if not symbols:
-        return _empty()
+        return []
     bars = data.load_bars(symbols, _HISTORY_START, date.today(), freq="1d", adjust="qfq")
     candidates: list[Candidate] = []
     for sym, df in bars.items():
@@ -251,8 +234,71 @@ def search_by_image(
         if m.label not in best or m.score > best[m.label].score:
             best[m.label] = m
     final = sorted(best.values(), key=lambda x: x.score, reverse=True)[:top_k]
+    return [_match_to_dict(m) for m in final]
+
+
+def search_by_image(
+    data, pool_id: int,
+    images: list[str] | None = None, image: str | None = None,
+    hint: str | None = None,
+    scales: list[int] | None = None, top_k: int = 20, agg: str = "min",
+    min_score: float = 0.0,
+) -> dict:
+    """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。
+
+    支持一张或多张截图：多张时综合成一个查询，要求候选「对每张都像」
+    （``agg="min"`` 交集语义，默认）。``image``/``images`` 二选一，便于兼容旧调用。
+    """
+    scales = scales or DEFAULT_SCALES
+    # 归一化入参：image 与 images 合并成一个非空列表。
+    imgs = list(images) if images else []
+    if image:
+        imgs.append(image)
+    if not imgs:
+        raise ValueError("至少需要一张截图")
+    query_curves = [extract_curve_from_image(img, hint=hint) for img in imgs]
+    curves_out = [[round(float(v), 4) for v in qc] for qc in query_curves]
+    matches = _search_pool_by_curves(
+        data, pool_id, query_curves, scales, top_k, agg, min_score
+    )
     return {
-        "query_curve": curves_out[0],
+        "query_curve": curves_out[0],   # 兼容单图前端
         "query_curves": curves_out,
-        "matches": [_match_to_dict(m) for m in final],
+        "matches": matches,
+    }
+
+
+def search_by_window(
+    data, symbol: str, pool_id: int,
+    window_start: str | None = None, window_end: str | None = None,
+    scales: list[int] | None = None, top_k: int = 20, min_score: float = 0.0,
+) -> dict:
+    """相似K线选股：用 ``symbol`` 的某段**真实走势**，在股票池里找走势最像的其他股票。
+
+    无截图、无 LLM——查询曲线直接来自前复权收盘价，零提取噪声。窗口未指定则取最近 60 日。
+    查询自身那只股票会从候选里排除。
+    """
+    scales = scales or DEFAULT_SCALES
+    bars = data.load_bars([symbol], _HISTORY_START, date.today(), freq="1d", adjust="qfq")
+    if not bars:
+        return {"query_curve": [], "matches": []}
+    close = next(iter(bars.values()))["close"].dropna()
+    closes = close.to_numpy(dtype=float)
+    if window_start and window_end:
+        mask = np.asarray(
+            (close.index >= pd.Timestamp(window_start)) & (close.index <= pd.Timestamp(window_end))
+        )
+        q_prices = closes[mask]
+    else:
+        q_prices = closes[-60:]
+    if len(q_prices) < 2:
+        return {"query_curve": [], "matches": []}
+    query_curve = normalize_curve(q_prices)
+    matches = _search_pool_by_curves(
+        data, pool_id, [query_curve], scales, top_k, "min", min_score,
+        exclude_symbol=symbol,
+    )
+    return {
+        "query_curve": [round(float(v), 4) for v in query_curve],
+        "matches": matches,
     }
