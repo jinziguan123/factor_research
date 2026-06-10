@@ -49,10 +49,15 @@ const columns: DataTableColumns<PatternRun> = [
     render: (r) => h('code', { style: 'font-size:12px' }, r.run_id.slice(0, 8)),
   },
   { title: '股票池', key: 'pool_id', width: 90, render: (r) => `#${r.pool_id}` },
-  { title: '图数', key: 'num_images', width: 70 },
   {
-    title: '截图', key: 'image_names', ellipsis: { tooltip: true },
-    render: (r) => (r.image_names ?? []).join('、') || '-',
+    title: '类型', key: 'kind', width: 90,
+    render: (r) => (r.kind === 'by_window' ? '走势选股' : '截图'),
+  },
+  {
+    title: '查询', key: 'query', ellipsis: { tooltip: true },
+    render: (r) => r.kind === 'by_window'
+      ? (r.query_json ?? []).map(w => `${w.symbol} ${w.start ?? ''}~${w.end ?? ''}`).join('；') || '-'
+      : ((r.image_names ?? []).join('、') || `${r.num_images} 张图`),
   },
   {
     title: '状态', key: 'status', width: 140,
@@ -76,7 +81,7 @@ const columns: DataTableColumns<PatternRun> = [
 <template>
   <div>
     <n-page-header title="图形检索记录" style="margin-bottom: 16px">
-      <template #subtitle>截图找相似股票的历史任务。后台异步执行，可随时回来看结果。</template>
+      <template #subtitle>图形检索历史任务（截图找相似 / 走势选股）。后台异步执行，可随时回来看结果。</template>
       <template #extra>
         <n-button type="primary" @click="router.push('/pattern/new')">+ 新建图形检索</n-button>
       </template>

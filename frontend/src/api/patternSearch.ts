@@ -35,21 +35,26 @@ export function useByStockSearch() {
   })
 }
 
-// 相似K线选股：用一段真实走势在股票池里找走势最像的「其他」股票（同步，无截图/LLM）。
-export interface ByWindowReq {
+// 相似K线选股：用「一段或多段」真实走势在股票池里找走势最像的其他股票（异步任务）。
+export interface WindowSpec {
   symbol: string
+  start?: string
+  end?: string
+}
+export interface ByWindowReq {
   pool_id: number
-  window_start?: string
-  window_end?: string
+  windows: WindowSpec[]
   scales?: number[]
   top_k?: number
+  agg?: 'min' | 'mean'
   min_score?: number
 }
-export function useByWindowSearch() {
+/** 创建「相似K线选股」任务，返回 run_id（与截图检索复用同一记录页）。 */
+export function useCreateWindowSearch() {
   return useMutation({
-    mutationFn: async (req: ByWindowReq): Promise<PatternResult> => {
+    mutationFn: async (req: ByWindowReq): Promise<{ run_id: string; status: RunStatus }> => {
       const { data } = await client.post('/pattern_search/by_window', req)
-      return data as PatternResult
+      return data
     },
   })
 }
@@ -73,8 +78,10 @@ export type RunStatus = 'pending' | 'running' | 'success' | 'failed' | 'aborting
 /** 列表行（不含曲线/结果大字段）。 */
 export interface PatternRun {
   run_id: string
+  kind?: 'by_image' | 'by_window'
   pool_id: number
   image_names?: string[]
+  query_json?: WindowSpec[]   // by_window 的查询窗口
   num_images: number
   hint?: string | null
   top_k?: number
