@@ -10,7 +10,9 @@ import {
   useMessage, type DataTableColumns,
 } from 'naive-ui'
 import { useRouter } from 'vue-router'
-import { usePatternRuns, useDeletePatternRun, type PatternRun } from '@/api/patternSearch'
+import {
+  usePatternRuns, useDeletePatternRun, useCreateWindowSearch, type PatternRun,
+} from '@/api/patternSearch'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
 const router = useRouter()
@@ -18,6 +20,28 @@ const message = useMessage()
 
 const { data: runs, refetch } = usePatternRuns()
 const del = useDeletePatternRun()
+const createWindow = useCreateWindowSearch()
+
+// 一键重新检索：走势选股的输入全在记录里，可原样重建重跑；截图任务图片未存，回新建页重传。
+async function rerun(r: PatternRun) {
+  if (r.kind === 'by_window' && (r.query_json?.length ?? 0) > 0) {
+    try {
+      const res = await createWindow.mutateAsync({
+        pool_id: r.pool_id,
+        windows: r.query_json!,
+        agg: (r.agg as 'min' | 'mean') ?? 'min',
+        top_k: r.top_k,
+      })
+      message.success('已按相同条件重新提交')
+      router.push(`/pattern/runs/${res.run_id}`)
+    } catch (e: any) {
+      message.error(e?.message || '重新检索失败')
+    }
+  } else {
+    message.info('截图任务的图片未保存，请到新建页重新上传')
+    router.push('/pattern/new')
+  }
+}
 
 // 有活跃任务时轮询列表。
 let pollTimer: number | null = null
@@ -66,9 +90,10 @@ const columns: DataTableColumns<PatternRun> = [
   { title: '进度', key: 'progress', width: 70, render: (r) => `${r.progress}%` },
   { title: '创建时间', key: 'created_at', width: 180 },
   {
-    title: '操作', key: 'actions', width: 160,
+    title: '操作', key: 'actions', width: 220,
     render: (r) => h(NSpace, { size: 8 }, () => [
       h(NButton, { size: 'small', onClick: () => router.push(`/pattern/runs/${r.run_id}`) }, () => '查看'),
+      h(NButton, { size: 'small', type: 'primary', tertiary: true, onClick: () => rerun(r) }, () => '重新检索'),
       h(NPopconfirm, { onPositiveClick: () => onDelete(r.run_id) }, {
         trigger: () => h(NButton, { size: 'small', type: 'error', tertiary: true }, () => '删除'),
         default: () => '确认删除这条记录？',

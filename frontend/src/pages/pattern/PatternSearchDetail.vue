@@ -16,7 +16,7 @@ import { GridComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  usePatternRun, useAbortPatternRun, type PatternMatch,
+  usePatternRun, useAbortPatternRun, useCreateWindowSearch, type PatternMatch,
 } from '@/api/patternSearch'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -30,9 +30,33 @@ const message = useMessage()
 const runId = computed(() => String(route.params.runId ?? ''))
 const { data: run } = usePatternRun(runId)
 const abort = useAbortPatternRun()
+const createWindow = useCreateWindowSearch()
 
 const isActive = computed(() =>
   ['pending', 'running', 'aborting'].includes(run.value?.status ?? ''))
+
+// 一键重新检索：走势选股原样重建重跑；截图任务图片未存，回新建页重传。
+async function rerun() {
+  const r = run.value
+  if (!r) return
+  if (r.kind === 'by_window' && (r.query_json?.length ?? 0) > 0) {
+    try {
+      const res = await createWindow.mutateAsync({
+        pool_id: r.pool_id,
+        windows: r.query_json!,
+        agg: (r.agg as 'min' | 'mean') ?? 'min',
+        top_k: r.top_k,
+      })
+      message.success('已按相同条件重新提交')
+      router.push(`/pattern/runs/${res.run_id}`)
+    } catch (e: any) {
+      message.error(e?.message || '重新检索失败')
+    }
+  } else {
+    message.info('截图任务的图片未保存，请到新建页重新上传')
+    router.push('/pattern/new')
+  }
+}
 const queryCurves = computed<number[][]>(() => run.value?.query_curves ?? [])
 
 async function onAbort() {
@@ -73,6 +97,14 @@ function queryOption(curve: number[]) {
         <n-space>
           <status-badge v-if="run" :status="run.status" />
           <n-button v-if="isActive" size="small" type="warning" @click="onAbort">中断</n-button>
+          <n-button
+            v-if="run && !isActive"
+            size="small" type="primary"
+            :loading="createWindow.isPending.value"
+            @click="rerun"
+          >
+            重新检索
+          </n-button>
         </n-space>
       </template>
     </n-page-header>
