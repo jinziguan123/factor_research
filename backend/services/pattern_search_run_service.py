@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from backend.services.abort_check import AbortedError, check_abort
-from backend.services.pattern_query import search_by_image
+from backend.services.pattern_query import search_by_image, search_by_window
 from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
 
@@ -66,23 +66,16 @@ def _update_status(
         c.commit()
 
 
-def run_pattern_search_by_image(run_id: str, body: dict) -> None:
-    """worker 入口：跑一次截图检索并把结果落库。任何异常都收口为终态。"""
+def _run_and_persist(run_id: str, search_fn) -> None:
+    """跑一次检索（``search_fn()`` 返回 {query_curves, matches}）并把结果落库。
+
+    截图 / 走势两种 worker 共用同一套状态机与结果写入；任何异常都收口为终态。
+    """
     try:
         _update_status(run_id, status="running", started=True, progress=10)
         check_abort("pattern_search", run_id)
 
-        res = search_by_image(
-            DataService(),
-            pool_id=body["pool_id"],
-            images=body.get("images"),
-            image=body.get("image"),
-            hint=body.get("hint"),
-            scales=body.get("scales"),
-            top_k=body.get("top_k", 20),
-            agg=body.get("agg", "min"),
-            min_score=body.get("min_score", 0.0),
-        )
+        res = search_fn()
 
         check_abort("pattern_search", run_id)
         _update_status(run_id, progress=95)
@@ -108,3 +101,31 @@ def run_pattern_search_by_image(run_id: str, body: dict) -> None:
         _update_status(
             run_id, status="failed", finished=True, error=traceback.format_exc()
         )
+
+
+def run_pattern_search_by_image(run_id: str, body: dict) -> None:
+    """worker 入口：截图检索。"""
+    _run_and_persist(run_id, lambda: search_by_image(
+        DataService(),
+        pool_id=body["pool_id"],
+        images=body.get("images"),
+        image=body.get("image"),
+        hint=body.get("hint"),
+        scales=body.get("scales"),
+        top_k=body.get("top_k", 20),
+        agg=body.get("agg", "min"),
+        min_score=body.get("min_score", 0.0),
+    ))
+
+
+def run_pattern_search_by_window(run_id: str, body: dict) -> None:
+    """worker 入口：相似K线选股（一段或多段真实走势）。"""
+    _run_and_persist(run_id, lambda: search_by_window(
+        DataService(),
+        windows=body.get("windows") or [],
+        pool_id=body["pool_id"],
+        scales=body.get("scales"),
+        top_k=body.get("top_k", 20),
+        agg=body.get("agg", "min"),
+        min_score=body.get("min_score", 0.0),
+    ))

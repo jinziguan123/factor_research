@@ -154,22 +154,46 @@ def test_delete_run(monkeypatch):
 # ---------------------------- 相似K线选股 by_window（同步） ----------------------------
 
 
-def test_by_window_endpoint(monkeypatch):
-    seen = {}
+def test_by_window_creates_run_multi(monkeypatch):
+    conn = _FakeConn()
+    _patch_conn(monkeypatch, conn)
+    submitted: list = []
+    monkeypatch.setattr(router_mod, "submit", lambda fn, *a, **k: submitted.append((fn, a)))
 
-    def _fake(data, symbol, pool_id, **kw):
-        seen.update({"symbol": symbol, "pool_id": pool_id, "kw": kw})
-        return {"query_curve": [0.0, 1.0], "matches": [
-            {"label": "AAA.SZ", "score": 0.92, "scale": 60,
-             "start_date": "2026-03-01", "end_date": "2026-05-20", "curve": [0.0, 1.0], "sub_scores": []}
-        ]}
-    monkeypatch.setattr(router_mod, "search_by_window", _fake)
     resp = client.post("/api/pattern_search/by_window", json={
-        "symbol": "000001.SZ", "pool_id": 1,
-        "window_start": "2026-03-01", "window_end": "2026-05-20", "scales": [60], "top_k": 5,
+        "pool_id": 5,
+        "windows": [
+            {"symbol": "002552.SZ", "start": "2026-03-03", "end": "2026-04-27"},
+            {"symbol": "000001.SZ", "start": "2026-01-01", "end": "2026-02-01"},
+        ],
+        "top_k": 20,
     })
     assert resp.status_code == 200
     body = resp.json()
-    assert body["code"] == 0
-    assert body["data"]["matches"][0]["label"] == "AAA.SZ"
-    assert seen["symbol"] == "000001.SZ" and seen["pool_id"] == 1
+    assert body["data"]["status"] == "pending"
+    assert len(body["data"]["run_id"]) == 32
+    # 派发到 by_window worker，body 里带两段窗口
+    assert submitted and submitted[0][0] is router_mod.pattern_search_window_entry
+    passed_body = submitted[0][1][1]
+    assert len(passed_body["windows"]) == 2 and passed_body["pool_id"] == 5
+
+
+def test_by_window_single_compat(monkeypatch):
+    conn = _FakeConn()
+    _patch_conn(monkeypatch, conn)
+    submitted: list = []
+    monkeypatch.setattr(router_mod, "submit", lambda fn, *a, **k: submitted.append((fn, a)))
+    resp = client.post("/api/pattern_search/by_window", json={
+        "symbol": "002552.SZ", "pool_id": 5,
+        "window_start": "2026-03-03", "window_end": "2026-04-27",
+    })
+    assert resp.status_code == 200
+    assert submitted[0][1][1]["windows"][0]["symbol"] == "002552.SZ"
+
+
+def test_by_window_rejects_empty(monkeypatch):
+    conn = _FakeConn()
+    _patch_conn(monkeypatch, conn)
+    monkeypatch.setattr(router_mod, "submit", lambda *a, **k: None)
+    resp = client.post("/api/pattern_search/by_window", json={"pool_id": 5})
+    assert resp.status_code == 400

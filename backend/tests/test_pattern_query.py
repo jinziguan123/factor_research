@@ -207,16 +207,36 @@ def test_search_by_window_finds_similar_pool_member():
         "AAA.SZ": np.tile(arc, 3) * 5 + 100,  # 同形（应排第一）
         "BBB.SZ": np.linspace(10, 1, 180),    # 单调下跌
     }
-    res = pq2.search_by_window(_FakePool(panels), symbol="QQQ.SZ", pool_id=1, scales=[60], top_k=5)
+    res = pq2.search_by_window(_FakePool(panels), windows=[{"symbol": "QQQ.SZ"}], pool_id=1, scales=[60], top_k=5)
     assert len(res["query_curve"]) > 0
     labels = [m["label"] for m in res["matches"]]
     assert "QQQ.SZ" not in labels          # 查询自身被排除
     assert labels[0] == "AAA.SZ"           # 同形态的池内股票排第一
 
 
+def test_search_by_window_multi_windows_excludes_all_and_returns_subscores():
+    arc = np.sin(np.linspace(0, np.pi, 60))
+    panels = {
+        "Q1.SZ": np.tile(arc, 3) * 4 + 80,    # 查询股1
+        "Q2.SZ": np.tile(arc, 3) * 2 + 50,    # 查询股2（同形不同价）
+        "AAA.SZ": np.tile(arc, 3) * 5 + 100,  # 对两段都像
+        "BBB.SZ": np.linspace(10, 1, 180),    # 下跌
+    }
+    res = pq2.search_by_window(
+        _FakePool(panels),
+        windows=[{"symbol": "Q1.SZ"}, {"symbol": "Q2.SZ"}],
+        pool_id=1, scales=[60], top_k=5,
+    )
+    assert len(res["query_curves"]) == 2       # 两段查询曲线
+    labels = [m["label"] for m in res["matches"]]
+    assert "Q1.SZ" not in labels and "Q2.SZ" not in labels  # 两只查询股都被排除
+    assert labels[0] == "AAA.SZ"
+    assert len(res["matches"][0]["sub_scores"]) == 2         # 对两段各有分项
+
+
 def test_search_by_window_empty_pool():
     arc = np.sin(np.linspace(0, np.pi, 60))
-    res = pq2.search_by_window(_FakePool({"QQQ.SZ": np.tile(arc, 3)}), symbol="QQQ.SZ", pool_id=1, scales=[60])
+    res = pq2.search_by_window(_FakePool({"QQQ.SZ": np.tile(arc, 3)}), windows=[{"symbol": "QQQ.SZ"}], pool_id=1, scales=[60])
     assert res["matches"] == []            # 池里只有自己，排除后无候选
 
 

@@ -200,16 +200,16 @@ def extract_curve_from_image(image_data_uri: str, hint: str | None = None) -> np
 def _search_pool_by_curves(
     data, pool_id: int, query_curves: list[np.ndarray],
     scales: list[int], top_k: int, agg: str, min_score: float,
-    exclude_symbol: str | None = None,
+    exclude_symbols: set[str] | None = None,
 ) -> list[dict]:
     """池内检索内核：股票池每只股的「最近窗口」做候选 → 综合检索 → 同股取最佳。
 
     供 search_by_image（截图）与 search_by_window（真实走势）共用。
-    ``exclude_symbol`` 用于把查询自身那只股票从候选里排除。
+    ``exclude_symbols`` 用于把查询自身那些股票从候选里排除（避免拿自己跟自己比）。
     """
     symbols = data.resolve_pool(pool_id)
-    if exclude_symbol:
-        symbols = [s for s in symbols if s != exclude_symbol]
+    if exclude_symbols:
+        symbols = [s for s in symbols if s not in exclude_symbols]
     if not symbols:
         return []
     bars = data.load_bars(symbols, _HISTORY_START, date.today(), freq="1d", adjust="qfq")
@@ -268,37 +268,56 @@ def search_by_image(
     }
 
 
-def search_by_window(
-    data, symbol: str, pool_id: int,
-    window_start: str | None = None, window_end: str | None = None,
-    scales: list[int] | None = None, top_k: int = 20, min_score: float = 0.0,
-) -> dict:
-    """相似K线选股：用 ``symbol`` 的某段**真实走势**，在股票池里找走势最像的其他股票。
-
-    无截图、无 LLM——查询曲线直接来自前复权收盘价，零提取噪声。窗口未指定则取最近 60 日。
-    查询自身那只股票会从候选里排除。
-    """
-    scales = scales or DEFAULT_SCALES
+def _window_to_curve(data, symbol: str, start: str | None, end: str | None) -> np.ndarray | None:
+    """取 ``symbol`` 某段前复权走势 → 归一化曲线。窗口未指定取最近 60 日；数据不足返回 None。"""
     bars = data.load_bars([symbol], _HISTORY_START, date.today(), freq="1d", adjust="qfq")
     if not bars:
-        return {"query_curve": [], "matches": []}
+        return None
     close = next(iter(bars.values()))["close"].dropna()
     closes = close.to_numpy(dtype=float)
-    if window_start and window_end:
+    if start and end:
         mask = np.asarray(
-            (close.index >= pd.Timestamp(window_start)) & (close.index <= pd.Timestamp(window_end))
+            (close.index >= pd.Timestamp(start)) & (close.index <= pd.Timestamp(end))
         )
         q_prices = closes[mask]
     else:
         q_prices = closes[-60:]
     if len(q_prices) < 2:
-        return {"query_curve": [], "matches": []}
-    query_curve = normalize_curve(q_prices)
+        return None
+    return normalize_curve(q_prices)
+
+
+def search_by_window(
+    data, windows: list[dict], pool_id: int,
+    scales: list[int] | None = None, top_k: int = 20,
+    agg: str = "min", min_score: float = 0.0,
+) -> dict:
+    """相似K线选股：用**一段或多段真实走势**在股票池里找走势最像的其他股票。
+
+    ``windows`` = ``[{"symbol","start","end"}, ...]``。多段时综合检索（``agg="min"``
+    要求候选「对每段都像」，压制单段过拟合）。无截图、无 LLM——查询曲线直接来自前复权
+    收盘价，零提取噪声。所有查询股票会从候选里排除。
+    """
+    scales = scales or DEFAULT_SCALES
+    query_curves: list[np.ndarray] = []
+    exclude: set[str] = set()
+    for w in windows:
+        sym = str(w.get("symbol", "")).upper()
+        if not sym:
+            continue
+        exclude.add(sym)
+        curve = _window_to_curve(data, sym, w.get("start"), w.get("end"))
+        if curve is not None:
+            query_curves.append(curve)
+    curves_out = [[round(float(v), 4) for v in qc] for qc in query_curves]
+    if not query_curves:
+        return {"query_curve": [], "query_curves": [], "matches": []}
     matches = _search_pool_by_curves(
-        data, pool_id, [query_curve], scales, top_k, "min", min_score,
-        exclude_symbol=symbol,
+        data, pool_id, query_curves, scales, top_k, agg, min_score,
+        exclude_symbols=exclude,
     )
     return {
-        "query_curve": [round(float(v), 4) for v in query_curve],
+        "query_curve": curves_out[0],
+        "query_curves": curves_out,
         "matches": matches,
     }
