@@ -79,11 +79,17 @@ function queryOption(curve: number[]) {
 
     <n-card v-if="run" style="margin-bottom: 16px">
       <n-descriptions :column="3" label-placement="left" size="small">
+        <n-descriptions-item label="类型">{{ run.kind === 'by_window' ? '走势选股' : '截图检索' }}</n-descriptions-item>
         <n-descriptions-item label="股票池">#{{ run.pool_id }}</n-descriptions-item>
-        <n-descriptions-item label="图数">{{ run.num_images }}</n-descriptions-item>
         <n-descriptions-item label="聚合">{{ run.agg }}</n-descriptions-item>
-        <n-descriptions-item label="截图">{{ (run.image_names ?? []).join('、') || '-' }}</n-descriptions-item>
-        <n-descriptions-item label="提示">{{ run.hint || '-' }}</n-descriptions-item>
+        <n-descriptions-item v-if="run.kind === 'by_window'" label="查询走势" :span="3">
+          {{ (run.query_json ?? []).map(w => `${w.symbol} ${w.start ?? ''}~${w.end ?? ''}`).join('；') || '-' }}
+        </n-descriptions-item>
+        <template v-else>
+          <n-descriptions-item label="图数">{{ run.num_images }}</n-descriptions-item>
+          <n-descriptions-item label="截图">{{ (run.image_names ?? []).join('、') || '-' }}</n-descriptions-item>
+          <n-descriptions-item label="提示">{{ run.hint || '-' }}</n-descriptions-item>
+        </template>
         <n-descriptions-item label="创建时间">{{ run.created_at }}</n-descriptions-item>
       </n-descriptions>
     </n-card>

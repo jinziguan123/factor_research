@@ -84,3 +84,10 @@ def pattern_search_entry(run_id: str, body: dict) -> None:
     from backend.services.pattern_search_run_service import run_pattern_search_by_image
 
     run_pattern_search_by_image(run_id, body)
+
+
+def pattern_search_window_entry(run_id: str, body: dict) -> None:
+    """相似K线选股（用真实走势在池里选股 by_window）任务入口。"""
+    from backend.services.pattern_search_run_service import run_pattern_search_by_window
+
+    run_pattern_search_by_window(run_id, body)

@@ -10,13 +10,15 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NInput, NButton, NSelect, NDatePicker,
   NSpace, NAlert, NSpin, NTag, NDrawer, NDrawerContent,
-  NForm, NFormItem, NInputNumber, NTabs, NTabPane, useMessage,
+  NForm, NFormItem, NInputNumber, NTabs, NTabPane,
+  NRadioGroup, NRadioButton, useMessage,
 } from 'naive-ui'
 import { useDailyKline, useMinuteKline, useFactorBars, type FactorBarQuery } from '@/api/klines'
 import { useFactors } from '@/api/factors'
 import { usePools } from '@/api/pools'
 import {
-  useByStockSearch, useByWindowSearch, type PatternResult, type PatternMatch,
+  useByStockSearch, useCreateWindowSearch,
+  type PatternResult, type PatternMatch, type WindowSpec,
 } from '@/api/patternSearch'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
@@ -279,12 +281,14 @@ function handleRefresh() {
 //   股票池选股（by_window）：用这段真实走势，在所选股票池里找走势最像的「别的」股票。
 const router = useRouter()
 const similarSearch = useByStockSearch()
-const windowSearch = useByWindowSearch()
+const createWindow = useCreateWindowSearch()
 const showSimilarDrawer = ref(false)
 const similarResult = ref<PatternResult | null>(null)        // 本股历史
-const windowResult = ref<PatternResult | null>(null)         // 股票池选股
 const brushedWindow = ref<{ start: string; end: string } | null>(null)
 const poolId = ref<number | null>(null)
+const agg = ref<'min' | 'mean'>('min')
+// 选股篮子：多段走势联合检索（抗过拟合）。可跨股累加：在 A 上框选加入、切到 B 再加入。
+const basket = ref<WindowSpec[]>([])
 const { data: pools } = usePools()
 const poolOptions = () =>
   (pools.value ?? []).map(p => ({ label: `${p.pool_name} (#${p.pool_id})`, value: p.pool_id }))
@@ -295,7 +299,6 @@ async function onFindSimilar(payload: { start: string; end: string }) {
     return
   }
   brushedWindow.value = payload
-  windowResult.value = null
   try {
     similarResult.value = await similarSearch.mutateAsync({
       symbol: symbol.value.trim().toUpperCase(),
@@ -311,30 +314,38 @@ async function onFindSimilar(payload: { start: string; end: string }) {
   }
 }
 
-// 股票池选股：用框选的这段走势，在所选池里找别的相似股票。
-async function runPoolSearch() {
+// 把当前框选段加入选股篮子（可来自不同股票）。
+function addCurrentWindow() {
   if (!brushedWindow.value) { message.warning('请先在 K 线上框选一段走势'); return }
-  if (poolId.value == null) { message.warning('请选择股票池'); return }
-  try {
-    windowResult.value = await windowSearch.mutateAsync({
-      symbol: symbol.value.trim().toUpperCase(),
-      pool_id: poolId.value,
-      window_start: brushedWindow.value.start,
-      window_end: brushedWindow.value.end,
-    })
-    if (windowResult.value.matches.length === 0) message.info('该股票池里没找到相似股票')
-  } catch (e: any) {
-    message.error(e?.message || '检索失败')
-  }
+  basket.value = [...basket.value, {
+    symbol: symbol.value.trim().toUpperCase(),
+    start: brushedWindow.value.start,
+    end: brushedWindow.value.end,
+  }]
+}
+function removeWindow(i: number) {
+  basket.value = basket.value.filter((_, idx) => idx !== i)
 }
 
-// 跨股跳转：点击池内某只相似股票 → 切到那只股票的对应区间。
-function openPoolMatch(m: PatternMatch) {
-  showSimilarDrawer.value = false
-  router.push({
-    path: '/klines',
-    query: { symbol: m.label, start: m.start_date ?? undefined, end: m.end_date ?? undefined },
-  })
+// 提交「相似K线选股」异步任务 → 跳到记录详情页轮询结果。
+async function submitPoolSearch() {
+  const windows = basket.value.length > 0
+    ? basket.value
+    : (brushedWindow.value
+        ? [{ symbol: symbol.value.trim().toUpperCase(), start: brushedWindow.value.start, end: brushedWindow.value.end }]
+        : [])
+  if (windows.length === 0) { message.warning('请先框选并「加入对比」至少一段走势'); return }
+  if (poolId.value == null) { message.warning('请选择股票池'); return }
+  try {
+    const res = await createWindow.mutateAsync({
+      pool_id: poolId.value, windows, agg: agg.value,
+    })
+    message.success('选股任务已创建，正在后台检索…')
+    showSimilarDrawer.value = false
+    router.push({ path: `/pattern/runs/${res.run_id}` })
+  } catch (e: any) {
+    message.error(e?.message || '创建任务失败')
+  }
 }
 
 function dateToTs(d: string): number {
@@ -497,21 +508,37 @@ function jumpToMatch(m: PatternMatch) {
           </n-tab-pane>
           <n-tab-pane name="pool" tab="股票池选股">
             <div style="font-size:12px;opacity:.6;margin-bottom:8px">
-              用框选的这段走势，在所选股票池里找走势最像的「其他」股票（前复权、无截图噪声）。
+              用一段或多段真实走势，在所选股票池里找走势最像的「其他」股票（前复权、无截图噪声）。
+              <b>多段联合可抗过拟合</b>：在不同股票上分别框选、各点「加入对比」累加。
             </div>
+            <n-space align="center" :size="8" style="margin-bottom:8px">
+              <n-button size="small" @click="addCurrentWindow">＋ 加入当前框选</n-button>
+              <span style="font-size:12px;opacity:.6">
+                当前框选：{{ brushedWindow ? `${symbol} ${brushedWindow.start}~${brushedWindow.end}` : '（先在图上框选）' }}
+              </span>
+            </n-space>
+            <n-space v-if="basket.length" :size="6" wrap style="margin-bottom:8px">
+              <n-tag v-for="(w, i) in basket" :key="i" closable size="small" @close="removeWindow(i)">
+                {{ w.symbol }} {{ w.start }}~{{ w.end }}
+              </n-tag>
+            </n-space>
             <n-space align="center" :size="8" style="margin-bottom:12px">
               <n-select
                 v-model:value="poolId"
                 :options="poolOptions()"
                 placeholder="选择股票池"
                 filterable
-                style="width: 220px"
+                style="width: 200px"
               />
-              <n-button type="primary" size="small" :loading="windowSearch.isPending.value" @click="runPoolSearch">
-                选股
+              <n-radio-group v-if="basket.length > 1" v-model:value="agg" size="small">
+                <n-radio-button value="min">都像</n-radio-button>
+                <n-radio-button value="mean">平均</n-radio-button>
+              </n-radio-group>
+              <n-button type="primary" size="small" :loading="createWindow.isPending.value" @click="submitPoolSearch">
+                提交选股
               </n-button>
             </n-space>
-            <match-result-list v-if="windowResult" :matches="windowResult.matches" @open="openPoolMatch" />
+            <div style="font-size:12px;opacity:.5">提交后转为后台任务，自动跳到记录详情页看进度与结果。</div>
           </n-tab-pane>
         </n-tabs>
       </n-drawer-content>

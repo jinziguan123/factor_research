@@ -20,9 +20,9 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from backend.api.schemas import ok
-from backend.runtime.entries import pattern_search_entry
+from backend.runtime.entries import pattern_search_entry, pattern_search_window_entry
 from backend.runtime.task_pool import submit
-from backend.services.pattern_query import search_by_stock, search_by_window
+from backend.services.pattern_query import search_by_stock
 from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
 
@@ -51,28 +51,72 @@ def post_by_stock(req: ByStockReq) -> dict:
     return ok(res)
 
 
-# ---------------------------- 相似K线选股：用真实走势在池里找别的股（同步） ----------------------------
+# ---------------------------- 相似K线选股：用真实走势在池里选股（异步任务） ----------------------------
+
+
+class WindowSpec(BaseModel):
+    symbol: str
+    start: str | None = None
+    end: str | None = None
 
 
 class ByWindowReq(BaseModel):
-    symbol: str                        # 查询走势来自哪只股票
-    pool_id: int                       # 在哪个股票池里选股
-    window_start: str | None = None    # 查询窗口；不传取该股最近 60 日
+    pool_id: int                            # 在哪个股票池里选股
+    windows: list[WindowSpec] | None = None  # 一段或多段查询走势（多段=联合检索，抗过拟合）
+    # 兼容单段旧调用：
+    symbol: str | None = None
+    window_start: str | None = None
     window_end: str | None = None
     scales: list[int] | None = None
     top_k: int = 20
+    agg: str = "min"
     min_score: float = 0.0
 
 
 @router.post("/by_window")
-def post_by_window(req: ByWindowReq) -> dict:
-    """用一段真实走势在股票池里找走势最像的其他股票（无截图、无 LLM，秒级同步返回）。"""
-    res = search_by_window(
-        DataService(), symbol=req.symbol, pool_id=req.pool_id,
-        window_start=req.window_start, window_end=req.window_end,
-        scales=req.scales, top_k=req.top_k, min_score=req.min_score,
-    )
-    return ok(res)
+def post_by_window(req: ByWindowReq, bt: BackgroundTasks) -> dict:
+    """创建「相似K线选股」任务并派发到 ProcessPool，立刻返回 run_id。
+
+    全池 DTW 较慢易超时，故和 by_image 一样走异步任务 + 轮询。支持一段或多段走势联合检索。
+    """
+    # 归一化查询窗口：windows 优先；否则用单段 symbol/window_*。
+    windows: list[dict] = []
+    if req.windows:
+        windows = [w.model_dump() for w in req.windows]
+    elif req.symbol:
+        windows = [{"symbol": req.symbol, "start": req.window_start, "end": req.window_end}]
+    if not windows:
+        raise HTTPException(status_code=400, detail="至少需要一段查询走势")
+
+    run_id = uuid.uuid4().hex
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_pattern_search_runs
+                (run_id, kind, pool_id, query_json, num_images, scales_json,
+                 top_k, agg, status, progress, created_at)
+                VALUES (%s,'by_window',%s,%s,%s,%s,%s,%s,'pending',0,%s)
+                """,
+                (
+                    run_id,
+                    req.pool_id,
+                    json.dumps(windows, ensure_ascii=False),
+                    len(windows),
+                    json.dumps(req.scales) if req.scales else None,
+                    req.top_k,
+                    req.agg,
+                    datetime.now(),
+                ),
+            )
+        c.commit()
+
+    body = {
+        "windows": windows, "pool_id": req.pool_id, "scales": req.scales,
+        "top_k": req.top_k, "agg": req.agg, "min_score": req.min_score,
+    }
+    bt.add_task(submit, pattern_search_window_entry, run_id, body)
+    return ok({"run_id": run_id, "status": "pending"})
 
 
 # ---------------------------- 需求1：截图找相似股票（异步任务） ----------------------------
@@ -130,7 +174,7 @@ def list_pattern_runs(status: str | None = None, limit: int = 50) -> dict:
     """列出检索任务（倒序 + 可选按 status 筛）。不返回曲线/结果大字段。"""
     limit = max(1, min(int(limit), 500))
     sql = (
-        "SELECT run_id, pool_id, image_names, num_images, hint, top_k, agg, "
+        "SELECT run_id, kind, pool_id, image_names, query_json, num_images, hint, top_k, agg, "
         "status, progress, error_message, created_at, started_at, finished_at "
         "FROM fr_pattern_search_runs WHERE 1=1"
     )
@@ -145,11 +189,12 @@ def list_pattern_runs(status: str | None = None, limit: int = 50) -> dict:
             cur.execute(sql, params)
             rows = cur.fetchall()
     for r in rows or []:
-        if r.get("image_names"):
-            try:
-                r["image_names"] = json.loads(r["image_names"])
-            except (ValueError, TypeError):
-                r["image_names"] = []
+        for col in ("image_names", "query_json"):
+            if r.get(col):
+                try:
+                    r[col] = json.loads(r[col])
+                except (ValueError, TypeError):
+                    r[col] = None
     return ok(rows)
 
 
@@ -170,11 +215,12 @@ def get_pattern_run(run_id: str) -> dict:
                 (run_id,),
             )
             res = cur.fetchone()
-    if run.get("image_names"):
-        try:
-            run["image_names"] = json.loads(run["image_names"])
-        except (ValueError, TypeError):
-            run["image_names"] = []
+    for col in ("image_names", "query_json"):
+        if run.get(col):
+            try:
+                run[col] = json.loads(run[col])
+            except (ValueError, TypeError):
+                run[col] = None
     run["query_curves"] = []
     run["matches"] = []
     if res:

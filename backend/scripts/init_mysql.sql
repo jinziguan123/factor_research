@@ -248,8 +248,10 @@ CREATE TABLE IF NOT EXISTS `fr_param_sensitivity_runs` (
 -- by_image 涉及视觉 LLM + 全池 DTW，耗时长，改为异步任务 + 记录列表。详见 migrations/018。
 CREATE TABLE IF NOT EXISTS `fr_pattern_search_runs` (
   `run_id`        varchar(64)       NOT NULL,
+  `kind`          varchar(16)       NOT NULL DEFAULT 'by_image' COMMENT 'by_image 截图 / by_window 走势',
   `pool_id`       bigint unsigned   NOT NULL,
   `image_names`   text COMMENT '上传截图文件名 JSON 数组',
+  `query_json`    longtext COMMENT 'by_window 的查询窗口列表 [{symbol,start,end}]',
   `num_images`    smallint unsigned NOT NULL DEFAULT 0,
   `hint`          text,
   `scales_json`   varchar(200)      DEFAULT NULL,
