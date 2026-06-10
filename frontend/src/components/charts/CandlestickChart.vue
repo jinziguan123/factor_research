@@ -304,9 +304,17 @@ const option = computed(() => {
         color: colors.value.up, color0: colors.value.down,
         borderColor: colors.value.up, borderColor0: colors.value.down,
       },
+      // 大数据优化：超过阈值后走 large 渲染管线，几千~上万根蜡烛也不卡/白屏。
+      // candlestick 的 large 模式保留涨跌色（用 series 级 color/color0），不丢配色。
+      large: true,
+      largeThreshold: 600,
+      progressive: 4000,
+      progressiveThreshold: 4000,
     },
     {
       name: '成交量', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumeData.value,
+      large: true,
+      largeThreshold: 600,
     },
   ]
   for (let i = 0; i < N; i++) {
@@ -318,6 +326,8 @@ const option = computed(() => {
       yAxisIndex: 2 + i,
       data: row.values,
       symbol: 'none',
+      // 长区间因子线按 LTTB 降采样渲染，保形又省点。
+      sampling: 'lttb',
       lineStyle: { color: row.color, width: 1.5 },
       markLine: {
         silent: true,
