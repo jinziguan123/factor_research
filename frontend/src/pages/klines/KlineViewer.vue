@@ -113,7 +113,9 @@ function slotQuery(index: number) {
     const slot = selectedFactors.value[index]
     if (!slot || !symbol.value.trim()) return null
     void refreshKey.value  // dependency tracking
-    const range = freq.value === '1d' ? dailyRange.value : minuteRange.value
+    const range = freq.value === '1d'
+      ? (dailyRange.value ?? defaultDailyRange())
+      : (minuteRange.value ?? defaultMinuteRange())
     return {
       symbol: symbol.value.trim().toUpperCase(),
       start: toIso(range[0]),
@@ -177,14 +179,26 @@ const selectMode = ref(false)
 
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
-const dailyRange = ref<[number, number]>([
-  new Date(today.getFullYear(), today.getMonth() - 6, today.getDate()).getTime(),
-  today.getTime(),
-])
-const minuteRange = ref<[number, number]>([
-  new Date(today.getFullYear(), today.getMonth(), today.getDate() - 5).getTime(),
-  today.getTime(),
-])
+// 默认窗口：日线最近 6 个月、分钟线最近 5 天。抽成函数便于「清空后恢复默认」。
+function defaultDailyRange(): [number, number] {
+  return [
+    new Date(today.getFullYear(), today.getMonth() - 6, today.getDate()).getTime(),
+    today.getTime(),
+  ]
+}
+function defaultMinuteRange(): [number, number] {
+  return [
+    new Date(today.getFullYear(), today.getMonth(), today.getDate() - 5).getTime(),
+    today.getTime(),
+  ]
+}
+// n-date-picker 的 clearable 清空后会把值设成 null；这里用宽松类型接住，再由 watch 复位。
+const dailyRange = ref<[number, number] | null>(defaultDailyRange())
+const minuteRange = ref<[number, number] | null>(defaultMinuteRange())
+
+// 用户点 × 清空时间范围 → 恢复默认窗口，避免 dailyRange 为 null 导致取数报错/空图。
+watch(dailyRange, (v) => { if (!v) dailyRange.value = defaultDailyRange() })
+watch(minuteRange, (v) => { if (!v) minuteRange.value = defaultMinuteRange() })
 
 function toIso(ts: number): string {
   // 本地日期转 ISO 的 YYYY-MM-DD；避免 toISOString() 的 UTC 偏移问题。
@@ -196,27 +210,27 @@ function toIso(ts: number): string {
 }
 
 // 查询参数：用 getter 让 enabled 能 lazy 读最新的 symbol。
-const dailyParams = computed(() =>
-  freq.value === '1d' && symbol.value
-    ? {
-        symbol: symbol.value.trim().toUpperCase(),
-        start: toIso(dailyRange.value[0]),
-        end: toIso(dailyRange.value[1]),
-        adjust: adjust.value,
-      }
-    : null,
-)
+const dailyParams = computed(() => {
+  if (freq.value !== '1d' || !symbol.value) return null
+  const r = dailyRange.value ?? defaultDailyRange()
+  return {
+    symbol: symbol.value.trim().toUpperCase(),
+    start: toIso(r[0]),
+    end: toIso(r[1]),
+    adjust: adjust.value,
+  }
+})
 
-const minuteParams = computed(() =>
-  freq.value === '1m' && symbol.value
-    ? {
-        symbol: symbol.value.trim().toUpperCase(),
-        start: toIso(minuteRange.value[0]),
-        end: toIso(minuteRange.value[1]),
-        adjust: adjust.value,
-      }
-    : null,
-)
+const minuteParams = computed(() => {
+  if (freq.value !== '1m' || !symbol.value) return null
+  const r = minuteRange.value ?? defaultMinuteRange()
+  return {
+    symbol: symbol.value.trim().toUpperCase(),
+    start: toIso(r[0]),
+    end: toIso(r[1]),
+    adjust: adjust.value,
+  }
+})
 
 const dailyQ = useDailyKline(dailyParams)
 const minuteQ = useMinuteKline(minuteParams)
