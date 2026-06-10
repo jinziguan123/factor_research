@@ -131,8 +131,21 @@ export function useImportSymbols() {
   })
 }
 
+/** 搜索词是否值得发请求：
+ * - 纯数字（在敲股票代码）→ 必须满 6 位才查，避免「0」「00」…每个按键都打后端；
+ * - 含非数字（在按名称搜，如「平安」）→ 至少 1 个字符即可；
+ * - 空串 → 不查。
+ */
+export function isSymbolSearchable(raw: string | null | undefined): boolean {
+  const s = (raw ?? '').trim()
+  if (!s) return false
+  if (/^\d+$/.test(s)) return s.length === 6
+  return true
+}
+
 /** 按代码 / 中文名模糊搜索股票（用于池编辑器的下拉补全）。
  * 传响应式的 q（Ref / ComputedRef / getter），值变化自动 refetch。
+ * 仅当 ``isSymbolSearchable`` 通过时才发请求（股票代码必须满 6 位）。
  */
 export function useSearchSymbols(q: MaybeRefOrGetter<string>) {
   return useQuery<StockSymbol[]>({
@@ -140,7 +153,7 @@ export function useSearchSymbols(q: MaybeRefOrGetter<string>) {
     queryFn: () => client.get('/symbols', {
       params: { q: toValue(q) ?? '', limit: 50 },
     }).then(r => r.data),
-    // 空 q 时后端也返回前 50 条，点开下拉就能看到初始候选；所以不加 enabled 条件。
+    enabled: () => isSymbolSearchable(toValue(q)),
     staleTime: 30_000,
   })
 }
