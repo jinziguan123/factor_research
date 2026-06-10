@@ -547,7 +547,8 @@ watch(option, () => {
 <style scoped>
 .kline-wrap { position: relative; }
 .find-similar-btn {
-  position: absolute; top: 6px; right: 12px; z-index: 10;
+  /* 放左上角：避开右边缘的 VP 成交量剖面条与顶部居中的图例。 */
+  position: absolute; top: 6px; left: 70px; z-index: 10;
   padding: 4px 12px; font-size: 13px; cursor: pointer;
   background: #2080f0; color: #fff; border: none; border-radius: 4px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.2);
