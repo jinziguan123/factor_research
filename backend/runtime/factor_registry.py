@@ -28,7 +28,12 @@ import logging
 import pkgutil
 import sys
 import threading
+import time
 from typing import Any
+
+import pymysql.err
+
+from pymysql.connections import Connection
 
 from backend.engine.base_factor import BaseFactor
 from backend.storage.mysql_client import mysql_conn
@@ -76,8 +81,9 @@ class FactorRegistry:
         """
         updated: list[str] = []
         root = importlib.import_module(root_pkg)
-        # ``walk_packages`` 递归遍历（含子包）；filter 掉 ``.base`` 结尾的模块
-        # 避免把 base.py re-export 的 BaseFactor 反向当作因子注册。
+
+        # 收集所有需要扫描的 (cls, code_hash) 对，先不做 DB 写入。
+        pending: list[tuple[type[BaseFactor], str]] = []
         for mod_info in pkgutil.walk_packages(
             root.__path__, prefix=f"{root_pkg}."
         ):
@@ -87,13 +93,9 @@ class FactorRegistry:
             try:
                 module = importlib.import_module(mod_name)
             except Exception:  # noqa: BLE001
-                # 单个模块语法 / 导入错误不应阻断整个扫描；log + 跳过。
                 logger.exception("导入因子模块失败：%s", mod_name)
                 continue
             for name, obj in inspect.getmembers(module, inspect.isclass):
-                # 只认"在本模块里定义"的 BaseFactor 子类：
-                # - 排除 re-export 的 BaseFactor 本体；
-                # - 排除从 base.py 引入的基类被重复扫描。
                 if obj is BaseFactor:
                     continue
                 if not issubclass(obj, BaseFactor):
@@ -118,9 +120,46 @@ class FactorRegistry:
                     )
                     continue
                 code_hash = hashlib.sha1(src.encode("utf-8")).hexdigest()
-                changed = self._register_one(obj, code_hash)
-                if changed:
-                    updated.append(factor_id)
+                pending.append((obj, code_hash))
+
+        # 先把内存表更新一遍（跳过 code_hash 未变的），收集需要写 DB 的。
+        need_persist: list[tuple[type[BaseFactor], str]] = []
+        with self._lock:
+            for cls, code_hash in pending:
+                factor_id = cls.factor_id
+                prev_hash = self._code_hash.get(factor_id)
+                if prev_hash == code_hash:
+                    self._classes[factor_id] = cls
+                else:
+                    self._classes[factor_id] = cls
+                    self._code_hash[factor_id] = code_hash
+                    need_persist.append((cls, code_hash))
+
+        # 逐个写 DB：每个因子独立 commit，避免长时间持有行锁。
+        # 若连接中途断开（WinError 10053 / timeout），换新连接
+        # 从下一个因子继续（已 commit 的不受影响，UPSERT 幂等）。
+        if need_persist:
+            idx = 0
+            while idx < len(need_persist):
+                try:
+                    with mysql_conn() as c:
+                        while idx < len(need_persist):
+                            cls, code_hash = need_persist[idx]
+                            new_version = self._persist_meta(
+                                cls, code_hash, conn=c
+                            )
+                            c.commit()
+                            with self._lock:
+                                self._version[cls.factor_id] = new_version
+                            updated.append(cls.factor_id)
+                            idx += 1
+                except pymysql.err.OperationalError:
+                    logger.warning(
+                        "scan_and_register 写 DB 连接中断，"
+                        "换新连接继续（已完成 %d/%d）",
+                        idx, len(need_persist),
+                    )
+
         return updated
 
     def get(self, factor_id: str) -> BaseFactor:
@@ -317,7 +356,10 @@ class FactorRegistry:
             return True
 
     def _persist_meta(
-        self, cls: type[BaseFactor], code_hash: str
+        self,
+        cls: type[BaseFactor],
+        code_hash: str,
+        conn: "Connection | None" = None,
     ) -> int:
         """原子 UPSERT ``fr_factor_meta``，返回写入后的 version。
 
@@ -349,7 +391,7 @@ class FactorRegistry:
         )
         supported_freqs = ",".join(getattr(cls, "supported_freqs", ("1d",)))
 
-        with mysql_conn() as c:
+        def _do_upsert(c: "Connection") -> dict | None:
             with c.cursor() as cur:
                 cur.execute(
                     "INSERT INTO fr_factor_meta "
@@ -381,13 +423,39 @@ class FactorRegistry:
                         code_hash,
                     ),
                 )
-                # 回读 UPSERT 后的 version，作为进程内缓存的真值。
                 cur.execute(
                     "SELECT version FROM fr_factor_meta WHERE factor_id=%s",
                     (factor_id,),
                 )
-                row = cur.fetchone()
-            c.commit()
+                return cur.fetchone()
+
+        if conn is not None:
+            # 批量模式：复用调用方传入的连接，不做重试（连接由调用方管理），
+            # 也不在这里 commit——由调用方在整批写完后统一 commit。
+            row = _do_upsert(conn)
+        else:
+            # 独立模式：自建连接，带重试。
+            max_retries = 3
+            row = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    with mysql_conn() as c:
+                        row = _do_upsert(c)
+                        c.commit()
+                    break
+                except pymysql.err.OperationalError:
+                    if attempt < max_retries:
+                        wait = attempt * 0.5
+                        logger.warning(
+                            "MySQL 连接异常，第 %d/%d 次重试（%.1fs 后）：%s",
+                            attempt,
+                            max_retries,
+                            wait,
+                            factor_id,
+                        )
+                        time.sleep(wait)
+                    else:
+                        raise
         if not row:
             # 理论不可达：我们刚 INSERT/UPDATE 过同一行。真走到这里说明 DB 异常。
             raise RuntimeError(

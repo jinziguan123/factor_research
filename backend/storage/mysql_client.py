@@ -32,6 +32,9 @@ def get_connection() -> Connection:
         charset="utf8mb4",
         cursorclass=DictCursor,
         autocommit=False,
+        connect_timeout=int(settings.mysql_connect_timeout_s),
+        read_timeout=int(settings.mysql_read_timeout_s),
+        write_timeout=int(settings.mysql_read_timeout_s),
     )
 
 
