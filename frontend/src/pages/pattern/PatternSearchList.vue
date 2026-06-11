@@ -11,7 +11,8 @@ import {
 } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import {
-  usePatternRuns, useDeletePatternRun, useCreateWindowSearch, type PatternRun,
+  usePatternRuns, useDeletePatternRun, useCreateWindowSearch,
+  useCreateLearnedSearch, type PatternRun, type WindowSpec,
 } from '@/api/patternSearch'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
 
@@ -21,25 +22,33 @@ const message = useMessage()
 const { data: runs, refetch } = usePatternRuns()
 const del = useDeletePatternRun()
 const createWindow = useCreateWindowSearch()
+const createLearned = useCreateLearnedSearch()
 
-// 一键重新检索：走势选股的输入全在记录里，可原样重建重跑；截图任务图片未存，回新建页重传。
+function learnedPatternOf(r: PatternRun): string | null {
+  const q = r.query_json
+  return (q && !Array.isArray(q) && q.pattern_name) ? q.pattern_name : null
+}
+
+// 一键重新检索：走势选股/学习型都能原样重建重跑；截图任务图片未存，回新建页重传。
 async function rerun(r: PatternRun) {
-  if (r.kind === 'by_window' && (r.query_json?.length ?? 0) > 0) {
-    try {
+  try {
+    if (r.kind === 'by_window' && Array.isArray(r.query_json) && r.query_json.length > 0) {
       const res = await createWindow.mutateAsync({
-        pool_id: r.pool_id,
-        windows: r.query_json!,
-        agg: (r.agg as 'min' | 'mean') ?? 'min',
-        top_k: r.top_k,
+        pool_id: r.pool_id, windows: r.query_json as WindowSpec[],
+        agg: (r.agg as 'min' | 'mean') ?? 'min', top_k: r.top_k,
       })
       message.success('已按相同条件重新提交')
       router.push(`/pattern/runs/${res.run_id}`)
-    } catch (e: any) {
-      message.error(e?.message || '重新检索失败')
+    } else if (r.kind === 'learned' && learnedPatternOf(r)) {
+      const res = await createLearned.mutateAsync({ pattern_name: learnedPatternOf(r)!, pool_id: r.pool_id, top_k: r.top_k })
+      message.success('已用最新标注重新训练+选股')
+      router.push(`/pattern/runs/${res.run_id}`)
+    } else {
+      message.info('截图任务的图片未保存，请到新建页重新上传')
+      router.push('/pattern/new')
     }
-  } else {
-    message.info('截图任务的图片未保存，请到新建页重新上传')
-    router.push('/pattern/new')
+  } catch (e: any) {
+    message.error(e?.message || '重新检索失败')
   }
 }
 
@@ -75,13 +84,18 @@ const columns: DataTableColumns<PatternRun> = [
   { title: '股票池', key: 'pool_id', width: 90, render: (r) => `#${r.pool_id}` },
   {
     title: '类型', key: 'kind', width: 90,
-    render: (r) => (r.kind === 'by_window' ? '走势选股' : '截图'),
+    render: (r) => (r.kind === 'by_window' ? '走势选股' : r.kind === 'learned' ? '学习型' : '截图'),
   },
   {
     title: '查询', key: 'query', ellipsis: { tooltip: true },
-    render: (r) => r.kind === 'by_window'
-      ? (r.query_json ?? []).map(w => `${w.symbol} ${w.start ?? ''}~${w.end ?? ''}`).join('；') || '-'
-      : ((r.image_names ?? []).join('、') || `${r.num_images} 张图`),
+    render: (r) => {
+      if (r.kind === 'by_window') {
+        const ws = Array.isArray(r.query_json) ? r.query_json : []
+        return ws.map(w => `${w.symbol} ${w.start ?? ''}~${w.end ?? ''}`).join('；') || '-'
+      }
+      if (r.kind === 'learned') return `形态：${learnedPatternOf(r) ?? '-'}`
+      return (r.image_names ?? []).join('、') || `${r.num_images} 张图`
+    },
   },
   {
     title: '状态', key: 'status', width: 140,

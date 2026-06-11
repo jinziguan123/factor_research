@@ -16,7 +16,8 @@ import { GridComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  usePatternRun, useAbortPatternRun, useCreateWindowSearch, type PatternMatch,
+  usePatternRun, useAbortPatternRun, useCreateWindowSearch,
+  useCreateLearnedSearch, useAddLabel, type PatternMatch, type WindowSpec,
 } from '@/api/patternSearch'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -31,30 +32,57 @@ const runId = computed(() => String(route.params.runId ?? ''))
 const { data: run } = usePatternRun(runId)
 const abort = useAbortPatternRun()
 const createWindow = useCreateWindowSearch()
+const createLearned = useCreateLearnedSearch()
+const addLabel = useAddLabel()
 
 const isActive = computed(() =>
   ['pending', 'running', 'aborting'].includes(run.value?.status ?? ''))
 
-// 一键重新检索：走势选股原样重建重跑；截图任务图片未存，回新建页重传。
+// learned 任务的形态名（query_json={pattern_name}）；结果可继续标注、回炉重训。
+const learnedPattern = computed<string | null>(() => {
+  const q = run.value?.query_json
+  return (q && !Array.isArray(q) && q.pattern_name) ? q.pattern_name : null
+})
+
+// 一键重新检索/重训：走势选股与学习型都能原样重建；截图任务图片未存，回新建页重传。
 async function rerun() {
   const r = run.value
   if (!r) return
-  if (r.kind === 'by_window' && (r.query_json?.length ?? 0) > 0) {
-    try {
+  try {
+    if (r.kind === 'by_window' && Array.isArray(r.query_json) && r.query_json.length > 0) {
       const res = await createWindow.mutateAsync({
-        pool_id: r.pool_id,
-        windows: r.query_json!,
-        agg: (r.agg as 'min' | 'mean') ?? 'min',
-        top_k: r.top_k,
+        pool_id: r.pool_id, windows: r.query_json as WindowSpec[],
+        agg: (r.agg as 'min' | 'mean') ?? 'min', top_k: r.top_k,
       })
       message.success('已按相同条件重新提交')
       router.push(`/pattern/runs/${res.run_id}`)
-    } catch (e: any) {
-      message.error(e?.message || '重新检索失败')
+    } else if (r.kind === 'learned' && learnedPattern.value) {
+      const res = await createLearned.mutateAsync({ pattern_name: learnedPattern.value, pool_id: r.pool_id, top_k: r.top_k })
+      message.success('已用最新标注重新训练+选股')
+      router.push(`/pattern/runs/${res.run_id}`)
+    } else {
+      message.info('截图任务的图片未保存，请到新建页重新上传')
+      router.push('/pattern/new')
     }
-  } else {
-    message.info('截图任务的图片未保存，请到新建页重新上传')
-    router.push('/pattern/new')
+  } catch (e: any) {
+    message.error(e?.message || '重新检索失败')
+  }
+}
+
+// learned 结果上的 👍👎：把这只股票的该窗口加为正/反例（喂给同一个形态）。
+async function onLabel(m: PatternMatch, value: number) {
+  if (!learnedPattern.value) return
+  try {
+    await addLabel.mutateAsync({
+      pattern_name: learnedPattern.value,
+      symbol: m.label,
+      start: m.start_date ?? undefined,
+      end: m.end_date ?? undefined,
+      label: value,
+    })
+    message.success(value === 1 ? '已加为正例（重训后生效）' : '已加为反例')
+  } catch (e: any) {
+    message.error(e?.message || '标注失败')
   }
 }
 const queryCurves = computed<number[][]>(() => run.value?.query_curves ?? [])
@@ -111,13 +139,16 @@ function queryOption(curve: number[]) {
 
     <n-card v-if="run" style="margin-bottom: 16px">
       <n-descriptions :column="3" label-placement="left" size="small">
-        <n-descriptions-item label="类型">{{ run.kind === 'by_window' ? '走势选股' : '截图检索' }}</n-descriptions-item>
-        <n-descriptions-item label="股票池">#{{ run.pool_id }}</n-descriptions-item>
-        <n-descriptions-item label="聚合">{{ run.agg }}</n-descriptions-item>
-        <n-descriptions-item v-if="run.kind === 'by_window'" label="查询走势" :span="3">
-          {{ (run.query_json ?? []).map(w => `${w.symbol} ${w.start ?? ''}~${w.end ?? ''}`).join('；') || '-' }}
+        <n-descriptions-item label="类型">
+          {{ run.kind === 'by_window' ? '走势选股' : run.kind === 'learned' ? '学习型选股' : '截图检索' }}
         </n-descriptions-item>
-        <template v-else>
+        <n-descriptions-item label="股票池">#{{ run.pool_id }}</n-descriptions-item>
+        <n-descriptions-item v-if="run.kind !== 'learned'" label="聚合">{{ run.agg }}</n-descriptions-item>
+        <n-descriptions-item v-if="run.kind === 'learned'" label="形态">{{ learnedPattern ?? '-' }}</n-descriptions-item>
+        <n-descriptions-item v-if="run.kind === 'by_window'" label="查询走势" :span="3">
+          {{ (Array.isArray(run.query_json) ? run.query_json : []).map(w => `${w.symbol} ${w.start ?? ''}~${w.end ?? ''}`).join('；') || '-' }}
+        </n-descriptions-item>
+        <template v-else-if="run.kind !== 'learned'">
           <n-descriptions-item label="图数">{{ run.num_images }}</n-descriptions-item>
           <n-descriptions-item label="截图">{{ (run.image_names ?? []).join('、') || '-' }}</n-descriptions-item>
           <n-descriptions-item label="提示">{{ run.hint || '-' }}</n-descriptions-item>
@@ -139,15 +170,24 @@ function queryOption(curve: number[]) {
     </n-alert>
 
     <n-card v-if="run && run.status === 'success'">
-      <div style="font-size: 12px; opacity: 0.6; margin-bottom: 4px">系统识别出的查询曲线（每张图一条）：</div>
+      <div v-if="queryCurves.length" style="font-size: 12px; opacity: 0.6; margin-bottom: 4px">
+        {{ run.kind === 'learned' ? '学到的正例曲线（参考）：' : '系统识别出的查询曲线（每张图一条）：' }}
+      </div>
       <n-space :size="12" wrap>
         <div v-for="(c, i) in queryCurves" :key="i" style="width: 200px">
-          <div style="font-size: 12px; opacity: 0.5">图 {{ i + 1 }}</div>
+          <div style="font-size: 12px; opacity: 0.5">{{ run.kind === 'learned' ? '正例' : '图' }} {{ i + 1 }}</div>
           <v-chart style="height: 100px" :option="queryOption(c)" autoresize />
         </div>
       </n-space>
+      <div v-if="run.kind === 'learned'" style="font-size:12px;opacity:.6;margin:8px 0">
+        对下面结果点 👍/👎 继续标注，再点右上「重新检索」即可用新标注重训——越标越准。
+      </div>
       <div style="margin-top: 12px">
-        <match-result-list :matches="run.matches" @open="openMatch" />
+        <match-result-list
+          :matches="run.matches"
+          :labelable="run.kind === 'learned'"
+          @open="openMatch" @label="onLabel"
+        />
       </div>
     </n-card>
   </div>
