@@ -128,9 +128,12 @@ def search_by_learned(
         close = df["close"].dropna()
         idx = close.index
         import pandas as pd
-        if lb.get("start") and lb.get("end"):
+        # 兼容两种 key：DB 读出来是 start_date/end_date；API 入参是 start/end。
+        ws = lb.get("start") or lb.get("start_date")
+        we = lb.get("end") or lb.get("end_date")
+        if ws and we:
             mask = np.asarray(
-                (idx >= pd.Timestamp(lb["start"])) & (idx <= pd.Timestamp(lb["end"]))
+                (idx >= pd.Timestamp(ws)) & (idx <= pd.Timestamp(we))
             )
             seg = close.to_numpy(dtype=float)[mask]
         else:
