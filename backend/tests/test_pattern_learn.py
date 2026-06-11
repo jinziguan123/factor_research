@@ -84,10 +84,11 @@ def test_window_length_follows_labeled_range():
     panels = {"P.SZ": brk, "N.SZ": rnd, "C.SZ": _breakdown(150) + 2}
     dates = pd.date_range("2025-01-01", periods=150, freq="B")
     start, end = dates[40].strftime("%Y-%m-%d"), dates[129].strftime("%Y-%m-%d")  # 90 个交易日
+    # 用 DB 真实列名 start_date/end_date（回归：曾因读成 start/end 导致区间被忽略→全60日）
     labels = [
-        {"symbol": "P.SZ", "start": start, "end": end, "label": 1},
-        {"symbol": "N.SZ", "start": start, "end": end, "label": 0},
+        {"symbol": "P.SZ", "start_date": start, "end_date": end, "label": 1},
+        {"symbol": "N.SZ", "start_date": start, "end_date": end, "label": 0},
     ]
     res = pl.search_by_learned(_FakePool(panels), labels=labels, pool_id=1, top_k=5)
     assert res["matches"], "应有结果"
-    assert all(m["scale"] == 90 for m in res["matches"])  # ≈标注区间长度
+    assert all(m["scale"] == 90 for m in res["matches"])  # ≈标注区间长度，证明区间被正确应用
