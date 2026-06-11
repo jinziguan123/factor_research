@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     mysql_read_timeout_s: float = Field(
         default=30.0, alias="MYSQL_READ_TIMEOUT_S"
     )
+    # MySQL 连接池：最小保持 / 最大上限
+    mysql_pool_size: int = Field(default=5, alias="MYSQL_POOL_SIZE")
+    mysql_pool_max: int = Field(default=10, alias="MYSQL_POOL_MAX")
 
     # LightGBM 设备：cpu / gpu / auto（auto=检测 GPU 可用则用）
     lgb_device: str = Field(default="auto", alias="FR_LGB_DEVICE")
