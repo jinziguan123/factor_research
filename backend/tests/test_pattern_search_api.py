@@ -197,3 +197,41 @@ def test_by_window_rejects_empty(monkeypatch):
     monkeypatch.setattr(router_mod, "submit", lambda *a, **k: None)
     resp = client.post("/api/pattern_search/by_window", json={"pool_id": 5})
     assert resp.status_code == 400
+
+
+# ---------------------------- 学习型选股 labels + by_learned ----------------------------
+
+
+def test_add_label(monkeypatch):
+    conn = _FakeConn()
+    conn.cur.lastrowid = 42
+    _patch_conn(monkeypatch, conn)
+    resp = client.post("/api/pattern_search/labels", json={
+        "pattern_name": "涨后跌穿", "symbol": "002552.SZ",
+        "start": "2026-03-01", "end": "2026-04-27", "label": 1,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["data"]["id"] == 42
+
+
+def test_list_labels(monkeypatch):
+    rows = [{"id": 1, "pattern_name": "p", "symbol": "AAA.SZ", "label": 1}]
+    conn = _FakeConn(fetchall_q=[rows])
+    _patch_conn(monkeypatch, conn)
+    resp = client.get("/api/pattern_search/labels", params={"pattern_name": "p"})
+    assert resp.status_code == 200
+    assert resp.json()["data"][0]["symbol"] == "AAA.SZ"
+
+
+def test_by_learned_creates_run(monkeypatch):
+    conn = _FakeConn()
+    _patch_conn(monkeypatch, conn)
+    submitted: list = []
+    monkeypatch.setattr(router_mod, "submit", lambda fn, *a, **k: submitted.append((fn, a)))
+    resp = client.post("/api/pattern_search/by_learned", json={
+        "pattern_name": "涨后跌穿", "pool_id": 5, "top_k": 20,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["data"]["status"] == "pending"
+    assert submitted[0][0] is router_mod.pattern_search_learned_entry
+    assert submitted[0][1][1]["pattern_name"] == "涨后跌穿"
