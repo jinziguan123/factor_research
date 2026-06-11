@@ -702,7 +702,7 @@ def run_eval(run_id: str, body: dict) -> None:
         check_abort("eval", run_id)
 
         reg = FactorRegistry()
-        reg.scan_and_register()
+        reg.scan_and_register(persist=False)
         factor = reg.get(body["factor_id"])
         # 固化到 DB 最新版本（而非 current_version 的进程快照），避免评估过程中
         # 热加载更新 version 导致任务记录与实际执行不一致。
@@ -823,7 +823,7 @@ def run_eval(run_id: str, body: dict) -> None:
             log.info("eval %s: computing style factor attribution...", run_id)
             from backend.services.attribution import AttributionService
             reg2 = FactorRegistry()
-            reg2.scan_and_register()
+            reg2.scan_and_register(persist=False)
 
             style_ids = ["size_mv", "value_ep", "momentum_12m1m", "volatility_60d", "liquidity_20d"]
             style_panels: dict[str, pd.DataFrame] = {}

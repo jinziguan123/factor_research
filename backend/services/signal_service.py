@@ -522,7 +522,7 @@ def run_signal(run_id: str, body: dict) -> None:
         top_n: int | None = int(top_n_raw) if top_n_raw is not None else None
 
         reg = FactorRegistry()
-        reg.scan_and_register()
+        reg.scan_and_register(persist=False)
         base_data = DataService()
         symbols = base_data.resolve_pool(int(body["pool_id"]))
         if len(symbols) < n_groups:

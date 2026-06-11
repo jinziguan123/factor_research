@@ -56,7 +56,7 @@ class MySQLPool:
     """线程安全的 MySQL 连接池。
 
     - ``borrow()``：借出一个连接（自动探活，死连接丢弃重建）；
-    - ``返还(conn)``：归还连接到池；
+    - ``release(conn)``：归还连接到池（先 rollback 清理事务）；
     - ``discard(conn)``：丢弃死连接（异常路径用）。
     """
 
@@ -130,9 +130,16 @@ class MySQLPool:
                 self._close_one(conn)
                 continue
 
-    def 返还(self, conn: Connection) -> None:
-        """归还连接到池。"""
-        if not self._validate(conn):
+    def release(self, conn: Connection) -> None:
+        """归还连接到池。
+
+        归还前 ``rollback()`` 清掉调用方可能遗留的未提交事务（autocommit=False），
+        避免下一个借用者继承到脏事务状态。``rollback`` 本身也是一次轻量探活——
+        连接已坏会抛异常，落到 except 分支直接丢弃，省去额外 ``ping`` 往返。
+        """
+        try:
+            conn.rollback()
+        except Exception:
             self._close_one(conn)
             return
         try:
@@ -216,7 +223,7 @@ def mysql_conn() -> Iterator[Connection]:
         pool.discard(conn)
         raise
     else:
-        pool.返还(conn)
+        pool.release(conn)
 
 
 def _is_disconnect_error(exc: pymysql.err.OperationalError) -> bool:

@@ -401,7 +401,7 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
     """
     # 1) 参数解析 + 因子实例 + 版本 / hash 固化
     reg = FactorRegistry()
-    reg.scan_and_register()
+    reg.scan_and_register(persist=False)
     factor = reg.get(body["factor_id"])
     version = reg.latest_version_from_db(body["factor_id"])
 
@@ -681,7 +681,7 @@ def run_walk_forward(
     try:
         _update_status(run_id, status="running", started=True)
         reg = FactorRegistry()
-        reg.scan_and_register()
+        reg.scan_and_register(persist=False)
         try:
             factor = reg.get(body["factor_id"])
         except KeyError:

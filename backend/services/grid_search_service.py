@@ -74,7 +74,7 @@ def run_grid_search(run_id: str, body: dict) -> None:
         check_abort("grid_search", run_id)
 
         reg = FactorRegistry()
-        reg.scan_and_register()
+        reg.scan_and_register(persist=False)
         factor_id: str = body["factor_id"]
         factor = reg.get(factor_id)
 
