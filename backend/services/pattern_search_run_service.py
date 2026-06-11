@@ -152,7 +152,6 @@ def run_pattern_search_learned(run_id: str, body: dict) -> None:
             DataService(),
             labels=labels,
             pool_id=body["pool_id"],
-            scales=body.get("scales"),
             top_k=body.get("top_k", 20),
         )
     _run_and_persist(run_id, _do)
