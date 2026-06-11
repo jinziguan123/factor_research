@@ -67,6 +67,22 @@ def test_scan_registers_builtins():
     assert expected.issubset(listed_ids)
 
 
+def test_scan_persist_false_never_touches_db(monkeypatch):
+    """persist=False（worker 用）只加载内存、绝不写库——把 DB 入口换成抛错桩验证。"""
+    from backend.runtime import factor_registry as fr_mod
+
+    def _boom(*a, **k):
+        raise AssertionError("persist=False 不应触碰 MySQL")
+
+    monkeypatch.setattr(fr_mod, "mysql_conn", _boom)
+    monkeypatch.setattr(fr_mod, "execute_with_retry", _boom)
+
+    reg = _fresh_registry()
+    updated = reg.scan_and_register("backend.factors", persist=False)
+    assert "reversal_n" in updated               # 内存里识别到了
+    assert reg.get("reversal_n") is not None      # 类已加载，可取实例（不读库）
+
+
 @pytest.mark.integration
 def test_get_instance():
     """get(factor_id) 返回可直接调用的 BaseFactor 实例。"""

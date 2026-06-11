@@ -28,7 +28,6 @@ import logging
 import pkgutil
 import sys
 import threading
-import time
 from typing import Any
 
 import pymysql.err
@@ -36,7 +35,7 @@ import pymysql.err
 from pymysql.connections import Connection
 
 from backend.engine.base_factor import BaseFactor
-from backend.storage.mysql_client import mysql_conn
+from backend.storage.mysql_client import execute_with_retry, mysql_conn
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +71,21 @@ class FactorRegistry:
     # ---------------------------- 公共 API ----------------------------
 
     def scan_and_register(
-        self, root_pkg: str = "backend.factors"
+        self, root_pkg: str = "backend.factors", persist: bool = True
     ) -> list[str]:
         """扫描 ``root_pkg`` 包下所有子模块，注册继承 ``BaseFactor`` 的类。
 
+        Args:
+            persist: 是否把因子元数据写入 MySQL ``fr_factor_meta``。
+                - ``True``（默认）：启动钩子用，写库刷新 version/code_hash。
+                - ``False``：**worker（评估/回测/合成等）用**——只把因子类加载进内存，
+                  跳过 ~100 次 UPSERT。worker 只需要类来计算，不需要每次重写库；
+                  这样避免每跑一个任务就对 MySQL 来一次写风暴（Windows 远程库下
+                  极易触发 WinError 10053）。版本号各 service 按需另走 DB 读取。
+
         Returns:
             被新增或 code_hash 变动的 factor_id 列表（顺序与扫描顺序一致）。
+            ``persist=False`` 时返回内存里新增/变更的 factor_id（不含写库）。
         """
         updated: list[str] = []
         root = importlib.import_module(root_pkg)
@@ -134,6 +142,10 @@ class FactorRegistry:
                     self._classes[factor_id] = cls
                     self._code_hash[factor_id] = code_hash
                     need_persist.append((cls, code_hash))
+
+        # persist=False（worker）：到此为止，因子类已进内存，不写库直接返回变更列表。
+        if not persist:
+            return [cls.factor_id for cls, _ in need_persist]
 
         # 逐个写 DB：每个因子独立 commit，避免长时间持有行锁。
         # 若连接中途断开（WinError 10053 / timeout），换新连接
@@ -434,28 +446,13 @@ class FactorRegistry:
             # 也不在这里 commit——由调用方在整批写完后统一 commit。
             row = _do_upsert(conn)
         else:
-            # 独立模式：自建连接，带重试。
-            max_retries = 3
-            row = None
-            for attempt in range(1, max_retries + 1):
-                try:
-                    with mysql_conn() as c:
-                        row = _do_upsert(c)
-                        c.commit()
-                    break
-                except pymysql.err.OperationalError:
-                    if attempt < max_retries:
-                        wait = attempt * 0.5
-                        logger.warning(
-                            "MySQL 连接异常，第 %d/%d 次重试（%.1fs 后）：%s",
-                            attempt,
-                            max_retries,
-                            wait,
-                            factor_id,
-                        )
-                        time.sleep(wait)
-                    else:
-                        raise
+            # 独立模式：自建连接，断连自动重试（复用统一的 execute_with_retry）。
+            def _txn(c):
+                r = _do_upsert(c)
+                c.commit()
+                return r
+
+            row = execute_with_retry(_txn)
         if not row:
             # 理论不可达：我们刚 INSERT/UPDATE 过同一行。真走到这里说明 DB 异常。
             raise RuntimeError(

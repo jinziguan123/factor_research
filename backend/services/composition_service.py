@@ -654,7 +654,7 @@ def run_composition(run_id: str, body: dict) -> None:
             )
 
         reg = FactorRegistry()
-        reg.scan_and_register()
+        reg.scan_and_register(persist=False)
         data = DataService()
         symbols = data.resolve_pool(int(body["pool_id"]))
         n_groups_req = int(body.get("n_groups", 5))

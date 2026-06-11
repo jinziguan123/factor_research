@@ -217,7 +217,7 @@ def run_param_sensitivity(run_id: str, body: dict) -> None:
             raise ValueError("values 至少需要 2 个不同的扫描点")
 
         reg = FactorRegistry()
-        reg.scan_and_register()
+        reg.scan_and_register(persist=False)
         factor = reg.get(factor_id)
         schema = factor.params_schema or {}
         if param_name not in schema and param_name not in (factor.default_params or {}):
