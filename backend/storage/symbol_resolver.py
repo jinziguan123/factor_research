@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from backend.storage.mysql_client import mysql_conn
+from backend.storage.mysql_client import execute_with_retry, mysql_conn
 
 
 class SymbolResolver:
@@ -21,25 +21,31 @@ class SymbolResolver:
     def resolve_symbol_id(self, symbol: str) -> int | None:
         """symbol → symbol_id；未知 symbol 返回 ``None``。"""
         normalized = symbol.strip().upper()
-        with mysql_conn() as c:
+
+        def _query(c):
             with c.cursor() as cur:
                 cur.execute(
                     "SELECT symbol_id FROM stock_symbol WHERE symbol=%s",
                     (normalized,),
                 )
-                row = cur.fetchone()
+                return cur.fetchone()
+
+        row = execute_with_retry(_query)
         return int(row["symbol_id"]) if row else None
 
     @lru_cache(maxsize=8192)
     def resolve_symbol(self, symbol_id: int) -> str | None:
         """symbol_id → symbol；未知 id 返回 ``None``。"""
-        with mysql_conn() as c:
+
+        def _query(c):
             with c.cursor() as cur:
                 cur.execute(
                     "SELECT symbol FROM stock_symbol WHERE symbol_id=%s",
                     (symbol_id,),
                 )
-                row = cur.fetchone()
+                return cur.fetchone()
+
+        row = execute_with_retry(_query)
         return row["symbol"] if row else None
 
     def resolve_many(self, symbols: list[str]) -> dict[str, int]:
@@ -57,13 +63,16 @@ class SymbolResolver:
         normalized = {s: s.strip().upper() for s in symbols}
         norm_values = list(set(normalized.values()))
         placeholders = ",".join(["%s"] * len(norm_values))
-        with mysql_conn() as c:
+
+        def _query(c):
             with c.cursor() as cur:
                 cur.execute(
                     f"SELECT symbol, symbol_id FROM stock_symbol WHERE symbol IN ({placeholders})",
                     norm_values,
                 )
-                rows = cur.fetchall()
+                return cur.fetchall()
+
+        rows = execute_with_retry(_query)
         sym_to_id = {r["symbol"]: int(r["symbol_id"]) for r in rows}
         return {
             orig: sym_to_id[norm]

@@ -79,13 +79,17 @@ def _update_status(
     if not sets:
         return
     vals.append(run_id)
-    with mysql_conn() as c:
+
+    def _do_update(c):
         with c.cursor() as cur:
             cur.execute(
                 f"UPDATE fr_composition_runs SET {','.join(sets)} WHERE run_id=%s",
                 vals,
             )
         c.commit()
+
+    from backend.storage.mysql_client import execute_with_retry
+    execute_with_retry(_do_update)
 
 
 def _nan_to_none(x: Any) -> Any:
