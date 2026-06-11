@@ -99,7 +99,7 @@ async function trainAndSearch() {
       <n-space :size="10" align="center" wrap style="margin-bottom: 12px">
         <n-input v-model:value="sym" placeholder="股票代码 000001.SZ" style="width: 180px" @keyup.enter="add(1)" />
         <n-date-picker v-model:value="range" type="daterange" clearable style="width: 260px" />
-        <span style="font-size:12px;opacity:.6">不选区间=用该股最近60日</span>
+        <span style="font-size:12px;color:#d97706">建议选你看中的那段历史区间；不选则只用「最近60日」，很可能不是你想要的形态</span>
         <n-button type="success" :loading="addLabel.isPending.value" @click="add(1)">👍 加为正例</n-button>
         <n-button :loading="addLabel.isPending.value" @click="add(0)">👎 加为反例</n-button>
       </n-space>
@@ -108,11 +108,12 @@ async function trainAndSearch() {
       <n-space :size="6" wrap>
         <n-tag
           v-for="l in labels ?? []" :key="l.id"
-          :type="l.label === 1 ? 'success' : 'default'"
+          :type="l.label === 1 ? 'success' : (l.start_date ? 'default' : 'warning')"
           closable @close="removeLabel(l.id)"
         >
           {{ l.label === 1 ? '👍' : '👎' }} {{ l.symbol }}
           <template v-if="l.start_date"> {{ l.start_date }}~{{ l.end_date }}</template>
+          <template v-else> ⚠️最近60日</template>
         </n-tag>
       </n-space>
     </n-card>

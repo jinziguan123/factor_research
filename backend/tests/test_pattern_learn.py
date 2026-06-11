@@ -50,8 +50,7 @@ def test_requires_both_classes():
     panels = {"P1.SZ": _breakdown(), "X.SZ": _rounded()}
     with pytest.raises(ValueError):
         # 只有正例，没有反例
-        pl.search_by_learned(_FakePool(panels), labels=[{"symbol": "P1.SZ", "label": 1}],
-                             pool_id=1, scales=[60])
+        pl.search_by_learned(_FakePool(panels), labels=[{"symbol": "P1.SZ", "label": 1}], pool_id=1)
 
 
 def test_learned_ranks_breakdown_above_rounded():
@@ -67,10 +66,28 @@ def test_learned_ranks_breakdown_above_rounded():
         {"symbol": "POS1.SZ", "label": 1}, {"symbol": "POS2.SZ", "label": 1},
         {"symbol": "NEG1.SZ", "label": 0}, {"symbol": "NEG2.SZ", "label": 0},
     ]
-    res = pl.search_by_learned(_FakePool(panels), labels=labels, pool_id=1, scales=[60], top_k=10)
+    res = pl.search_by_learned(_FakePool(panels), labels=labels, pool_id=1, top_k=10)
     assert len(res["query_curves"]) == 2          # 两个正例曲线
     scores = {m["label"]: m["score"] for m in res["matches"]}
     # 标注股票被排除
     assert "POS1.SZ" not in scores and "NEG1.SZ" not in scores
     # 留出的急跌型得分应高于圆弧顶型
     assert min(scores["BRK1.SZ"], scores["BRK2.SZ"]) > max(scores["RND1.SZ"], scores["RND2.SZ"])
+    # 打分窗口长度跟随正例长度（正例无区间→最近60日），结果尺度应为 60，而非固定 30
+    assert all(m["scale"] == 60 for m in res["matches"])
+
+
+def test_window_length_follows_labeled_range():
+    # 正例用一个 ~90 日的日期区间，结果窗口长度应≈90，不再固定 30。
+    brk = _breakdown(150)
+    rnd = _rounded(150)
+    panels = {"P.SZ": brk, "N.SZ": rnd, "C.SZ": _breakdown(150) + 2}
+    dates = pd.date_range("2025-01-01", periods=150, freq="B")
+    start, end = dates[40].strftime("%Y-%m-%d"), dates[129].strftime("%Y-%m-%d")  # 90 个交易日
+    labels = [
+        {"symbol": "P.SZ", "start": start, "end": end, "label": 1},
+        {"symbol": "N.SZ", "start": start, "end": end, "label": 0},
+    ]
+    res = pl.search_by_learned(_FakePool(panels), labels=labels, pool_id=1, top_k=5)
+    assert res["matches"], "应有结果"
+    assert all(m["scale"] == 90 for m in res["matches"])  # ≈标注区间长度

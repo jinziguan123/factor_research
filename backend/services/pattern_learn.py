@@ -96,22 +96,21 @@ def _train(features: np.ndarray, y: np.ndarray):
 
 def search_by_learned(
     data, labels: list[dict], pool_id: int,
-    scales: list[int] | None = None, top_k: int = 20,
+    top_k: int = 20,
 ) -> dict:
     """用标注的正/反例训练打分器，再给股票池最近窗口打分排序。
 
     ``labels`` = ``[{"symbol","start","end","label"(1/0)}, ...]``。
-    返回 ``{query_curves(正例归一化曲线), matches}``。
-    需要至少各 1 个正例和反例（否则没法学判别）。
+    打分窗口长度统一取「正例窗口长度的中位数」，与你框选的长度一致。
+    返回 ``{query_curves(正例归一化曲线), matches}``。需要至少各 1 个正例和反例。
     """
     from datetime import date as _date
-
-    scales = scales or [30, 60, 90, 120]
 
     # 1) 从标注窗口抽特征
     feats: list[np.ndarray] = []
     ys: list[int] = []
     pos_curves: list[list[float]] = []
+    pos_lens: list[int] = []          # 正例窗口长度，用于统一打分尺度
     exclude: set[str] = set()
     label_syms = sorted({str(lb["symbol"]).upper() for lb in labels})
     if label_syms:
@@ -144,6 +143,7 @@ def search_by_learned(
         ys.append(y)
         if y == 1 and len(seg) >= 2:
             pos_curves.append([round(float(v), 4) for v in normalize_curve(seg)])
+            pos_lens.append(len(seg))
 
     y_arr = np.asarray(ys, dtype=int)
     if y_arr.sum() < 1 or (len(y_arr) - y_arr.sum()) < 1:
@@ -151,7 +151,12 @@ def search_by_learned(
 
     model = _train(np.vstack(feats), y_arr)
 
-    # 2) 给股票池最近窗口打分
+    # 统一打分尺度 = 正例窗口长度的中位数（你框选的长度就是这个形态的固有长度）。
+    # 不再用「多尺度取最大」——那会系统性偏向 30 天短窗，导致结果全是 30 天。
+    target_len = int(np.median(pos_lens)) if pos_lens else 60
+    target_len = max(20, min(target_len, 250))
+
+    # 2) 给股票池每只股的「最近 target_len 日」打分（单一尺度，与标注长度一致）。
     symbols = [s for s in data.resolve_pool(pool_id) if s not in exclude]
     out: dict[str, Match] = {}
     if symbols:
@@ -163,23 +168,18 @@ def search_by_learned(
             closes = close.to_numpy(dtype=float)
             dates = [d.strftime("%Y-%m-%d") for d in close.index]
             n = len(closes)
-            best: Match | None = None
-            for scale in scales:
-                if scale > n:
-                    continue
-                seg = closes[-scale:]
-                f = extract_window_features(seg)
-                if f is None:
-                    continue
-                prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
-                if best is None or prob > best.score:
-                    best = Match(
-                        label=sym, score=round(prob, 4), scale=scale,
-                        start_date=dates[-scale], end_date=dates[-1],
-                        curve=_downsample(normalize_curve(seg)),
-                    )
-            if best is not None:
-                out[sym] = best
+            if n < target_len:
+                continue
+            seg = closes[-target_len:]
+            f = extract_window_features(seg)
+            if f is None:
+                continue
+            prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
+            out[sym] = Match(
+                label=sym, score=round(prob, 4), scale=target_len,
+                start_date=dates[-target_len], end_date=dates[-1],
+                curve=_downsample(normalize_curve(seg)),
+            )
 
     final = sorted(out.values(), key=lambda m: m.score, reverse=True)[:top_k]
     return {
