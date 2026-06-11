@@ -9,8 +9,11 @@ import type { PatternMatch } from '../../api/patternSearch'
 
 use([CanvasRenderer, LineChart, GridComponent])
 
-const props = defineProps<{ matches: PatternMatch[] }>()
-const emit = defineEmits<{ (e: 'open', m: PatternMatch): void }>()
+const props = defineProps<{ matches: PatternMatch[]; labelable?: boolean }>()
+const emit = defineEmits<{
+  (e: 'open', m: PatternMatch): void
+  (e: 'label', m: PatternMatch, value: number): void   // 1=正例 / 0=反例
+}>()
 
 function sparkOption(curve: number[]) {
   return {
@@ -37,6 +40,10 @@ const rows = computed(() => props.matches)
         </div>
       </div>
       <div class="score">{{ (m.score * 100).toFixed(1) }}%</div>
+      <div v-if="labelable" class="label-btns" @click.stop>
+        <button class="thumb up" title="这就是我要的（正例）" @click="emit('label', m, 1)">👍</button>
+        <button class="thumb down" title="像但我不要（反例）" @click="emit('label', m, 0)">👎</button>
+      </div>
     </div>
   </div>
 </template>
@@ -50,5 +57,8 @@ const rows = computed(() => props.matches)
 .sub { font-size: 12px; opacity: 0.6; }
 .subscores { font-size: 11px; opacity: 0.55; display: flex; gap: 8px; margin-top: 2px; }
 .score { font-variant-numeric: tabular-nums; font-weight: 700; color: #e6584a; }
+.label-btns { display: flex; gap: 4px; flex: none; }
+.thumb { border: none; background: transparent; cursor: pointer; font-size: 16px; padding: 2px 4px; border-radius: 4px; }
+.thumb:hover { background: rgba(0,0,0,0.08); }
 .empty { padding: 24px; text-align: center; opacity: 0.5; }
 </style>

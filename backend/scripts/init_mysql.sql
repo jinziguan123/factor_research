@@ -274,3 +274,16 @@ CREATE TABLE IF NOT EXISTS `fr_pattern_search_results` (
   `matches_json`      longtext COMMENT '检索结果（相似股票列表）',
   PRIMARY KEY (`run_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 学习型选股的标注：对某命名形态标正例(1)/反例(0)，详见 migrations/020。
+CREATE TABLE IF NOT EXISTS `fr_pattern_labels` (
+  `id`           bigint unsigned NOT NULL AUTO_INCREMENT,
+  `pattern_name` varchar(64)     NOT NULL COMMENT '正在教的形态名',
+  `symbol`       varchar(16)     NOT NULL,
+  `start_date`   varchar(16)     DEFAULT NULL COMMENT '窗口起；空=该股最近60日',
+  `end_date`     varchar(16)     DEFAULT NULL,
+  `label`        tinyint         NOT NULL COMMENT '1=正例 / 0=反例',
+  `created_at`   datetime(6)     NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_pattern` (`pattern_name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

@@ -78,10 +78,11 @@ export type RunStatus = 'pending' | 'running' | 'success' | 'failed' | 'aborting
 /** 列表行（不含曲线/结果大字段）。 */
 export interface PatternRun {
   run_id: string
-  kind?: 'by_image' | 'by_window'
+  kind?: 'by_image' | 'by_window' | 'learned'
   pool_id: number
   image_names?: string[]
-  query_json?: WindowSpec[]   // by_window 的查询窗口
+  // by_window：查询窗口数组；learned：{pattern_name}
+  query_json?: WindowSpec[] | { pattern_name?: string } | null
   num_images: number
   hint?: string | null
   top_k?: number
@@ -152,5 +153,63 @@ export function useDeletePatternRun() {
     mutationFn: (runId: string) =>
       client.delete(`/pattern_search/runs/${runId}`).then(r => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['pattern_runs'] }),
+  })
+}
+
+// ---------------------------- 学习型选股：标注 + 训练打分 ----------------------------
+
+export interface PatternLabel {
+  id: number
+  pattern_name: string
+  symbol: string
+  start_date?: string | null
+  end_date?: string | null
+  label: number    // 1=正例 / 0=反例
+  created_at?: string
+}
+export interface AddLabelReq {
+  pattern_name: string
+  symbol: string
+  start?: string
+  end?: string
+  label: number
+}
+
+export function usePatternLabels(patternName: Ref<string>) {
+  return useQuery<PatternLabel[]>({
+    queryKey: ['pattern_labels', patternName],
+    queryFn: () =>
+      client.get('/pattern_search/labels', { params: { pattern_name: patternName.value } }).then(r => r.data),
+    enabled: () => !!patternName.value.trim(),
+  })
+}
+export function useAddLabel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (req: AddLabelReq) => client.post('/pattern_search/labels', req).then(r => r.data),
+    onSuccess: (_r, req) => qc.invalidateQueries({ queryKey: ['pattern_labels'] }),
+  })
+}
+export function useDeleteLabel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => client.delete(`/pattern_search/labels/${id}`).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['pattern_labels'] }),
+  })
+}
+
+export interface ByLearnedReq {
+  pattern_name: string
+  pool_id: number
+  scales?: number[]
+  top_k?: number
+}
+/** 创建「学习型选股」任务（复用记录页轮询/详情）。 */
+export function useCreateLearnedSearch() {
+  return useMutation({
+    mutationFn: async (req: ByLearnedReq): Promise<{ run_id: string; status: RunStatus }> => {
+      const { data } = await client.post('/pattern_search/by_learned', req)
+      return data
+    },
   })
 }

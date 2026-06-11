@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from backend.services.abort_check import AbortedError, check_abort
+from backend.services.pattern_learn import search_by_learned
 from backend.services.pattern_query import search_by_image, search_by_window
 from backend.storage.data_service import DataService
 from backend.storage.mysql_client import mysql_conn
@@ -129,3 +130,29 @@ def run_pattern_search_by_window(run_id: str, body: dict) -> None:
         agg=body.get("agg", "min"),
         min_score=body.get("min_score", 0.0),
     ))
+
+
+def _load_labels(pattern_name: str) -> list[dict]:
+    """读某形态的全部标注（正例/反例）。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT symbol, start_date, end_date, label "
+                "FROM fr_pattern_labels WHERE pattern_name=%s",
+                (pattern_name,),
+            )
+            return list(cur.fetchall() or [])
+
+
+def run_pattern_search_learned(run_id: str, body: dict) -> None:
+    """worker 入口：学习型选股——读标注 → 训练打分器 → 给池打分。"""
+    def _do():
+        labels = _load_labels(body["pattern_name"])
+        return search_by_learned(
+            DataService(),
+            labels=labels,
+            pool_id=body["pool_id"],
+            scales=body.get("scales"),
+            top_k=body.get("top_k", 20),
+        )
+    _run_and_persist(run_id, _do)

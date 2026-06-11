@@ -27,6 +27,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/klines', component: () => import('@/pages/klines/KlineViewer.vue') },
   { path: '/pattern', component: () => import('@/pages/pattern/PatternSearchList.vue') },
   { path: '/pattern/new', component: () => import('@/pages/pattern/PatternSearchCreate.vue') },
+  { path: '/pattern/learn', component: () => import('@/pages/pattern/LearnedSelection.vue') },
   { path: '/pattern/runs/:runId', component: () => import('@/pages/pattern/PatternSearchDetail.vue') },
   { path: '/admin', component: () => import('@/pages/admin/DataOps.vue') },
   { path: '/data/health', component: () => import('@/pages/data/DataHealth.vue') },

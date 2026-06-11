@@ -20,7 +20,11 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from backend.api.schemas import ok
-from backend.runtime.entries import pattern_search_entry, pattern_search_window_entry
+from backend.runtime.entries import (
+    pattern_search_entry,
+    pattern_search_learned_entry,
+    pattern_search_window_entry,
+)
 from backend.runtime.task_pool import submit
 from backend.services.pattern_query import search_by_stock
 from backend.storage.data_service import DataService
@@ -166,6 +170,99 @@ def post_by_image(req: ByImageReq, bt: BackgroundTasks) -> dict:
         c.commit()
 
     bt.add_task(submit, pattern_search_entry, run_id, req.model_dump(mode="json"))
+    return ok({"run_id": run_id, "status": "pending"})
+
+
+# ---------------------------- 学习型选股：标注 + 训练打分（异步） ----------------------------
+
+
+class LabelReq(BaseModel):
+    pattern_name: str
+    symbol: str
+    start: str | None = None
+    end: str | None = None
+    label: int            # 1=正例 / 0=反例
+
+
+@router.post("/labels")
+def add_label(req: LabelReq) -> dict:
+    """给某命名形态加一条标注（正例/反例）。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "INSERT INTO fr_pattern_labels "
+                "(pattern_name, symbol, start_date, end_date, label, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s)",
+                (req.pattern_name, req.symbol.upper(), req.start, req.end,
+                 1 if req.label == 1 else 0, datetime.now()),
+            )
+            new_id = cur.lastrowid
+        c.commit()
+    return ok({"id": new_id})
+
+
+@router.get("/labels")
+def list_labels(pattern_name: str) -> dict:
+    """列出某形态的全部标注。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT id, pattern_name, symbol, start_date, end_date, label, created_at "
+                "FROM fr_pattern_labels WHERE pattern_name=%s ORDER BY id DESC",
+                (pattern_name,),
+            )
+            return ok(cur.fetchall())
+
+
+@router.delete("/labels/{label_id}")
+def delete_label(label_id: int) -> dict:
+    """删一条标注。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute("DELETE FROM fr_pattern_labels WHERE id=%s", (label_id,))
+            deleted = cur.rowcount
+        c.commit()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="label not found")
+    return ok({"id": label_id, "deleted": True})
+
+
+class ByLearnedReq(BaseModel):
+    pattern_name: str
+    pool_id: int
+    scales: list[int] | None = None
+    top_k: int = 20
+
+
+@router.post("/by_learned")
+def post_by_learned(req: ByLearnedReq, bt: BackgroundTasks) -> dict:
+    """创建「学习型选股」任务：读该形态的标注 → 训练打分器 → 给池打分（异步）。"""
+    run_id = uuid.uuid4().hex
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO fr_pattern_search_runs
+                (run_id, kind, pool_id, query_json, num_images, scales_json,
+                 top_k, agg, status, progress, created_at)
+                VALUES (%s,'learned',%s,%s,0,%s,%s,'-','pending',0,%s)
+                """,
+                (
+                    run_id,
+                    req.pool_id,
+                    json.dumps({"pattern_name": req.pattern_name}, ensure_ascii=False),
+                    json.dumps(req.scales) if req.scales else None,
+                    req.top_k,
+                    datetime.now(),
+                ),
+            )
+        c.commit()
+
+    body = {
+        "pattern_name": req.pattern_name, "pool_id": req.pool_id,
+        "scales": req.scales, "top_k": req.top_k,
+    }
+    bt.add_task(submit, pattern_search_learned_entry, run_id, body)
     return ok({"run_id": run_id, "status": "pending"})
 
 
