@@ -6,18 +6,26 @@
 import { computed, ref } from 'vue'
 import {
   NPageHeader, NCard, NInput, NSelect, NButton, NSpace, NTag, NAlert,
-  NDatePicker, NPopconfirm, useMessage,
+  NDatePicker, NRadioGroup, NRadioButton, useMessage,
 } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { usePools } from '@/api/pools'
 import {
-  usePatternLabels, useAddLabel, useDeleteLabel, useCreateLearnedSearch,
+  usePatternLabels, useAddLabel, useDeleteLabel, useCreateLearnedSearch, usePatternNames,
 } from '@/api/patternSearch'
 
 const message = useMessage()
 const router = useRouter()
 
-const patternName = ref('')
+// 新形态用 input 输入名字；旧形态用 select 直接选已有的。
+const mode = ref<'new' | 'old'>('new')
+const newName = ref('')
+const oldName = ref<string | null>(null)
+const patternName = computed(() => (mode.value === 'old' ? (oldName.value ?? '') : newName.value).trim())
+const { data: patternNames } = usePatternNames()
+const nameOptions = () =>
+  (patternNames.value ?? []).map(p => ({ label: `${p.pattern_name}（${p.cnt}条标注）`, value: p.pattern_name }))
+
 const poolId = ref<number | null>(null)
 const sym = ref('')
 const range = ref<[number, number] | null>(null)
@@ -86,7 +94,24 @@ async function trainAndSearch() {
 
     <n-card title="形态 / 股票池" style="margin-bottom: 16px">
       <n-space :size="12" align="center" wrap>
-        <n-input v-model:value="patternName" placeholder="形态名，如：涨一波后跌穿" style="width: 220px" />
+        <n-radio-group v-model:value="mode" size="small">
+          <n-radio-button value="new">新形态</n-radio-button>
+          <n-radio-button value="old">旧形态</n-radio-button>
+        </n-radio-group>
+        <n-input
+          v-if="mode === 'new'"
+          v-model:value="newName"
+          placeholder="新形态名，如：涨一波后跌穿"
+          style="width: 220px"
+        />
+        <n-select
+          v-else
+          v-model:value="oldName"
+          :options="nameOptions()"
+          placeholder="选择已有形态"
+          filterable
+          style="width: 240px"
+        />
         <n-select v-model:value="poolId" :options="poolOptions()" placeholder="选择股票池" filterable style="width: 240px" />
         <n-button type="primary" :disabled="!canTrain" :loading="createLearned.isPending.value" @click="trainAndSearch">
           训练并选股

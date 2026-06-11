@@ -15,10 +15,9 @@ import {
 } from 'naive-ui'
 import { useDailyKline, useMinuteKline, useFactorBars, type FactorBarQuery } from '@/api/klines'
 import { useFactors } from '@/api/factors'
-import { usePools } from '@/api/pools'
 import {
-  useByStockSearch, useCreateWindowSearch,
-  type PatternResult, type PatternMatch, type WindowSpec,
+  useByStockSearch, usePatternNames, useAddLabel,
+  type PatternResult, type PatternMatch,
 } from '@/api/patternSearch'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
@@ -275,23 +274,21 @@ function handleRefresh() {
   refreshKey.value++
 }
 
-// --- 图形相似度检索 ---
-// 框选一段走势后，提供两种检索：
+// --- 框选后的两件事 ---
 //   本股历史（by_stock）：在这只股票自己的历史里找相似形态；
-//   股票池选股（by_window）：用这段真实走势，在所选股票池里找走势最像的「别的」股票。
+//   加入学习样本：把框选的这段加为某个已有「形态」的正例/反例，喂给学习型选股。
 const router = useRouter()
 const similarSearch = useByStockSearch()
-const createWindow = useCreateWindowSearch()
+const addLabel = useAddLabel()
 const showSimilarDrawer = ref(false)
 const similarResult = ref<PatternResult | null>(null)        // 本股历史
 const brushedWindow = ref<{ start: string; end: string } | null>(null)
-const poolId = ref<number | null>(null)
-const agg = ref<'min' | 'mean'>('min')
-// 选股篮子：多段走势联合检索（抗过拟合）。可跨股累加：在 A 上框选加入、切到 B 再加入。
-const basket = ref<WindowSpec[]>([])
-const { data: pools } = usePools()
-const poolOptions = () =>
-  (pools.value ?? []).map(p => ({ label: `${p.pool_name} (#${p.pool_id})`, value: p.pool_id }))
+// 加入学习样本：选一个已有形态 + 标正例/反例
+const { data: patternNames } = usePatternNames()
+const nameOptions = () =>
+  (patternNames.value ?? []).map(p => ({ label: `${p.pattern_name}（${p.cnt}条）`, value: p.pattern_name }))
+const learnPattern = ref<string | null>(null)
+const learnLabel = ref<1 | 0>(1)
 
 async function onFindSimilar(payload: { start: string; end: string }) {
   if (!symbol.value.trim()) {
@@ -314,37 +311,21 @@ async function onFindSimilar(payload: { start: string; end: string }) {
   }
 }
 
-// 把当前框选段加入选股篮子（可来自不同股票）。
-function addCurrentWindow() {
+// 把当前框选段加为某个已有形态的正例/反例。
+async function addSample() {
   if (!brushedWindow.value) { message.warning('请先在 K 线上框选一段走势'); return }
-  basket.value = [...basket.value, {
-    symbol: symbol.value.trim().toUpperCase(),
-    start: brushedWindow.value.start,
-    end: brushedWindow.value.end,
-  }]
-}
-function removeWindow(i: number) {
-  basket.value = basket.value.filter((_, idx) => idx !== i)
-}
-
-// 提交「相似K线选股」异步任务 → 跳到记录详情页轮询结果。
-async function submitPoolSearch() {
-  const windows = basket.value.length > 0
-    ? basket.value
-    : (brushedWindow.value
-        ? [{ symbol: symbol.value.trim().toUpperCase(), start: brushedWindow.value.start, end: brushedWindow.value.end }]
-        : [])
-  if (windows.length === 0) { message.warning('请先框选并「加入对比」至少一段走势'); return }
-  if (poolId.value == null) { message.warning('请选择股票池'); return }
+  if (!learnPattern.value) { message.warning('请先选择要加入的形态'); return }
   try {
-    const res = await createWindow.mutateAsync({
-      pool_id: poolId.value, windows, agg: agg.value,
+    await addLabel.mutateAsync({
+      pattern_name: learnPattern.value,
+      symbol: symbol.value.trim().toUpperCase(),
+      start: brushedWindow.value.start,
+      end: brushedWindow.value.end,
+      label: learnLabel.value,
     })
-    message.success('选股任务已创建，正在后台检索…')
-    showSimilarDrawer.value = false
-    router.push({ path: `/pattern/runs/${res.run_id}` })
+    message.success(learnLabel.value === 1 ? '已加为正例' : '已加为反例')
   } catch (e: any) {
-    message.error(e?.message || '创建任务失败')
+    message.error(e?.message || '加入失败')
   }
 }
 
@@ -506,39 +487,31 @@ function jumpToMatch(m: PatternMatch) {
             </div>
             <match-result-list v-if="similarResult" :matches="similarResult.matches" @open="jumpToMatch" />
           </n-tab-pane>
-          <n-tab-pane name="pool" tab="股票池选股">
+          <n-tab-pane name="learn" tab="加入学习样本">
             <div style="font-size:12px;opacity:.6;margin-bottom:8px">
-              用一段或多段真实走势，在所选股票池里找走势最像的「其他」股票（前复权、无截图噪声）。
-              <b>多段联合可抗过拟合</b>：在不同股票上分别框选、各点「加入对比」累加。
+              把框选的这段加为某个<b>已有形态</b>的<b>正例/反例</b>，喂给「学习型选股」。
+              （新建形态请去「学习型选股」页）
             </div>
-            <n-space align="center" :size="8" style="margin-bottom:8px">
-              <n-button size="small" @click="addCurrentWindow">＋ 加入当前框选</n-button>
-              <span style="font-size:12px;opacity:.6">
-                当前框选：{{ brushedWindow ? `${symbol} ${brushedWindow.start}~${brushedWindow.end}` : '（先在图上框选）' }}
-              </span>
-            </n-space>
-            <n-space v-if="basket.length" :size="6" wrap style="margin-bottom:8px">
-              <n-tag v-for="(w, i) in basket" :key="i" closable size="small" @close="removeWindow(i)">
-                {{ w.symbol }} {{ w.start }}~{{ w.end }}
-              </n-tag>
-            </n-space>
-            <n-space align="center" :size="8" style="margin-bottom:12px">
+            <div style="font-size:12px;opacity:.6;margin-bottom:8px">
+              当前框选：{{ brushedWindow ? `${symbol} ${brushedWindow.start}~${brushedWindow.end}` : '（先在图上框选一段）' }}
+            </div>
+            <n-space align="center" :size="8" style="margin-bottom:12px" wrap>
               <n-select
-                v-model:value="poolId"
-                :options="poolOptions()"
-                placeholder="选择股票池"
+                v-model:value="learnPattern"
+                :options="nameOptions()"
+                placeholder="选择已有形态"
                 filterable
                 style="width: 200px"
               />
-              <n-radio-group v-if="basket.length > 1" v-model:value="agg" size="small">
-                <n-radio-button value="min">都像</n-radio-button>
-                <n-radio-button value="mean">平均</n-radio-button>
+              <n-radio-group v-model:value="learnLabel" size="small">
+                <n-radio-button :value="1">👍 正例</n-radio-button>
+                <n-radio-button :value="0">👎 反例</n-radio-button>
               </n-radio-group>
-              <n-button type="primary" size="small" :loading="createWindow.isPending.value" @click="submitPoolSearch">
-                提交选股
+              <n-button type="primary" size="small" :loading="addLabel.isPending.value" @click="addSample">
+                加入样本
               </n-button>
             </n-space>
-            <div style="font-size:12px;opacity:.5">提交后转为后台任务，自动跳到记录详情页看进度与结果。</div>
+            <div style="font-size:12px;opacity:.5">加完去「学习型选股」页点「训练并选股」（或重训）即可生效。</div>
           </n-tab-pane>
         </n-tabs>
       </n-drawer-content>

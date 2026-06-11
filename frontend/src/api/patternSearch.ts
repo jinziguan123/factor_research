@@ -175,19 +175,31 @@ export interface AddLabelReq {
   label: number
 }
 
-export function usePatternLabels(patternName: Ref<string>) {
+export interface PatternNameRow { pattern_name: string; cnt: number }
+/** 已有形态名列表（供"旧形态"下拉）。 */
+export function usePatternNames() {
+  return useQuery<PatternNameRow[]>({
+    queryKey: ['pattern_names'],
+    queryFn: () => client.get('/pattern_search/pattern_names').then(r => r.data),
+  })
+}
+
+export function usePatternLabels(patternName: MaybeRefOrGetter<string>) {
   return useQuery<PatternLabel[]>({
     queryKey: ['pattern_labels', patternName],
     queryFn: () =>
-      client.get('/pattern_search/labels', { params: { pattern_name: patternName.value } }).then(r => r.data),
-    enabled: () => !!patternName.value.trim(),
+      client.get('/pattern_search/labels', { params: { pattern_name: toValue(patternName) } }).then(r => r.data),
+    enabled: () => !!toValue(patternName).trim(),
   })
 }
 export function useAddLabel() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (req: AddLabelReq) => client.post('/pattern_search/labels', req).then(r => r.data),
-    onSuccess: (_r, req) => qc.invalidateQueries({ queryKey: ['pattern_labels'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['pattern_labels'] })
+      qc.invalidateQueries({ queryKey: ['pattern_names'] })
+    },
   })
 }
 export function useDeleteLabel() {

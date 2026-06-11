@@ -201,6 +201,18 @@ def add_label(req: LabelReq) -> dict:
     return ok({"id": new_id})
 
 
+@router.get("/pattern_names")
+def list_pattern_names() -> dict:
+    """列出已有的形态名（供"旧形态"下拉选择）。"""
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT pattern_name, COUNT(*) AS cnt FROM fr_pattern_labels "
+                "GROUP BY pattern_name ORDER BY MAX(id) DESC"
+            )
+            return ok(cur.fetchall())
+
+
 @router.get("/labels")
 def list_labels(pattern_name: str) -> dict:
     """列出某形态的全部标注。"""
