@@ -77,7 +77,10 @@ def _run_and_persist(run_id: str, search_fn) -> None:
         check_abort("pattern_search", run_id)
 
         def _on_progress(pct: int) -> None:
-            _update_status(run_id, progress=min(pct, 90))
+            try:
+                _update_status(run_id, progress=min(pct, 90))
+            except Exception:
+                log.debug("progress update failed (non-critical): run_id=%s pct=%s", run_id, pct)
 
         res = search_fn(on_progress=_on_progress)
 

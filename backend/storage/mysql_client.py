@@ -133,10 +133,15 @@ class MySQLPool:
     def release(self, conn: Connection) -> None:
         """归还连接到池。
 
-        归还前 ``rollback()`` 清掉调用方可能遗留的未提交事务（autocommit=False），
-        避免下一个借用者继承到脏事务状态。``rollback`` 本身也是一次轻量探活——
-        连接已坏会抛异常，落到 except 分支直接丢弃，省去额外 ``ping`` 往返。
+        归还前先排空残留结果集（防 Command Out of Sync），再 ``rollback()``
+        清掉调用方可能遗留的未提交事务。任一步异常 → 丢弃连接。
         """
+        try:
+            while conn.next_result():
+                pass
+        except Exception:
+            self._close_one(conn)
+            return
         try:
             conn.rollback()
         except Exception:
