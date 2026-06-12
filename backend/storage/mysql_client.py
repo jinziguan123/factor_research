@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import time
@@ -68,11 +69,24 @@ class MySQLPool:
         # 当前已创建的连接总数（空闲 + 借出）
         self._total = 0
         self._lock = threading.Lock()
+        # 记录创建池的进程 pid，用于 fork 检测（ProcessPool worker 子进程会继承
+        # 父进程的池单例，其中的连接 socket 属于父进程，跨进程共用会导致
+        # "Command Out of Sync"。borrow 时若发现 pid 变了，丢弃继承连接重建。
+        self._pid = os.getpid()
         # 预热：创建 min_size 个连接
         for _ in range(min_size):
             conn = self._new_conn()
             if conn is not None:
                 self._idle.put(conn)
+
+    def _reset_after_fork(self) -> None:
+        """fork 后在子进程里重置池：丢弃继承的连接引用（**不 close**，
+        socket fd 属于父进程，close 会干扰父进程），重置计数与 pid。
+        """
+        # 直接丢弃 idle 队列里所有继承连接的引用，不调 close。
+        self._idle = queue.Queue(maxsize=self._max)
+        self._total = 0
+        self._pid = os.getpid()
 
     def _new_conn(self) -> Connection | None:
         """新建连接，不超过上限返回 ``None``。"""
@@ -101,6 +115,12 @@ class MySQLPool:
         优先从空闲队列取；队列空则新建（不超过上限）；
         上限已满则阻塞等待（最多 ``timeout`` 秒）。
         """
+        # fork 检测：子进程首次借用时丢弃继承自父进程的连接，重建自己的。
+        if self._pid != os.getpid():
+            with self._lock:
+                if self._pid != os.getpid():
+                    self._reset_after_fork()
+
         deadline = time.monotonic() + timeout
 
         while True:
@@ -133,15 +153,10 @@ class MySQLPool:
     def release(self, conn: Connection) -> None:
         """归还连接到池。
 
-        归还前先排空残留结果集（防 Command Out of Sync），再 ``rollback()``
-        清掉调用方可能遗留的未提交事务。任一步异常 → 丢弃连接。
+        归还前 ``rollback()`` 清掉调用方可能遗留的未提交事务（autocommit=False），
+        避免下一个借用者继承到脏事务状态。``rollback`` 本身也是一次轻量探活——
+        连接已坏会抛异常，落到 except 分支直接丢弃，省去额外 ``ping`` 往返。
         """
-        try:
-            while conn.next_result():
-                pass
-        except Exception:
-            self._close_one(conn)
-            return
         try:
             conn.rollback()
         except Exception:
