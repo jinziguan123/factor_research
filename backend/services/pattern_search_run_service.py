@@ -153,5 +153,6 @@ def run_pattern_search_learned(run_id: str, body: dict) -> None:
             labels=labels,
             pool_id=body["pool_id"],
             top_k=body.get("top_k", 20),
+            mode=body.get("mode", "realtime"),
         )
     _run_and_persist(run_id, _do)

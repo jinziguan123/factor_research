@@ -9,11 +9,20 @@ import type { PatternMatch } from '../../api/patternSearch'
 
 use([CanvasRenderer, LineChart, GridComponent])
 
+import { reactive } from 'vue'
+
 const props = defineProps<{ matches: PatternMatch[]; labelable?: boolean }>()
 const emit = defineEmits<{
   (e: 'open', m: PatternMatch): void
   (e: 'label', m: PatternMatch, value: number): void   // 1=正例 / 0=反例
 }>()
+
+// 本地记录每条已标注的方向，给出即时反馈（高亮选中的 👍/👎）。
+const labeled = reactive<Record<string, number>>({})
+function onThumb(m: PatternMatch, value: number) {
+  labeled[m.label] = value
+  emit('label', m, value)
+}
 
 function sparkOption(curve: number[]) {
   return {
@@ -41,8 +50,10 @@ const rows = computed(() => props.matches)
       </div>
       <div class="score">{{ (m.score * 100).toFixed(1) }}%</div>
       <div v-if="labelable" class="label-btns" @click.stop>
-        <button class="thumb up" title="这就是我要的（正例）" @click="emit('label', m, 1)">👍</button>
-        <button class="thumb down" title="像但我不要（反例）" @click="emit('label', m, 0)">👎</button>
+        <button class="thumb up" :class="{ active: labeled[m.label] === 1 }"
+          title="这就是我要的（正例）" @click="onThumb(m, 1)">👍</button>
+        <button class="thumb down" :class="{ active: labeled[m.label] === 0 }"
+          title="像但我不要（反例）" @click="onThumb(m, 0)">👎</button>
       </div>
     </div>
   </div>
@@ -58,7 +69,9 @@ const rows = computed(() => props.matches)
 .subscores { font-size: 11px; opacity: 0.55; display: flex; gap: 8px; margin-top: 2px; }
 .score { font-variant-numeric: tabular-nums; font-weight: 700; color: #e6584a; }
 .label-btns { display: flex; gap: 4px; flex: none; }
-.thumb { border: none; background: transparent; cursor: pointer; font-size: 16px; padding: 2px 4px; border-radius: 4px; }
-.thumb:hover { background: rgba(0,0,0,0.08); }
+.thumb { border: 1.5px solid transparent; background: transparent; cursor: pointer; font-size: 16px; padding: 2px 5px; border-radius: 6px; opacity: 0.5; transition: all .12s; }
+.thumb:hover { background: rgba(0,0,0,0.08); opacity: 1; }
+.thumb.up.active { opacity: 1; border-color: #18a058; background: rgba(24,160,88,0.14); }
+.thumb.down.active { opacity: 1; border-color: #d03050; background: rgba(208,48,80,0.14); }
 .empty { padding: 24px; text-align: center; opacity: 0.5; }
 </style>
