@@ -2,10 +2,13 @@ services:
   backend:
     build: ./backend
     env_file: ./backend/.env
+    environment:
+      - TZ=Asia/Shanghai
     ports:
       - "8000:8000"
     volumes:
       - ./data:/project/data
+      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
 
   frontend:
