@@ -1,19 +1,26 @@
 FROM python:3.10-slim
 
-WORKDIR /app
+# lightgbm 需要 libgomp（OpenMP）
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv 包管理器
-RUN pip install --no-cache-dir uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# 先复制依赖声明文件以利用 Docker 缓存层
-COPY pyproject.toml uv.lock /app/
+# WORKDIR = 项目根；backend/ 作为子包存在，保持 import backend.xxx 能跑通
+WORKDIR /project
 
-# 安装 Python 依赖到系统环境
-RUN uv pip install --system -r pyproject.toml
+# 1) 依赖声明先拷，利用 Docker 层缓存
+COPY pyproject.toml uv.lock ./
 
-# 复制全部后端代码
-COPY . /app/
+# 2) 只装依赖，不装项目本身（代码还没拷进来）
+RUN uv sync --frozen --no-install-project --no-dev
+
+# 3) 拷全部后端代码到 /project/backend/
+COPY . ./backend/
+
+# 4) 安装项目包（依赖已缓存，这步很快）
+RUN uv sync --frozen --no-dev
 
 EXPOSE 8000
 
-CMD ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

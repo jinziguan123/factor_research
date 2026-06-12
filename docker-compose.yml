@@ -5,7 +5,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      - ./data:/project/data
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
@@ -13,3 +14,4 @@ services:
       - "80:80"
     depends_on:
       - backend
+    restart: unless-stopped
