@@ -507,15 +507,16 @@ function onKeyDown(e: KeyboardEvent) {
   const span = end - start
   if (span <= 0) return
   const center = (start + end) / 2
-  const delta = span * 0.1
+  const total = props.categories.length
+  const pointPct = total > 1 ? 100 / (total - 1) : 1
+  const delta = Math.max(span * 0.1, pointPct)
   let newStart: number, newEnd: number
   if (e.key === 'ArrowUp') {
-    const half = (span - delta) / 2
-    if (half < 0.25) return
-    newStart = center - half
-    newEnd = center + half
+    const newSpan = span - delta
+    if (newSpan < pointPct * 2) return
+    newStart = center - newSpan / 2
+    newEnd = center + newSpan / 2
   } else {
-    // 已经看到全部数据还想缩小 → 请求父组件扩展时间范围
     if (start <= 0.1 && end >= 99.9) {
       emit('request-expand')
       return
@@ -525,7 +526,6 @@ function onKeyDown(e: KeyboardEvent) {
   }
   newStart = Math.max(0, newStart)
   newEnd = Math.min(100, newEnd)
-  if (newEnd - newStart < 0.5) return
   dataZoomRange.value = { start: newStart, end: newEnd }
   applyDataZoom(newStart, newEnd)
 }
