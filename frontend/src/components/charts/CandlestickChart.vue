@@ -77,8 +77,10 @@ const props = withDefaults(
     showVolumeProfile?: boolean
     /** 框选找相似模式。开启后可在图上拖拽框选一段走势，冒出「找相似」按钮。 */
     selectMode?: boolean
+    /** 框选缩放模式。开启后拖拽横向区间 → 缩放到该区间。 */
+    zoomSelectMode?: boolean
   }>(),
-  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false },
+  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false },
 )
 
 const emit = defineEmits<{
@@ -376,8 +378,8 @@ const option = computed(() => {
     })
   }
 
-  // VP 或框选模式任一开启时启用 brush
-  const brushOn = vpOn || props.selectMode
+  // VP / 框选找相似 / 框选缩放 任一开启时启用 brush
+  const brushOn = vpOn || props.selectMode || props.zoomSelectMode
   const brushCfg = brushOn ? {
     brush: {
       xAxisIndex: 0,
@@ -452,15 +454,33 @@ function onDataZoom(params: any) {
   }
 }
 
-// ---- Volume Profile brush handler ----
+// ---- Volume Profile / 框选缩放 brush handler ----
 function onBrushSelected(params: any) {
-  if (!props.showVolumeProfile && !props.selectMode) return
   const areas = params?.batch?.[0]?.areas
   if (!areas || areas.length === 0) return
   const range = areas[0]?.coordRange?.[0]
   if (!range || range.length < 2) return
   const startIdx = Math.min(range[0], range[1])
   const endIdx = Math.max(range[0], range[1])
+
+  // 框选缩放模式：把选区转成 dataZoom 区间，然后清掉 brush 标记
+  if (props.zoomSelectMode) {
+    const total = props.categories.length
+    if (total <= 1 || startIdx === endIdx) return
+    const newStart = (startIdx / (total - 1)) * 100
+    const newEnd = (endIdx / (total - 1)) * 100
+    dataZoomRange.value = { start: newStart, end: newEnd }
+    applyDataZoom(newStart, newEnd)
+    // 清掉框选标记、重新激活 brush 光标以便下次框选
+    setTimeout(() => {
+      const inst = getInst()
+      inst?.dispatchAction?.({ type: 'brush', areas: [] })
+      syncBrushCursor()
+    }, 50)
+    return
+  }
+
+  if (!props.showVolumeProfile && !props.selectMode) return
   selectedRange.value = { startIdx, endIdx }
   // VP 开启时才算成交量剖面；框选找相似模式只需要 selectedRange。
   if (props.showVolumeProfile) {
@@ -473,6 +493,37 @@ function onBrushSelected(params: any) {
   setTimeout(() => {
     applyDataZoom(dataZoomRange.value.start, dataZoomRange.value.end)
   }, 100)
+}
+
+// ---- 键盘 ↑/↓ 缩放 ----
+const isHovered = ref(false)
+
+function onKeyDown(e: KeyboardEvent) {
+  if (!isHovered.value) return
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+  e.preventDefault()
+  const { start, end } = dataZoomRange.value
+  const span = end - start
+  if (span <= 0) return
+  const center = (start + end) / 2
+  const delta = span * 0.1
+  let newStart: number, newEnd: number
+  if (e.key === 'ArrowUp') {
+    // 放大：窗口收窄，蜡烛更大
+    const half = (span - delta) / 2
+    if (half < 0.25) return
+    newStart = center - half
+    newEnd = center + half
+  } else {
+    // 缩小：窗口放宽，显示更多
+    newStart = center - (span + delta) / 2
+    newEnd = center + (span + delta) / 2
+  }
+  newStart = Math.max(0, newStart)
+  newEnd = Math.min(100, newEnd)
+  if (newEnd - newStart < 0.5) return
+  dataZoomRange.value = { start: newStart, end: newEnd }
+  applyDataZoom(newStart, newEnd)
 }
 
 // ---- 失焦修复 ----
@@ -496,6 +547,7 @@ function onVisibilityChange() {
 onMounted(() => {
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('focus', restoreChart)
+  window.addEventListener('keydown', onKeyDown)
   // 首次挂载后设置 dataZoom（此时 option 已 setOption，dataZoom 不存在，需手动添加）
   nextTick(() => {
     const inst = getInst()
@@ -512,16 +564,17 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onVisibilityChange)
   window.removeEventListener('focus', restoreChart)
+  window.removeEventListener('keydown', onKeyDown)
 })
 
 // 颜色切换时 ECharts 会按新 option 重绘，但 tooltip 里残留的旧颜色箭头要顺便清掉。
 watch(() => props.colorMode, () => restoreChart())
 
-// VP / 框选模式任一开启 → 激活 brush 光标；都关闭 → 清光标与选区。
+// VP / 框选找相似 / 框选缩放 任一开启 → 激活 brush 光标；都关闭 → 清光标与选区。
 function syncBrushCursor() {
   const inst = getInst()
   if (!inst) return
-  const on = props.showVolumeProfile || props.selectMode
+  const on = props.showVolumeProfile || props.selectMode || props.zoomSelectMode
   setTimeout(() => {
     inst.dispatchAction?.({
       type: 'takeGlobalCursor', key: 'brush',
@@ -530,7 +583,7 @@ function syncBrushCursor() {
   }, 100)
 }
 
-watch([() => props.showVolumeProfile, () => props.selectMode], ([vp, sel]) => {
+watch([() => props.showVolumeProfile, () => props.selectMode, () => props.zoomSelectMode], ([vp, sel]) => {
   if (!vp) volumeProfile.value = null        // VP 关 → 清成交量剖面叠加
   if (!vp && !sel) selectedRange.value = null  // 两个都关 → 连选区一起清
   syncBrushCursor()
@@ -546,7 +599,7 @@ watch(option, () => {
 </script>
 
 <template>
-  <div class="kline-wrap">
+  <div class="kline-wrap" @mouseenter="isHovered = true" @mouseleave="isHovered = false">
     <button v-if="hasSelection" class="find-similar-btn" @click="emitFindSimilar">
       🔍 找相似
     </button>

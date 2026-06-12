@@ -178,6 +178,9 @@ watch(showVolumeProfile, (v) => localStorage.setItem('kline_vp_on', String(v)))
 // 框选找相似模式：开启后可在 K 线上拖拽框选一段走势，图右上角冒出「找相似」按钮。
 const selectMode = ref(false)
 
+// 框选缩放模式：开启后拖拽横向区间 → 缩放到该区间。
+const zoomSelectMode = ref(false)
+
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
 // 默认窗口：日线最近 6 个月、分钟线最近 5 天。抽成函数便于「清空后恢复默认」。
@@ -449,6 +452,9 @@ function jumpToMatch(m: PatternMatch) {
         <n-button :type="showVolumeProfile ? 'primary' : 'default'" @click="showVolumeProfile = !showVolumeProfile">
           VP {{ showVolumeProfile ? 'ON' : 'OFF' }}
         </n-button>
+        <n-button :type="zoomSelectMode ? 'primary' : 'default'" @click="zoomSelectMode = !zoomSelectMode">
+          框选缩放 {{ zoomSelectMode ? 'ON' : 'OFF' }}
+        </n-button>
         <n-button :type="selectMode ? 'primary' : 'default'" @click="selectMode = !selectMode">
           🔍 框选找相似 {{ selectMode ? 'ON' : 'OFF' }}
         </n-button>
@@ -469,6 +475,7 @@ function jumpToMatch(m: PatternMatch) {
           :factor-rows="factorRows"
           :show-volume-profile="showVolumeProfile"
           :select-mode="selectMode"
+          :zoom-select-mode="zoomSelectMode"
           @find-similar="onFindSimilar"
         />
       </n-card>
