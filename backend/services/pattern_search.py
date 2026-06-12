@@ -9,7 +9,7 @@ import math
 from dataclasses import dataclass, field
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
 
 # 所有曲线统一重采样到定长，保证不同长度窗口可比、DTW 计算量有界。
 TARGET_LEN = 128
@@ -34,6 +34,26 @@ def normalize_curve(prices, target_len: int = TARGET_LEN) -> np.ndarray:
     return (resampled - mu) / sd
 
 
+def normalize_curves_batch(price_list: list[np.ndarray], target_len: int = TARGET_LEN) -> np.ndarray:
+    """批量归一化：返回 (N, target_len) 矩阵，比逐条调用快。"""
+    out = np.empty((len(price_list), target_len), dtype=np.float64)
+    xq = np.linspace(0.0, 1.0, target_len)
+    for i, prices in enumerate(price_list):
+        arr = np.asarray(prices, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        if arr.size < 2:
+            out[i] = 0.0
+            continue
+        xp = np.linspace(0.0, 1.0, arr.size)
+        resampled = np.interp(xq, xp, arr)
+        sd = resampled.std()
+        if sd < 1e-12:
+            out[i] = 0.0
+        else:
+            out[i] = (resampled - resampled.mean()) / sd
+    return out
+
+
 def correlation_scores(query: np.ndarray, cand_matrix: np.ndarray) -> np.ndarray:
     """query 与候选矩阵每行的 Pearson 相关系数（向量化）。
 
@@ -46,24 +66,37 @@ def correlation_scores(query: np.ndarray, cand_matrix: np.ndarray) -> np.ndarray
 
 @njit(cache=True)
 def _dtw_band(a: np.ndarray, b: np.ndarray, band: int) -> float:
-    """Sakoe-Chiba 带约束 DTW，平方欧氏距离。返回累计距离。"""
+    """Sakoe-Chiba 带约束 DTW，平方欧氏距离。2 行滚动数组，O(n·band) 时间 O(n) 空间。"""
     n = a.shape[0]
     INF = 1e18
-    cost = np.full((n + 1, n + 1), INF)
-    cost[0, 0] = 0.0
+    prev = np.full(n + 1, INF)
+    curr = np.full(n + 1, INF)
+    prev[0] = 0.0
     for i in range(1, n + 1):
+        curr[:] = INF
         jstart = max(1, i - band)
         jend = min(n, i + band)
         for j in range(jstart, jend + 1):
             d = a[i - 1] - b[j - 1]
             d = d * d
-            m = cost[i - 1, j]
-            if cost[i, j - 1] < m:
-                m = cost[i, j - 1]
-            if cost[i - 1, j - 1] < m:
-                m = cost[i - 1, j - 1]
-            cost[i, j] = d + m
-    return cost[n, n]
+            m = prev[j]
+            if curr[j - 1] < m:
+                m = curr[j - 1]
+            if prev[j - 1] < m:
+                m = prev[j - 1]
+            curr[j] = d + m
+        prev, curr = curr, prev
+    return prev[n]
+
+
+@njit(parallel=True, cache=True)
+def _dtw_batch(query: np.ndarray, cand_matrix: np.ndarray, band: int) -> np.ndarray:
+    """对 cand_matrix 每行并行计算与 query 的 DTW 距离。"""
+    k = cand_matrix.shape[0]
+    dists = np.empty(k, dtype=np.float64)
+    for idx in prange(k):
+        dists[idx] = _dtw_band(query, cand_matrix[idx], band)
+    return dists
 
 
 def dtw_similarity(query: np.ndarray, cand: np.ndarray, band_ratio: float = 0.15) -> float:
@@ -71,6 +104,16 @@ def dtw_similarity(query: np.ndarray, cand: np.ndarray, band_ratio: float = 0.15
     band = max(1, int(query.shape[0] * band_ratio))
     dist = _dtw_band(query, cand, band)
     return 1.0 / (1.0 + math.sqrt(dist / query.shape[0]))
+
+
+def dtw_similarities_batch(
+    query: np.ndarray, cand_matrix: np.ndarray, band_ratio: float = 0.15,
+) -> np.ndarray:
+    """批量 DTW → 相似度数组，内部 numba 多线程并行。"""
+    band = max(1, int(query.shape[0] * band_ratio))
+    dists = _dtw_batch(query, cand_matrix, band)
+    n = query.shape[0]
+    return 1.0 / (1.0 + np.sqrt(dists / n))
 
 
 @dataclass
@@ -130,17 +173,16 @@ def shape_search(
     """
     if not candidates:
         return []
-    # 精排池至少要能容下 top_k，否则相关系数粗筛会把结果数压在 prefilter_k 以下。
     prefilter_k = max(prefilter_k, top_k)
-    norm = np.vstack([normalize_curve(c.prices) for c in candidates])
+    norm = normalize_curves_batch([c.prices for c in candidates])
     corr = correlation_scores(query_curve, norm)
     k = min(prefilter_k, len(candidates))
-    # 取相关系数最高的 k 个进入 DTW 精排（argpartition 比全排序快）
     cand_idx = np.argpartition(-corr, k - 1)[:k] if k < len(candidates) else np.arange(len(candidates))
+    sub_norm = norm[cand_idx]
+    sims = dtw_similarities_batch(query_curve, sub_norm)
     scored = []
-    for i in cand_idx:
-        sim = dtw_similarity(query_curve, norm[i])
-        score = _blend_score(sim, float(corr[i]))
+    for j, i in enumerate(cand_idx):
+        score = _blend_score(float(sims[j]), float(corr[i]))
         scored.append((int(i), score))
     scored.sort(key=lambda t: t[1], reverse=True)
     out: list[Match] = []
@@ -181,8 +223,7 @@ def shape_search_multi(
     if not candidates or not query_curves:
         return []
     prefilter_k = max(prefilter_k, top_k)
-    norm = np.vstack([normalize_curve(c.prices) for c in candidates])
-    # 每条 query 的相关系数数组；粗筛用逐候选最大值（并集保留）。
+    norm = normalize_curves_batch([c.prices for c in candidates])
     corr_list = [correlation_scores(q, norm) for q in query_curves]
     corr_max = np.full(len(candidates), -np.inf)
     for corr in corr_list:
@@ -191,12 +232,14 @@ def shape_search_multi(
     cand_idx = (
         np.argpartition(-corr_max, k - 1)[:k] if k < len(candidates) else np.arange(len(candidates))
     )
+    sub_norm = norm[cand_idx]
+    # 每条 query 批量计算 DTW 相似度
+    sims_per_query = [dtw_similarities_batch(q, sub_norm) for q in query_curves]
     scored: list[tuple[int, float, list[float]]] = []
-    for i in cand_idx:
-        # 每条 query 的分项 = DTW 与该 query 相关系数的综合，压制 DTW 假阳性。
+    for j, i in enumerate(cand_idx):
         subs = [
-            _blend_score(dtw_similarity(q, norm[i]), float(corr_list[qi][i]))
-            for qi, q in enumerate(query_curves)
+            _blend_score(float(sims_per_query[qi][j]), float(corr_list[qi][i]))
+            for qi in range(len(query_curves))
         ]
         total = min(subs) if agg == "min" else float(np.mean(subs))
         scored.append((int(i), float(total), subs))
