@@ -68,7 +68,7 @@ def _update_status(
 
 
 def _run_and_persist(run_id: str, search_fn) -> None:
-    """跑一次检索（``search_fn()`` 返回 {query_curves, matches}）并把结果落库。
+    """跑一次检索（``search_fn(on_progress)`` 返回 {query_curves, matches}）并把结果落库。
 
     截图 / 走势两种 worker 共用同一套状态机与结果写入；任何异常都收口为终态。
     """
@@ -76,7 +76,10 @@ def _run_and_persist(run_id: str, search_fn) -> None:
         _update_status(run_id, status="running", started=True, progress=10)
         check_abort("pattern_search", run_id)
 
-        res = search_fn()
+        def _on_progress(pct: int) -> None:
+            _update_status(run_id, progress=min(pct, 90))
+
+        res = search_fn(on_progress=_on_progress)
 
         check_abort("pattern_search", run_id)
         _update_status(run_id, progress=95)
@@ -106,7 +109,7 @@ def _run_and_persist(run_id: str, search_fn) -> None:
 
 def run_pattern_search_by_image(run_id: str, body: dict) -> None:
     """worker 入口：截图检索。"""
-    _run_and_persist(run_id, lambda: search_by_image(
+    _run_and_persist(run_id, lambda on_progress=None: search_by_image(
         DataService(),
         pool_id=body["pool_id"],
         images=body.get("images"),
@@ -116,12 +119,13 @@ def run_pattern_search_by_image(run_id: str, body: dict) -> None:
         top_k=body.get("top_k", 20),
         agg=body.get("agg", "min"),
         min_score=body.get("min_score", 0.0),
+        on_progress=on_progress,
     ))
 
 
 def run_pattern_search_by_window(run_id: str, body: dict) -> None:
     """worker 入口：相似K线选股（一段或多段真实走势）。"""
-    _run_and_persist(run_id, lambda: search_by_window(
+    _run_and_persist(run_id, lambda on_progress=None: search_by_window(
         DataService(),
         windows=body.get("windows") or [],
         pool_id=body["pool_id"],
@@ -129,6 +133,7 @@ def run_pattern_search_by_window(run_id: str, body: dict) -> None:
         top_k=body.get("top_k", 20),
         agg=body.get("agg", "min"),
         min_score=body.get("min_score", 0.0),
+        on_progress=on_progress,
     ))
 
 
@@ -146,7 +151,7 @@ def _load_labels(pattern_name: str) -> list[dict]:
 
 def run_pattern_search_learned(run_id: str, body: dict) -> None:
     """worker 入口：学习型选股——读标注 → 训练打分器 → 给池打分。"""
-    def _do():
+    def _do(on_progress=None):
         labels = _load_labels(body["pattern_name"])
         return search_by_learned(
             DataService(),
@@ -154,5 +159,6 @@ def run_pattern_search_learned(run_id: str, body: dict) -> None:
             pool_id=body["pool_id"],
             top_k=body.get("top_k", 20),
             mode=body.get("mode", "realtime"),
+            on_progress=on_progress,
         )
     _run_and_persist(run_id, _do)

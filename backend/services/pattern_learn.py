@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from backend.services.pattern_search import (
@@ -101,6 +103,7 @@ def search_by_learned(
     data, labels: list[dict], pool_id: int,
     top_k: int = 20, mode: str = "realtime",
     step: int = 5, history_days: int = 1000,
+    on_progress: Callable[[int], None] | None = None,
 ) -> dict:
     """用标注的正/反例训练打分器，再给股票池打分排序。
 
@@ -172,10 +175,14 @@ def search_by_learned(
     # 2) 给股票池打分。realtime=只看最近一段；history=历史滑窗取该股最佳一段。
     symbols = [s for s in data.resolve_pool(pool_id) if s not in exclude]
     out: dict[str, Match] = {}
+    if on_progress:
+        on_progress(15)
     if symbols:
         pool_bars = data.load_bars(
             symbols, _date(2005, 1, 1), _date.today(), freq="1d", adjust="qfq"
         )
+        if on_progress:
+            on_progress(50)
         for sym, df in pool_bars.items():
             close = df["close"].dropna()
             closes = close.to_numpy(dtype=float)

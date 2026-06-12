@@ -104,7 +104,14 @@ const columns: DataTableColumns<PatternRun> = [
     render: (r) => h(StatusBadge, { status: r.status }),
   },
   { title: '进度', key: 'progress', width: 70, render: (r) => `${r.progress}%` },
-  { title: '创建时间', key: 'created_at', width: 180 },
+  {
+    title: '创建时间', key: 'created_at', width: 180,
+    render: (r) => {
+      const s = r.created_at as string | undefined
+      if (!s) return ''
+      return s.replace('T', ' ').replace(/\.\d+$/, '').slice(0, 19)
+    },
+  },
   {
     title: '操作', key: 'actions', width: 220,
     render: (r) => h(NSpace, { size: 8 }, () => [

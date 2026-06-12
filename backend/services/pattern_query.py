@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import date
 
 import numpy as np
@@ -201,6 +202,7 @@ def _search_pool_by_curves(
     data, pool_id: int, query_curves: list[np.ndarray],
     scales: list[int], top_k: int, agg: str, min_score: float,
     exclude_symbols: set[str] | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """池内检索内核：股票池每只股的「最近窗口」做候选 → 综合检索 → 同股取最佳。
 
@@ -212,7 +214,11 @@ def _search_pool_by_curves(
         symbols = [s for s in symbols if s not in exclude_symbols]
     if not symbols:
         return []
+    if on_progress:
+        on_progress(15)
     bars = data.load_bars(symbols, _HISTORY_START, date.today(), freq="1d", adjust="qfq")
+    if on_progress:
+        on_progress(50)
     candidates: list[Candidate] = []
     for sym, df in bars.items():
         close = df["close"].dropna()
@@ -243,6 +249,7 @@ def search_by_image(
     hint: str | None = None,
     scales: list[int] | None = None, top_k: int = 20, agg: str = "min",
     min_score: float = 0.0,
+    on_progress: Callable[[int], None] | None = None,
 ) -> dict:
     """需求1：截图 → 折线 → 在股票池每只股最近窗口里找相似。
 
@@ -259,7 +266,8 @@ def search_by_image(
     query_curves = [extract_curve_from_image(img, hint=hint) for img in imgs]
     curves_out = [[round(float(v), 4) for v in qc] for qc in query_curves]
     matches = _search_pool_by_curves(
-        data, pool_id, query_curves, scales, top_k, agg, min_score
+        data, pool_id, query_curves, scales, top_k, agg, min_score,
+        on_progress=on_progress,
     )
     return {
         "query_curve": curves_out[0],   # 兼容单图前端
@@ -291,6 +299,7 @@ def search_by_window(
     data, windows: list[dict], pool_id: int,
     scales: list[int] | None = None, top_k: int = 20,
     agg: str = "min", min_score: float = 0.0,
+    on_progress: Callable[[int], None] | None = None,
 ) -> dict:
     """相似K线选股：用**一段或多段真实走势**在股票池里找走势最像的其他股票。
 
@@ -314,7 +323,7 @@ def search_by_window(
         return {"query_curve": [], "query_curves": [], "matches": []}
     matches = _search_pool_by_curves(
         data, pool_id, query_curves, scales, top_k, agg, min_score,
-        exclude_symbols=exclude,
+        exclude_symbols=exclude, on_progress=on_progress,
     )
     return {
         "query_curve": curves_out[0],

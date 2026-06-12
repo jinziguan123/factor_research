@@ -155,7 +155,7 @@ function queryOption(curve: number[]) {
           <n-descriptions-item label="截图">{{ (run.image_names ?? []).join('、') || '-' }}</n-descriptions-item>
           <n-descriptions-item label="提示">{{ run.hint || '-' }}</n-descriptions-item>
         </template>
-        <n-descriptions-item label="创建时间">{{ run.created_at }}</n-descriptions-item>
+        <n-descriptions-item label="创建时间">{{ (run.created_at ?? '').replace('T', ' ').replace(/\.\d+$/, '').slice(0, 19) }}</n-descriptions-item>
       </n-descriptions>
     </n-card>
 
