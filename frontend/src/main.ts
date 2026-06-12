@@ -6,7 +6,7 @@ import App from './App.vue'
 import { routes } from './router'
 import './styles/global.scss'
 
-const router = createRouter({ history: createWebHistory(), routes })
+const router = createRouter({ history: createWebHistory('/factor_research/'), routes })
 
 createApp(App)
   .use(createPinia())

@@ -3,6 +3,7 @@ import vue from '@vitejs/plugin-vue'
 import path from 'path'
 
 export default defineConfig({
+  base: '/factor_research/',
   plugins: [vue()],
   resolve: {
     alias: { '@': path.resolve(__dirname, 'src') },
@@ -10,7 +11,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': 'http://localhost:8000',
+      '/factor_research/api': {
+        target: 'http://localhost:8000',
+        rewrite: (p: string) => p.replace(/^\/factor_research/, ''),
+      },
     },
   },
 })

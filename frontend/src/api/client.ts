@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-export const client = axios.create({ baseURL: '/api', timeout: 30_000 })
+export const client = axios.create({ baseURL: '/factor_research/api', timeout: 30_000 })
 
 client.interceptors.response.use(
   (resp) => {
