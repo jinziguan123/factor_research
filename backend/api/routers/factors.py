@@ -1,8 +1,6 @@
 """因子目录 CRUD。
 
-- ``GET /api/factors``：列所有已注册因子；调用前先 ``scan_and_register`` 兜底初始扫描，
-  防止部分测试场景 startup 未触发（例如不使用 ``with TestClient`` 的 health 型测试）；
-  实现在 registry 内是幂等的，不会重复 bump version。
+- ``GET /api/factors``：列所有已注册因子（startup 钩子已完成 scan_and_register）。
 - ``GET /api/factors/{factor_id}``：返回单个因子详情；未注册走 404。多带一个
   ``editable: bool``——源码位于 ``backend/factors/llm_generated/`` 下为 True，
   前端据此决定是否展示"编辑源码 / 删除"按钮。
@@ -246,7 +244,6 @@ def list_factors(
     - **is_sota**：仅返回 SOTA 因子（true）/ 仅非 SOTA（false）
     """
     reg = FactorRegistry()
-    reg.scan_and_register()
     items = reg.list()
 
     # 分类过滤
@@ -279,7 +276,6 @@ def list_factors(
 def list_categories() -> dict:
     """返回所有已注册因子的分类列表（去重），供前端筛选下拉框使用。"""
     reg = FactorRegistry()
-    reg.scan_and_register()
     cats: set[str] = set()
     for it in reg.list():
         c = it.get("category")
@@ -292,7 +288,6 @@ def list_categories() -> dict:
 def get_factor(factor_id: str) -> dict:
     """返回单个因子的详细元数据（含 params_schema、当前 version、editable）。"""
     reg = FactorRegistry()
-    reg.scan_and_register()
     try:
         inst = reg.get(factor_id)
     except KeyError:
@@ -346,7 +341,6 @@ def get_factor(factor_id: str) -> dict:
 def get_factor_code(factor_id: str) -> dict:
     """返回源码文本。所有已注册因子均可读（不限 llm_generated）。"""
     reg = FactorRegistry()
-    reg.scan_and_register()
     p = _factor_source_file(factor_id, reg)
     try:
         code = p.read_text(encoding="utf-8")
@@ -377,7 +371,6 @@ def update_factor_code(factor_id: str, body: UpdateFactorCodeIn) -> dict:
     → 回读元数据 + 附带 backup_path 返回。
     """
     reg = FactorRegistry()
-    reg.scan_and_register()
     p = _require_factor_file(factor_id, reg)
 
     try:
@@ -423,7 +416,6 @@ def delete_factor(factor_id: str) -> dict:
     - 删完重置 worker 进程池，避免子进程里还缓存着旧字节码。
     """
     reg = FactorRegistry()
-    reg.scan_and_register()
     p = _require_llm_file(factor_id, reg)
     try:
         p.unlink()
@@ -559,7 +551,6 @@ def get_factor_bars(
     Compute: FactorContext(symbols=[symbol]) -> factor.compute() -> extract column -> time series.
     """
     reg = FactorRegistry()
-    reg.scan_and_register()
 
     try:
         factor = reg.get(factor_id)
