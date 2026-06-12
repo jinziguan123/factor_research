@@ -40,7 +40,9 @@ async function rerun(r: PatternRun) {
       message.success('已按相同条件重新提交')
       router.push(`/pattern/runs/${res.run_id}`)
     } else if (r.kind === 'learned' && learnedPatternOf(r)) {
-      const res = await createLearned.mutateAsync({ pattern_name: learnedPatternOf(r)!, pool_id: r.pool_id, top_k: r.top_k })
+      const q = r.query_json
+      const mode = (q && !Array.isArray(q) ? q.mode : undefined) ?? 'realtime'
+      const res = await createLearned.mutateAsync({ pattern_name: learnedPatternOf(r)!, pool_id: r.pool_id, top_k: r.top_k, mode })
       message.success('已用最新标注重新训练+选股')
       router.push(`/pattern/runs/${res.run_id}`)
     } else {

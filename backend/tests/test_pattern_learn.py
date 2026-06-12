@@ -75,6 +75,24 @@ def test_learned_ranks_breakdown_above_rounded():
     assert min(scores["BRK1.SZ"], scores["BRK2.SZ"]) > max(scores["RND1.SZ"], scores["RND2.SZ"])
     # 打分窗口长度跟随正例长度（正例无区间→最近60日），结果尺度应为 60，而非固定 30
     assert all(m["scale"] == 60 for m in res["matches"])
+    # 回归：分数不能全挤在一起（之前 GBM 过拟合导致"全 99.9%"）
+    vals = list(scores.values())
+    assert max(vals) - min(vals) > 0.05
+
+
+def test_history_mode_runs_and_ranks():
+    panels = {
+        "POS1.SZ": _breakdown(), "NEG1.SZ": _rounded(),
+        "BRK1.SZ": _breakdown() + 3, "RND1.SZ": _rounded() * 1.1,
+    }
+    labels = [{"symbol": "POS1.SZ", "label": 1}, {"symbol": "NEG1.SZ", "label": 0}]
+    res = pl.search_by_learned(
+        _FakePool(panels), labels=labels, pool_id=1, top_k=10,
+        mode="history", step=5, history_days=1000,
+    )
+    assert res["matches"], "history 模式应返回结果"
+    sc = {m["label"]: m["score"] for m in res["matches"]}
+    assert sc["BRK1.SZ"] > sc["RND1.SZ"]
 
 
 def test_window_length_follows_labeled_range():

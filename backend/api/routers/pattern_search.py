@@ -242,7 +242,7 @@ def delete_label(label_id: int) -> dict:
 class ByLearnedReq(BaseModel):
     pattern_name: str
     pool_id: int
-    scales: list[int] | None = None
+    mode: str = "realtime"     # realtime=实时选股(最近) / history=学习(历史滑窗)
     top_k: int = 20
 
 
@@ -257,14 +257,14 @@ def post_by_learned(req: ByLearnedReq, bt: BackgroundTasks) -> dict:
                 INSERT INTO fr_pattern_search_runs
                 (run_id, kind, pool_id, query_json, num_images, scales_json,
                  top_k, agg, status, progress, created_at)
-                VALUES (%s,'learned',%s,%s,0,%s,%s,'-','pending',0,%s)
+                VALUES (%s,'learned',%s,%s,0,NULL,%s,%s,'pending',0,%s)
                 """,
                 (
                     run_id,
                     req.pool_id,
-                    json.dumps({"pattern_name": req.pattern_name}, ensure_ascii=False),
-                    json.dumps(req.scales) if req.scales else None,
+                    json.dumps({"pattern_name": req.pattern_name, "mode": req.mode}, ensure_ascii=False),
                     req.top_k,
+                    req.mode,    # 借 agg 列存 mode（仅展示用）
                     datetime.now(),
                 ),
             )
@@ -272,7 +272,7 @@ def post_by_learned(req: ByLearnedReq, bt: BackgroundTasks) -> dict:
 
     body = {
         "pattern_name": req.pattern_name, "pool_id": req.pool_id,
-        "scales": req.scales, "top_k": req.top_k,
+        "mode": req.mode, "top_k": req.top_k,
     }
     bt.add_task(submit, pattern_search_learned_entry, run_id, body)
     return ok({"run_id": run_id, "status": "pending"})

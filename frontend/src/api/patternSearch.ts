@@ -81,8 +81,8 @@ export interface PatternRun {
   kind?: 'by_image' | 'by_window' | 'learned'
   pool_id: number
   image_names?: string[]
-  // by_window：查询窗口数组；learned：{pattern_name}
-  query_json?: WindowSpec[] | { pattern_name?: string } | null
+  // by_window：查询窗口数组；learned：{pattern_name, mode}
+  query_json?: WindowSpec[] | { pattern_name?: string; mode?: 'realtime' | 'history' } | null
   num_images: number
   hint?: string | null
   top_k?: number
@@ -213,7 +213,7 @@ export function useDeleteLabel() {
 export interface ByLearnedReq {
   pattern_name: string
   pool_id: number
-  scales?: number[]
+  mode?: 'realtime' | 'history'   // 实时选股(最近) / 学习(历史滑窗)
   top_k?: number
 }
 /** 创建「学习型选股」任务（复用记录页轮询/详情）。 */

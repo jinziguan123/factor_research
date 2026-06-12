@@ -27,6 +27,7 @@ const nameOptions = () =>
   (patternNames.value ?? []).map(p => ({ label: `${p.pattern_name}（${p.cnt}条标注）`, value: p.pattern_name }))
 
 const poolId = ref<number | null>(null)
+const searchMode = ref<'realtime' | 'history'>('realtime')
 const sym = ref('')
 const range = ref<[number, number] | null>(null)
 
@@ -72,7 +73,7 @@ async function removeLabel(id: number) {
 async function trainAndSearch() {
   if (!canTrain.value) { message.warning('至少各需 1 个正例和反例，并选好股票池'); return }
   try {
-    const res = await createLearned.mutateAsync({ pattern_name: patternName.value.trim(), pool_id: poolId.value! })
+    const res = await createLearned.mutateAsync({ pattern_name: patternName.value.trim(), pool_id: poolId.value!, mode: searchMode.value })
     message.success('训练+选股任务已创建')
     router.push(`/pattern/runs/${res.run_id}`)
   } catch (e: any) {
@@ -113,6 +114,10 @@ async function trainAndSearch() {
           style="width: 240px"
         />
         <n-select v-model:value="poolId" :options="poolOptions()" placeholder="选择股票池" filterable style="width: 240px" />
+        <n-radio-group v-model:value="searchMode" size="small">
+          <n-radio-button value="realtime">实时选股（最近）</n-radio-button>
+          <n-radio-button value="history">学习（历史）</n-radio-button>
+        </n-radio-group>
         <n-button type="primary" :disabled="!canTrain" :loading="createLearned.isPending.value" @click="trainAndSearch">
           训练并选股
         </n-button>

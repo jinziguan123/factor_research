@@ -74,21 +74,24 @@ def extract_window_features(close: np.ndarray) -> np.ndarray | None:
 
 
 def _train(features: np.ndarray, y: np.ndarray):
-    """正/反例特征 → LightGBM 概率分类器。小样本用浅树 + 允许极小叶子。"""
-    import lightgbm as lgb
+    """正/反例特征 → 概率打分器。
 
-    clf = lgb.LGBMClassifier(
-        n_estimators=120,
-        num_leaves=7,
-        max_depth=3,
-        learning_rate=0.05,
-        min_child_samples=1,
-        min_split_gain=0.0,
-        subsample=1.0,
-        colsample_bytree=1.0,
-        class_weight="balanced",     # 正反例数量不均时平衡
-        verbosity=-1,
-        n_jobs=1,
+    小样本（几条~几十条标注）下用 **标准化 + 强正则逻辑回归**，而不是 GBM：
+    - GBM 在 4 个样本上会完美过拟合，对池里几乎所有候选都吐 ~0.999（"全 99.9%" 就是这么来的）；
+    - LR + L2(C 小) 概率平滑、分得开、可排序，且样本少时更稳。
+    标注攒多了再换更强模型不迟。
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    clf = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(
+            C=0.3,                    # 强正则，避免可分小样本把概率推到 0/1 极端
+            class_weight="balanced",
+            max_iter=2000,
+        ),
     )
     clf.fit(features, y)
     return clf
@@ -96,12 +99,19 @@ def _train(features: np.ndarray, y: np.ndarray):
 
 def search_by_learned(
     data, labels: list[dict], pool_id: int,
-    top_k: int = 20,
+    top_k: int = 20, mode: str = "realtime",
+    step: int = 5, history_days: int = 1000,
 ) -> dict:
-    """用标注的正/反例训练打分器，再给股票池最近窗口打分排序。
+    """用标注的正/反例训练打分器，再给股票池打分排序。
 
     ``labels`` = ``[{"symbol","start","end","label"(1/0)}, ...]``。
     打分窗口长度统一取「正例窗口长度的中位数」，与你框选的长度一致。
+
+    ``mode``：
+    - ``"realtime"``（默认）：只看每只股的**最近**一段——找"现在正在出现该形态"的票，实时选股；
+    - ``"history"``：在每只股**历史**里滑窗找该形态出现过的最佳一段——学习阶段用，
+      便于发现历史样例去标注。``step``/``history_days`` 控制滑窗步长与回看深度。
+
     返回 ``{query_curves(正例归一化曲线), matches}``。需要至少各 1 个正例和反例。
     """
     from datetime import date as _date
@@ -159,7 +169,7 @@ def search_by_learned(
     target_len = int(np.median(pos_lens)) if pos_lens else 60
     target_len = max(20, min(target_len, 250))
 
-    # 2) 给股票池每只股的「最近 target_len 日」打分（单一尺度，与标注长度一致）。
+    # 2) 给股票池打分。realtime=只看最近一段；history=历史滑窗取该股最佳一段。
     symbols = [s for s in data.resolve_pool(pool_id) if s not in exclude]
     out: dict[str, Match] = {}
     if symbols:
@@ -173,16 +183,27 @@ def search_by_learned(
             n = len(closes)
             if n < target_len:
                 continue
-            seg = closes[-target_len:]
-            f = extract_window_features(seg)
-            if f is None:
-                continue
-            prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
-            out[sym] = Match(
-                label=sym, score=round(prob, 4), scale=target_len,
-                start_date=dates[-target_len], end_date=dates[-1],
-                curve=_downsample(normalize_curve(seg)),
-            )
+            # 候选窗口的起点列表
+            if mode == "history":
+                lo_min = max(0, n - target_len - max(0, history_days))
+                starts = list(range(lo_min, n - target_len + 1, max(1, step)))
+            else:
+                starts = [n - target_len]   # 只看最近一段
+            best: Match | None = None
+            for lo in starts:
+                seg = closes[lo:lo + target_len]
+                f = extract_window_features(seg)
+                if f is None:
+                    continue
+                prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
+                if best is None or prob > best.score:
+                    best = Match(
+                        label=sym, score=round(prob, 4), scale=target_len,
+                        start_date=dates[lo], end_date=dates[lo + target_len - 1],
+                        curve=_downsample(normalize_curve(seg)),
+                    )
+            if best is not None:
+                out[sym] = best
 
     final = sorted(out.values(), key=lambda m: m.score, reverse=True)[:top_k]
     return {
