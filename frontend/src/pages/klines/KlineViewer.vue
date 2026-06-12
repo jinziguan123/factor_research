@@ -181,6 +181,18 @@ const selectMode = ref(false)
 // 框选缩放模式：开启后拖拽横向区间 → 缩放到该区间。
 const zoomSelectMode = ref(false)
 
+// ↓ 键缩放到底时，自动扩展时间范围以加载更多数据
+function onRequestExpand() {
+  const DAY = 86_400_000
+  if (freq.value === '1d') {
+    const r = dailyRange.value ?? defaultDailyRange()
+    dailyRange.value = [r[0] - 60 * DAY, r[1] + 60 * DAY]
+  } else {
+    const r = minuteRange.value ?? defaultMinuteRange()
+    minuteRange.value = [r[0] - 2 * DAY, r[1] + 2 * DAY]
+  }
+}
+
 // 默认窗口：日线 180 天，分钟线 5 天。切换 freq 时自动换档，避免用户忘了缩窗口触发 400。
 const today = new Date()
 // 默认窗口：日线最近 6 个月、分钟线最近 5 天。抽成函数便于「清空后恢复默认」。
@@ -477,6 +489,7 @@ function jumpToMatch(m: PatternMatch) {
           :select-mode="selectMode"
           :zoom-select-mode="zoomSelectMode"
           @find-similar="onFindSimilar"
+          @request-expand="onRequestExpand"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">

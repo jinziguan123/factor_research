@@ -86,6 +86,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
   (e: 'find-similar', payload: { start: string; end: string }): void
+  (e: 'request-expand'): void
 }>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -509,13 +510,16 @@ function onKeyDown(e: KeyboardEvent) {
   const delta = span * 0.1
   let newStart: number, newEnd: number
   if (e.key === 'ArrowUp') {
-    // 放大：窗口收窄，蜡烛更大
     const half = (span - delta) / 2
     if (half < 0.25) return
     newStart = center - half
     newEnd = center + half
   } else {
-    // 缩小：窗口放宽，显示更多
+    // 已经看到全部数据还想缩小 → 请求父组件扩展时间范围
+    if (start <= 0.1 && end >= 99.9) {
+      emit('request-expand')
+      return
+    }
     newStart = center - (span + delta) / 2
     newEnd = center + (span + delta) / 2
   }
