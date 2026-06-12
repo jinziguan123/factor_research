@@ -178,8 +178,21 @@ watch(showVolumeProfile, (v) => localStorage.setItem('kline_vp_on', String(v)))
 // 框选找相似模式：开启后可在 K 线上拖拽框选一段走势，图右上角冒出「找相似」按钮。
 const selectMode = ref(false)
 
-// 框选缩放模式：开启后拖拽横向区间 → 缩放到该区间。
-const zoomSelectMode = ref(false)
+// 框选缩放模式：默认开启
+const zoomSelectMode = ref(true)
+
+function toggleMode(mode: 'zoom' | 'vp' | 'select') {
+  if (mode === 'zoom') {
+    zoomSelectMode.value = !zoomSelectMode.value
+    if (zoomSelectMode.value) { showVolumeProfile.value = false; selectMode.value = false }
+  } else if (mode === 'vp') {
+    showVolumeProfile.value = !showVolumeProfile.value
+    if (showVolumeProfile.value) { zoomSelectMode.value = false; selectMode.value = false }
+  } else {
+    selectMode.value = !selectMode.value
+    if (selectMode.value) { zoomSelectMode.value = false; showVolumeProfile.value = false }
+  }
+}
 
 // ↓ 键缩放到底时，自动扩展时间范围以加载更多数据
 function onRequestExpand() {
@@ -461,13 +474,13 @@ function jumpToMatch(m: PatternMatch) {
         <n-button quaternary @click="toggleColorMode">
           {{ colorMode === 'a-share' ? '红涨绿跌 (A 股)' : '绿涨红跌 (币圈)' }}
         </n-button>
-        <n-button :type="showVolumeProfile ? 'primary' : 'default'" @click="showVolumeProfile = !showVolumeProfile">
+        <n-button :type="showVolumeProfile ? 'primary' : 'default'" @click="toggleMode('vp')">
           VP {{ showVolumeProfile ? 'ON' : 'OFF' }}
         </n-button>
-        <n-button :type="zoomSelectMode ? 'primary' : 'default'" @click="zoomSelectMode = !zoomSelectMode">
+        <n-button :type="zoomSelectMode ? 'primary' : 'default'" @click="toggleMode('zoom')">
           框选缩放 {{ zoomSelectMode ? 'ON' : 'OFF' }}
         </n-button>
-        <n-button :type="selectMode ? 'primary' : 'default'" @click="selectMode = !selectMode">
+        <n-button :type="selectMode ? 'primary' : 'default'" @click="toggleMode('select')">
           🔍 框选找相似 {{ selectMode ? 'ON' : 'OFF' }}
         </n-button>
       </n-space>

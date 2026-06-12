@@ -598,7 +598,10 @@ watch([() => props.showVolumeProfile, () => props.selectMode, () => props.zoomSe
 // 用 100ms setTimeout 等 setOption 完成后再 dispatchAction 恢复。
 watch(option, () => {
   const { start, end } = dataZoomRange.value
-  setTimeout(() => applyDataZoom(start, end), 100)
+  setTimeout(() => {
+    applyDataZoom(start, end)
+    syncBrushCursor()
+  }, 100)
 })
 </script>
 
