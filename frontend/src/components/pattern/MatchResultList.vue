@@ -11,16 +11,25 @@ use([CanvasRenderer, LineChart, GridComponent])
 
 import { reactive } from 'vue'
 
-const props = defineProps<{ matches: PatternMatch[]; labelable?: boolean }>()
+const props = defineProps<{
+  matches: PatternMatch[]
+  labelable?: boolean
+  // 来自后端已存标注的初始高亮（symbol → 1/0）；切页回来时据此恢复 👍/👎。
+  initialLabels?: Record<string, number>
+}>()
 const emit = defineEmits<{
   (e: 'open', m: PatternMatch): void
   (e: 'label', m: PatternMatch, value: number): void   // 1=正例 / 0=反例
 }>()
 
-// 本地记录每条已标注的方向，给出即时反馈（高亮选中的 👍/👎）。
-const labeled = reactive<Record<string, number>>({})
+// 本次会话内点过的标注（即时反馈）；与后端来的 initialLabels 合并，本地优先。
+const localLabeled = reactive<Record<string, number>>({})
+const labeled = computed<Record<string, number>>(() => ({
+  ...(props.initialLabels ?? {}),
+  ...localLabeled,
+}))
 function onThumb(m: PatternMatch, value: number) {
-  labeled[m.label] = value
+  localLabeled[m.label] = value
   emit('label', m, value)
 }
 

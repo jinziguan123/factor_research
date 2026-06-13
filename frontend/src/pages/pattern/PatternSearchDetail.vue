@@ -17,7 +17,8 @@ import VChart from 'vue-echarts'
 import { useRoute, useRouter } from 'vue-router'
 import {
   usePatternRun, useAbortPatternRun, useCreateWindowSearch,
-  useCreateLearnedSearch, useAddLabel, type PatternMatch, type WindowSpec,
+  useCreateLearnedSearch, useAddLabel, usePatternLabels,
+  type PatternMatch, type WindowSpec,
 } from '@/api/patternSearch'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -42,6 +43,14 @@ const isActive = computed(() =>
 const learnedPattern = computed<string | null>(() => {
   const q = run.value?.query_json
   return (q && !Array.isArray(q) && q.pattern_name) ? q.pattern_name : null
+})
+
+// 拉该形态已存标注，按 symbol 恢复结果列表的 👍/👎 高亮（切页回来不丢）。
+const { data: existingLabels } = usePatternLabels(computed(() => learnedPattern.value ?? ''))
+const initialLabels = computed<Record<string, number>>(() => {
+  const m: Record<string, number> = {}
+  for (const l of existingLabels.value ?? []) m[l.symbol] = l.label
+  return m
 })
 
 // 一键重新检索/重训：走势选股与学习型都能原样重建；截图任务图片未存，回新建页重传。
@@ -188,6 +197,7 @@ function queryOption(curve: number[]) {
         <match-result-list
           :matches="run.matches"
           :labelable="run.kind === 'learned'"
+          :initial-labels="initialLabels"
           @open="openMatch" @label="onLabel"
         />
       </div>
