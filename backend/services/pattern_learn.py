@@ -182,6 +182,7 @@ def search_by_learned(
             pos_curves.append([round(float(v), 4) for v in normalize_curve(seg)])
             pos_lens.append(len(seg))
             pos_meta.append({
+                "id": lb.get("id"),    # 标注主键，供前端删除误选正例
                 "symbol": sym,
                 "start_date": seg_idx[0].strftime("%Y-%m-%d") if len(seg_idx) else None,
                 "end_date": seg_idx[-1].strftime("%Y-%m-%d") if len(seg_idx) else None,

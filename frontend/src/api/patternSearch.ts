@@ -96,8 +96,9 @@ export interface PatternRun {
 }
 
 /** 详情：列表字段 + 识别曲线 + 检索结果。 */
-/** 查询/正例曲线的来源元信息（learned 任务的正例：股票+时段，可跳转）。 */
+/** 查询/正例曲线的来源元信息（learned 任务的正例：股票+时段，可跳转/删除）。 */
 export interface QueryLabel {
+  id?: number | null       // 标注主键，用于删除误选正例
   symbol?: string | null
   start_date?: string | null
   end_date?: string | null

@@ -17,8 +17,8 @@ import VChart from 'vue-echarts'
 import { useRoute, useRouter } from 'vue-router'
 import {
   usePatternRun, useAbortPatternRun, useCreateWindowSearch,
-  useCreateLearnedSearch, useAddLabel, usePatternLabels,
-  type PatternMatch, type WindowSpec,
+  useCreateLearnedSearch, useAddLabel, usePatternLabels, useDeleteLabel,
+  type PatternMatch, type WindowSpec, type QueryLabel,
 } from '@/api/patternSearch'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -102,8 +102,26 @@ const queryLabels = computed(() => run.value?.query_labels ?? [])
 // 正例曲线区折叠开关（默认展开）。
 const curvesCollapsed = ref(false)
 
+// 删除模式：开启后正例上出现删除按钮，用于剔除误选的正例标注。
+const deleteMode = ref(false)
+const delLabel = useDeleteLabel()
+// 当前仍存在的标注 id 集合（实时）；据此判断某正例是否已被删除。
+const existingIds = computed(() => new Set((existingLabels.value ?? []).map(l => l.id)))
+function isPosDeleted(l?: QueryLabel): boolean {
+  return !!l && l.id != null && !existingIds.value.has(l.id)
+}
+async function onDeletePos(l?: QueryLabel) {
+  if (l?.id == null) return
+  try {
+    await delLabel.mutateAsync(l.id)
+    message.success('已删除该误选正例（重新检索后生效）')
+  } catch (e: any) {
+    message.error(e?.message || '删除失败')
+  }
+}
+
 // 点正例曲线 → 跳到该股票 K 线的对应时段（与结果列表跳转同构）。
-function openQueryCurve(l?: { symbol?: string | null; start_date?: string | null; end_date?: string | null }) {
+function openQueryCurve(l?: QueryLabel) {
   if (!l?.symbol) return
   router.push({
     path: '/klines',
@@ -201,10 +219,32 @@ function queryOption(curve: number[]) {
         <n-button text size="tiny" @click="curvesCollapsed = !curvesCollapsed">
           {{ curvesCollapsed ? `展开（${queryCurves.length}）` : '收起' }}
         </n-button>
+        <n-button
+          v-if="run.kind === 'learned' && queryLabels.length"
+          text size="tiny" :type="deleteMode ? 'error' : 'default'"
+          @click="deleteMode = !deleteMode"
+        >
+          {{ deleteMode ? '退出删除' : '删除误选正例' }}
+        </n-button>
       </div>
       <n-space v-show="!curvesCollapsed" :size="12" wrap>
-        <div v-for="(c, i) in queryCurves" :key="i" style="width: 200px">
-          <div style="font-size: 12px; opacity: 0.5">{{ run.kind === 'learned' ? '正例' : '图' }} {{ i + 1 }}</div>
+        <div
+          v-for="(c, i) in queryCurves" :key="i"
+          style="width: 200px"
+          :class="{ 'pos-deleted': isPosDeleted(queryLabels[i]) }"
+        >
+          <div style="font-size: 12px; opacity: 0.5; display: flex; justify-content: space-between; align-items: center">
+            <span>{{ run.kind === 'learned' ? '正例' : '图' }} {{ i + 1 }}</span>
+            <span v-if="isPosDeleted(queryLabels[i])" style="color: #d03050">已删除</span>
+            <n-button
+              v-else-if="deleteMode && run.kind === 'learned' && queryLabels[i] && queryLabels[i].id != null"
+              text size="tiny" type="error"
+              :loading="delLabel.isPending.value"
+              @click="onDeletePos(queryLabels[i])"
+            >
+              删除
+            </n-button>
+          </div>
           <v-chart style="height: 100px" :option="queryOption(c)" autoresize />
           <div
             v-if="queryLabels[i] && queryLabels[i].symbol"
@@ -245,4 +285,6 @@ function queryOption(curve: number[]) {
 .qcurve-meta:hover .qsym { text-decoration: underline; }
 .qsym { font-weight: 600; color: #2080f0; }
 .qspan { opacity: 0.55; font-variant-numeric: tabular-nums; }
+.pos-deleted { opacity: 0.4; filter: grayscale(1); }
+.pos-deleted .qcurve-meta { pointer-events: none; }
 </style>

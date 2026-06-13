@@ -150,7 +150,7 @@ def _load_labels(pattern_name: str) -> list[dict]:
     with mysql_conn() as c:
         with c.cursor() as cur:
             cur.execute(
-                "SELECT symbol, start_date, end_date, label "
+                "SELECT id, symbol, start_date, end_date, label "
                 "FROM fr_pattern_labels WHERE pattern_name=%s",
                 (pattern_name,),
             )
