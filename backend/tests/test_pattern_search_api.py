@@ -212,6 +212,11 @@ def test_add_label(monkeypatch):
     })
     assert resp.status_code == 200
     assert resp.json()["data"]["id"] == 42
+    # 覆盖语义：先 DELETE 同段旧标注再 INSERT，避免正反例矛盾记录并存。
+    sqls = [sql for sql, _ in conn.cur.calls]
+    assert any("DELETE FROM fr_pattern_labels" in s for s in sqls)
+    assert sqls.index(next(s for s in sqls if "DELETE" in s)) \
+        < sqls.index(next(s for s in sqls if "INSERT" in s))
 
 
 def test_list_labels(monkeypatch):

@@ -186,14 +186,26 @@ class LabelReq(BaseModel):
 
 @router.post("/labels")
 def add_label(req: LabelReq) -> dict:
-    """给某命名形态加一条标注（正例/反例）。"""
+    """给某命名形态加一条标注（正例/反例）——覆盖语义。
+
+    同一段（pattern_name+symbol+窗口）的标注是**可切换的单一状态**：先标反例再标
+    正例，应是「改主意」而非「两条矛盾记录」。所以 INSERT 前先删掉同段旧标注。
+    ``<=>`` 是 NULL-safe 等价比较——窗口为 NULL（最近 60 日）时也能正确匹配。
+    """
+    sym = req.symbol.upper()
     with mysql_conn() as c:
         with c.cursor() as cur:
+            cur.execute(
+                "DELETE FROM fr_pattern_labels "
+                "WHERE pattern_name=%s AND symbol=%s "
+                "AND start_date <=> %s AND end_date <=> %s",
+                (req.pattern_name, sym, req.start, req.end),
+            )
             cur.execute(
                 "INSERT INTO fr_pattern_labels "
                 "(pattern_name, symbol, start_date, end_date, label, created_at) "
                 "VALUES (%s,%s,%s,%s,%s,%s)",
-                (req.pattern_name, req.symbol.upper(), req.start, req.end,
+                (req.pattern_name, sym, req.start, req.end,
                  1 if req.label == 1 else 0, datetime.now()),
             )
             new_id = cur.lastrowid
