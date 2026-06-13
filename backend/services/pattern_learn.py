@@ -21,6 +21,7 @@ from backend.services.pattern_search import (
     _downsample,
     normalize_curve,
 )
+from backend.storage.curve_cache import load_qfq_closes
 
 # 下采样归一化曲线的点数（形状特征）。
 _CURVE_FEATS = 16
@@ -178,15 +179,12 @@ def search_by_learned(
     if on_progress:
         on_progress(15)
     if symbols:
-        pool_bars = data.load_bars(
-            symbols, _date(2005, 1, 1), _date.today(), freq="1d", adjust="qfq"
-        )
+        closes_map = load_qfq_closes(data, symbols)
         if on_progress:
             on_progress(50)
-        for sym, df in pool_bars.items():
-            close = df["close"].dropna()
-            closes = close.to_numpy(dtype=float)
-            dates = [d.strftime("%Y-%m-%d") for d in close.index]
+        for sym, item in closes_map.items():
+            closes = item["closes"]
+            dates = item["dates"]
             n = len(closes)
             if n < target_len:
                 continue

@@ -4,6 +4,9 @@ services:
     env_file: ./backend/.env
     environment:
       - TZ=Asia/Shanghai
+      # 图形检索曲线缓存：指向单独部署的 Redis。
+      # 连接信息在 backend/.env 里填（FR_REDIS_HOST / FR_REDIS_PORT / FR_REDIS_PASSWORD）。
+      - FR_REDIS_ENABLED=true
     ports:
       - "8000:8000"
     volumes:

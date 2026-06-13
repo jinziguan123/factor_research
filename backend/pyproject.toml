@@ -38,6 +38,7 @@ dependencies = [
     "alphalens-reloaded>=0.4.6",
     "akshare>=1.13.0",
     "lightgbm>=4.0",
+    "redis>=5.0",
 ]
 
 [tool.setuptools.packages.find]

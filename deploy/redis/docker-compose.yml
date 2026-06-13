@@ -1,0 +1,13 @@
+# 单独部署在 Redis 服务器上的 compose。
+# 用法：把本目录拷到 Redis 机器，按需改 redis.conf 里的密码，然后 `docker-compose up -d`。
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: factor-research-redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    ports:
+      - "6379:6379"          # 对外暴露，供后端那台机器连接
+    volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./data:/data
+    restart: unless-stopped

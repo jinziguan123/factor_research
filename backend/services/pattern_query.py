@@ -20,6 +20,7 @@ from backend.services.pattern_search import (
     shape_search,
     shape_search_multi,
 )
+from backend.storage.curve_cache import load_qfq_closes
 
 DEFAULT_SCALES = [30, 60, 90, 120]
 _HISTORY_START = date(2005, 1, 1)
@@ -216,14 +217,13 @@ def _search_pool_by_curves(
         return []
     if on_progress:
         on_progress(15)
-    bars = data.load_bars(symbols, _HISTORY_START, date.today(), freq="1d", adjust="qfq")
+    closes_map = load_qfq_closes(data, symbols)
     if on_progress:
         on_progress(50)
     candidates: list[Candidate] = []
-    for sym, df in bars.items():
-        close = df["close"].dropna()
-        closes = close.to_numpy(dtype=float)
-        dates = [d.strftime("%Y-%m-%d") for d in close.index]
+    for sym, item in closes_map.items():
+        closes = item["closes"]
+        dates = item["dates"]
         n = len(closes)
         for scale in scales:
             if scale > n:

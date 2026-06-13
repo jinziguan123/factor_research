@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     mysql_pool_size: int = Field(default=5, alias="MYSQL_POOL_SIZE")
     mysql_pool_max: int = Field(default=10, alias="MYSQL_POOL_MAX")
 
+    # ---------- Redis（图形检索曲线缓存，可选；不可用则自动降级回源） ----------
+    redis_enabled: bool = Field(default=False, alias="FR_REDIS_ENABLED")
+    redis_host: str = Field(default="127.0.0.1", alias="FR_REDIS_HOST")
+    redis_port: int = Field(default=6379, alias="FR_REDIS_PORT")
+    redis_db: int = Field(default=0, alias="FR_REDIS_DB")
+    redis_password: str = Field(default="", alias="FR_REDIS_PASSWORD")
+    # 前复权 close 序列缓存 TTL（秒）；默认 26h，跨一个交易日自然过期。
+    pattern_cache_ttl_s: int = Field(default=93_600, alias="FR_PATTERN_CACHE_TTL_S")
+
+    # ---------- LightGBM ----------
     # LightGBM 设备：cpu / gpu / auto（auto=检测 GPU 可用则用）
     lgb_device: str = Field(default="auto", alias="FR_LGB_DEVICE")
 
