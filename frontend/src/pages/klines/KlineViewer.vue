@@ -21,6 +21,7 @@ import {
 } from '@/api/patternSearch'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
+import { normalizeSymbol } from '@/utils/symbol'
 
 const message = useMessage()
 
@@ -297,6 +298,7 @@ function handleRefresh() {
     message.warning('请输入股票代码')
     return
   }
+  symbol.value = normalizeSymbol(symbol.value)
   if (freq.value === '1d') dailyQ.refetch()
   else minuteQ.refetch()
   refreshKey.value++
@@ -405,9 +407,10 @@ function jumpToMatch(m: PatternMatch) {
       <n-space :size="16" align="center" wrap>
         <n-input
           v-model:value="symbol"
-          placeholder="股票代码，如 000001.SZ"
+          placeholder="输入6位代码自动补全，如 000001"
           style="width: 200px"
           @keyup.enter="handleRefresh"
+          @blur="symbol = normalizeSymbol(symbol)"
         />
         <n-select
           v-model:value="freq"

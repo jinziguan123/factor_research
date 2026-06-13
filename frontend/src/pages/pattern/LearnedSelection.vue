@@ -13,6 +13,7 @@ import { usePools } from '@/api/pools'
 import {
   usePatternLabels, useAddLabel, useDeleteLabel, useCreateLearnedSearch, usePatternNames,
 } from '@/api/patternSearch'
+import { normalizeSymbol } from '@/utils/symbol'
 
 const message = useMessage()
 const router = useRouter()
@@ -51,10 +52,11 @@ function toIso(ts: number): string {
 async function add(label: number) {
   if (!patternName.value.trim()) { message.warning('请先填形态名'); return }
   if (!sym.value.trim()) { message.warning('请填股票代码'); return }
+  sym.value = normalizeSymbol(sym.value)
   try {
     await addLabel.mutateAsync({
       pattern_name: patternName.value.trim(),
-      symbol: sym.value.trim().toUpperCase(),
+      symbol: sym.value,
       start: range.value ? toIso(range.value[0]) : undefined,
       end: range.value ? toIso(range.value[1]) : undefined,
       label,
@@ -127,7 +129,7 @@ async function trainAndSearch() {
 
     <n-card v-if="patternName.trim()" title="加标注">
       <n-space :size="10" align="center" wrap style="margin-bottom: 12px">
-        <n-input v-model:value="sym" placeholder="股票代码 000001.SZ" style="width: 180px" @keyup.enter="add(1)" />
+        <n-input v-model:value="sym" placeholder="输入6位代码自动补全，如 000001" style="width: 180px" @keyup.enter="add(1)" @blur="sym = normalizeSymbol(sym)" />
         <n-date-picker v-model:value="range" type="daterange" clearable style="width: 260px" />
         <span style="font-size:12px;color:#d97706">建议选你看中的那段历史区间；不选则只用「最近60日」，很可能不是你想要的形态</span>
         <n-button type="success" :loading="addLabel.isPending.value" @click="add(1)">👍 加为正例</n-button>

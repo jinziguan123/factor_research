@@ -3,6 +3,7 @@ import {
   NConfigProvider,
   NLayout, NLayoutSider, NLayoutContent, NLayoutHeader,
   NMessageProvider, NDialogProvider, NNotificationProvider, NLoadingBarProvider,
+  zhCN, dateZhCN,
 } from 'naive-ui'
 import { binanceThemeOverrides } from '@/styles/theme'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
@@ -10,7 +11,7 @@ import AppHeader from '@/components/layout/AppHeader.vue'
 </script>
 
 <template>
-  <n-config-provider :theme-overrides="binanceThemeOverrides">
+  <n-config-provider :theme-overrides="binanceThemeOverrides" :locale="zhCN" :date-locale="dateZhCN">
     <n-loading-bar-provider>
       <n-dialog-provider>
         <n-notification-provider>
