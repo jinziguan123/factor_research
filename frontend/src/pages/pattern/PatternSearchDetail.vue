@@ -4,7 +4,7 @@
  * 轮询任务状态：运行中显示进度条；成功后展示每张识别曲线 + 相似股票列表，
  * 点击某条跳到对应股票 K 线区间。
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import {
   NPageHeader, NCard, NProgress, NAlert, NButton, NSpace, NDescriptions,
   NDescriptionsItem, useMessage,
@@ -97,6 +97,19 @@ async function onLabel(m: PatternMatch, value: number) {
   }
 }
 const queryCurves = computed<number[][]>(() => run.value?.query_curves ?? [])
+// 正例/查询曲线对应的来源（股票+时段），与 queryCurves 同序对齐。
+const queryLabels = computed(() => run.value?.query_labels ?? [])
+// 正例曲线区折叠开关（默认展开）。
+const curvesCollapsed = ref(false)
+
+// 点正例曲线 → 跳到该股票 K 线的对应时段（与结果列表跳转同构）。
+function openQueryCurve(l?: { symbol?: string | null; start_date?: string | null; end_date?: string | null }) {
+  if (!l?.symbol) return
+  router.push({
+    path: '/klines',
+    query: { symbol: l.symbol, start: l.start_date ?? undefined, end: l.end_date ?? undefined },
+  })
+}
 
 async function onAbort() {
   try {
@@ -181,13 +194,28 @@ function queryOption(curve: number[]) {
     </n-alert>
 
     <n-card v-if="run && run.status === 'success'">
-      <div v-if="queryCurves.length" style="font-size: 12px; opacity: 0.6; margin-bottom: 4px">
-        {{ run.kind === 'learned' ? '学到的正例曲线（参考）：' : '系统识别出的查询曲线（每张图一条）：' }}
+      <div v-if="queryCurves.length" style="display: flex; align-items: center; gap: 10px; margin-bottom: 6px">
+        <span style="font-size: 12px; opacity: 0.6">
+          {{ run.kind === 'learned' ? '学到的正例曲线（参考）' : '系统识别出的查询曲线（每张图一条）' }}
+        </span>
+        <n-button text size="tiny" @click="curvesCollapsed = !curvesCollapsed">
+          {{ curvesCollapsed ? `展开（${queryCurves.length}）` : '收起' }}
+        </n-button>
       </div>
-      <n-space :size="12" wrap>
+      <n-space v-show="!curvesCollapsed" :size="12" wrap>
         <div v-for="(c, i) in queryCurves" :key="i" style="width: 200px">
           <div style="font-size: 12px; opacity: 0.5">{{ run.kind === 'learned' ? '正例' : '图' }} {{ i + 1 }}</div>
           <v-chart style="height: 100px" :option="queryOption(c)" autoresize />
+          <div
+            v-if="queryLabels[i] && queryLabels[i].symbol"
+            class="qcurve-meta"
+            @click="openQueryCurve(queryLabels[i])"
+          >
+            <span class="qsym">{{ queryLabels[i].symbol }}</span>
+            <span v-if="queryLabels[i].start_date" class="qspan">
+              {{ queryLabels[i].start_date }} ~ {{ queryLabels[i].end_date }}
+            </span>
+          </div>
         </div>
       </n-space>
       <div v-if="run.kind === 'learned'" style="font-size:12px;opacity:.6;margin:8px 0">
@@ -204,3 +232,17 @@ function queryOption(curve: number[]) {
     </n-card>
   </div>
 </template>
+
+<style scoped>
+.qcurve-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.qcurve-meta:hover .qsym { text-decoration: underline; }
+.qsym { font-weight: 600; color: #2080f0; }
+.qspan { opacity: 0.55; font-variant-numeric: tabular-nums; }
+</style>

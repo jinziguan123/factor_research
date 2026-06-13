@@ -94,7 +94,12 @@ def _run_and_persist(run_id: str, search_fn) -> None:
                     "(run_id, query_curves_json, matches_json) VALUES (%s,%s,%s)",
                     (
                         run_id,
-                        json.dumps(res.get("query_curves", []), ensure_ascii=False),
+                        # 升级为 {curves, labels} 结构：labels 携带每条查询/正例曲线的
+                        # symbol+时段，供前端展示与跳转。读取端兼容旧的纯曲线数组。
+                        json.dumps({
+                            "curves": res.get("query_curves", []),
+                            "labels": res.get("query_labels", []),
+                        }, ensure_ascii=False),
                         json.dumps(res.get("matches", []), ensure_ascii=False),
                     ),
                 )

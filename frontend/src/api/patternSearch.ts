@@ -96,8 +96,15 @@ export interface PatternRun {
 }
 
 /** 详情：列表字段 + 识别曲线 + 检索结果。 */
+/** 查询/正例曲线的来源元信息（learned 任务的正例：股票+时段，可跳转）。 */
+export interface QueryLabel {
+  symbol?: string | null
+  start_date?: string | null
+  end_date?: string | null
+}
 export interface PatternRunDetail extends PatternRun {
   query_curves: number[][]
+  query_labels?: QueryLabel[]
   matches: PatternMatch[]
 }
 

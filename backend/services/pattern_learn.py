@@ -100,6 +100,23 @@ def _train(features: np.ndarray, y: np.ndarray):
     return clf
 
 
+def _scale_buckets(pos_lens: list[int], max_buckets: int = 4) -> list[int]:
+    """正例窗口长度 → 检索用的尺度集合（数据驱动）。
+
+    直接取标注里**真实出现过的形态长度**（去重，clamp 到 [20,250]）；档数过多时
+    用等距分位数压到 ``max_buckets`` 档。关键：尺度全部来自真实正例，绝不引入
+    30 天这类「碰巧高分」的塌缩短窗——这正是放开多尺度而不偏向短窗的前提。
+    """
+    if not pos_lens:
+        return [60]
+    uniq = sorted({max(20, min(int(v), 250)) for v in pos_lens})
+    if len(uniq) <= max_buckets:
+        return uniq
+    qs = np.linspace(0.0, 1.0, max_buckets)
+    picks = sorted({int(round(float(np.quantile(uniq, q)))) for q in qs})
+    return [max(20, min(p, 250)) for p in picks]
+
+
 def search_by_learned(
     data, labels: list[dict], pool_id: int,
     top_k: int = 20, mode: str = "realtime",
@@ -124,7 +141,8 @@ def search_by_learned(
     feats: list[np.ndarray] = []
     ys: list[int] = []
     pos_curves: list[list[float]] = []
-    pos_lens: list[int] = []          # 正例窗口长度，用于统一打分尺度
+    pos_lens: list[int] = []          # 正例窗口长度，决定检索尺度集合
+    pos_meta: list[dict] = []         # 正例的 symbol + 时段，供前端展示/跳转
     exclude: set[str] = set()
     label_syms = sorted({str(lb["symbol"]).upper() for lb in labels})
     if label_syms:
@@ -150,8 +168,10 @@ def search_by_learned(
                 (idx >= pd.Timestamp(ws)) & (idx <= pd.Timestamp(we))
             )
             seg = close.to_numpy(dtype=float)[mask]
+            seg_idx = idx[mask]
         else:
             seg = close.to_numpy(dtype=float)[-60:]
+            seg_idx = idx[-60:]
         f = extract_window_features(seg)
         if f is None:
             continue
@@ -161,6 +181,11 @@ def search_by_learned(
         if y == 1 and len(seg) >= 2:
             pos_curves.append([round(float(v), 4) for v in normalize_curve(seg)])
             pos_lens.append(len(seg))
+            pos_meta.append({
+                "symbol": sym,
+                "start_date": seg_idx[0].strftime("%Y-%m-%d") if len(seg_idx) else None,
+                "end_date": seg_idx[-1].strftime("%Y-%m-%d") if len(seg_idx) else None,
+            })
 
     y_arr = np.asarray(ys, dtype=int)
     if y_arr.sum() < 1 or (len(y_arr) - y_arr.sum()) < 1:
@@ -168,12 +193,12 @@ def search_by_learned(
 
     model = _train(np.vstack(feats), y_arr)
 
-    # 统一打分尺度 = 正例窗口长度的中位数（你框选的长度就是这个形态的固有长度）。
-    # 不再用「多尺度取最大」——那会系统性偏向 30 天短窗，导致结果全是 30 天。
-    target_len = int(np.median(pos_lens)) if pos_lens else 60
-    target_len = max(20, min(target_len, 250))
+    # 检索尺度集合 = 正例真实长度（数据驱动，去重/分桶）。同一形态可能 60 天形成、
+    # 也可能 120 天形成，所以在每个真实尺度上各自找，避免「统一尺度」导致的错找/漏找。
+    scale_set = _scale_buckets(pos_lens)
 
-    # 2) 给股票池打分。realtime=只看最近一段；history=历史滑窗取该股最佳一段。
+    # 2) 给股票池打分：每只股在每个尺度上滑窗，取全局最佳窗口（长度随命中尺度而变）。
+    #    realtime=每个尺度只看最近一段；history=每个尺度历史滑窗。
     symbols = [s for s in data.resolve_pool(pool_id) if s not in exclude]
     out: dict[str, Match] = {}
     if on_progress:
@@ -186,33 +211,34 @@ def search_by_learned(
             closes = item["closes"]
             dates = item["dates"]
             n = len(closes)
-            if n < target_len:
-                continue
-            # 候选窗口的起点列表
-            if mode == "history":
-                lo_min = max(0, n - target_len - max(0, history_days))
-                starts = list(range(lo_min, n - target_len + 1, max(1, step)))
-            else:
-                starts = [n - target_len]   # 只看最近一段
             best: Match | None = None
-            for lo in starts:
-                seg = closes[lo:lo + target_len]
-                f = extract_window_features(seg)
-                if f is None:
+            for tl in scale_set:
+                if n < tl:
                     continue
-                prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
-                if best is None or prob > best.score:
-                    best = Match(
-                        label=sym, score=round(prob, 4), scale=target_len,
-                        start_date=dates[lo], end_date=dates[lo + target_len - 1],
-                        curve=_downsample(normalize_curve(seg)),
-                    )
+                if mode == "history":
+                    lo_min = max(0, n - tl - max(0, history_days))
+                    starts = range(lo_min, n - tl + 1, max(1, step))
+                else:
+                    starts = (n - tl,)   # 只看最近一段
+                for lo in starts:
+                    seg = closes[lo:lo + tl]
+                    f = extract_window_features(seg)
+                    if f is None:
+                        continue
+                    prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
+                    if best is None or prob > best.score:
+                        best = Match(
+                            label=sym, score=round(prob, 4), scale=tl,
+                            start_date=dates[lo], end_date=dates[lo + tl - 1],
+                            curve=_downsample(normalize_curve(seg)),
+                        )
             if best is not None:
                 out[sym] = best
 
     final = sorted(out.values(), key=lambda m: m.score, reverse=True)[:top_k]
     return {
         "query_curves": pos_curves,
+        "query_labels": pos_meta,
         "matches": [
             {
                 "label": m.label, "score": m.score, "scale": m.scale,

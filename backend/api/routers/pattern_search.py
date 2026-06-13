@@ -331,10 +331,17 @@ def get_pattern_run(run_id: str) -> dict:
             except (ValueError, TypeError):
                 run[col] = None
     run["query_curves"] = []
+    run["query_labels"] = []
     run["matches"] = []
     if res:
         try:
-            run["query_curves"] = json.loads(res.get("query_curves_json") or "[]")
+            raw = json.loads(res.get("query_curves_json") or "[]")
+            # 新格式 {curves, labels}；旧数据是纯曲线数组，兼容读取。
+            if isinstance(raw, dict):
+                run["query_curves"] = raw.get("curves") or []
+                run["query_labels"] = raw.get("labels") or []
+            else:
+                run["query_curves"] = raw
             run["matches"] = json.loads(res.get("matches_json") or "[]")
         except (ValueError, TypeError):
             pass
