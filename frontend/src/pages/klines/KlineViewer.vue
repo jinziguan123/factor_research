@@ -21,7 +21,7 @@ import {
 } from '@/api/patternSearch'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
-import { normalizeSymbol } from '@/utils/symbol'
+import { normalizeSymbol, symbolSuffix } from '@/utils/symbol'
 
 const message = useMessage()
 
@@ -148,7 +148,10 @@ const factorRows = computed(() =>
     }))
 )
 
-const symbol = ref('000001.SZ')
+// 用户只在输入框输入 6 位代码主体；后缀由 symbolSuffix 实时推断显示。
+const symbolInput = ref('000001')
+const symbol = computed(() => normalizeSymbol(symbolInput.value))   // 完整代码（只读）
+const symbolSuffixText = computed(() => symbolSuffix(symbolInput.value))
 const freq = ref<'1d' | '1m'>('1d')
 const adjust = ref<'qfq' | 'none'>('qfq')
 
@@ -294,11 +297,10 @@ const errorMsg = computed(() => {
 // 工具条：用户改完 symbol 后按回车 / 点"刷新"触发实际请求。
 // useQuery 的 reactive key 已经会自动跟随变更，refetch 只是显式 UX 触发。
 function handleRefresh() {
-  if (!symbol.value.trim()) {
+  if (!symbolInput.value.trim()) {
     message.warning('请输入股票代码')
     return
   }
-  symbol.value = normalizeSymbol(symbol.value)
   if (freq.value === '1d') dailyQ.refetch()
   else minuteQ.refetch()
   refreshKey.value++
@@ -370,7 +372,8 @@ function applyRouteQuery() {
   const q = route.query
   const sym = typeof q.symbol === 'string' ? q.symbol : ''
   if (!sym) return
-  symbol.value = sym.toUpperCase()
+  // 只把 6 位代码主体放进输入框，后缀交给 symbolSuffix 实时推断
+  symbolInput.value = sym.match(/^\d{6}/)?.[0] ?? sym.toUpperCase()
   freq.value = '1d'
   const start = typeof q.start === 'string' ? q.start : ''
   const end = typeof q.end === 'string' ? q.end : ''
@@ -406,12 +409,17 @@ function jumpToMatch(m: PatternMatch) {
     <n-card style="margin-bottom: 16px">
       <n-space :size="16" align="center" wrap>
         <n-input
-          v-model:value="symbol"
-          placeholder="输入6位代码自动补全，如 000001"
+          v-model:value="symbolInput"
+          placeholder="输入6位代码，如 000001"
           style="width: 200px"
           @keyup.enter="handleRefresh"
-          @blur="symbol = normalizeSymbol(symbol)"
-        />
+        >
+          <template #suffix>
+            <n-tag v-if="symbolSuffixText" size="small" :bordered="false" type="warning">
+              {{ symbolSuffixText }}
+            </n-tag>
+          </template>
+        </n-input>
         <n-select
           v-model:value="freq"
           :options="[
