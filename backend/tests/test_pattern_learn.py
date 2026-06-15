@@ -42,8 +42,18 @@ class _FakePool:
 
 def test_extract_features_shape_and_short_guard():
     f = pl.extract_window_features(_breakdown(60))
-    assert f is not None and f.ndim == 1 and f.size == 14 + pl._CURVE_FEATS
+    assert f is not None and f.ndim == 1 and f.size == 14 + pl._CURVE_FEATS + pl._CONTEXT_FEATS
     assert pl.extract_window_features(np.array([1.0, 2.0])) is None  # 太短
+
+
+def test_context_features_nonzero_with_pre_close():
+    pre = np.linspace(10, 15, 40)
+    f = pl.extract_window_features(_breakdown(60), pre_close=pre)
+    ctx = f[-(pl._CONTEXT_FEATS):]
+    assert not np.allclose(ctx, 0), "有 pre_close 时上下文特征不该全零"
+    f_no_ctx = pl.extract_window_features(_breakdown(60))
+    ctx_no = f_no_ctx[-(pl._CONTEXT_FEATS):]
+    assert np.allclose(ctx_no, 0), "无 pre_close 时上下文特征应全零"
 
 
 def test_requires_both_classes():
@@ -93,6 +103,29 @@ def test_history_mode_runs_and_ranks():
     assert res["matches"], "history 模式应返回结果"
     sc = {m["label"]: m["score"] for m in res["matches"]}
     assert sc["BRK1.SZ"] > sc["RND1.SZ"]
+
+
+def test_context_discriminates_uptrend_vs_downtrend():
+    """同一形状，上升趋势标正例 / 下降趋势标反例——模型能区分趋势环境。"""
+    shape = _breakdown(60)
+    up_pre = np.linspace(8, 15, 60)
+    dn_pre = np.linspace(15, 8, 60)
+    panels = {
+        "POS.SZ": np.concatenate([up_pre, shape]),
+        "NEG.SZ": np.concatenate([dn_pre, shape]),
+        "UP_C.SZ": np.concatenate([np.linspace(7, 14, 60), _breakdown(60)]),
+        "DN_C.SZ": np.concatenate([np.linspace(14, 7, 60), _breakdown(60)]),
+    }
+    dates = pd.date_range("2025-01-01", periods=120, freq="B")
+    s, e = dates[60].strftime("%Y-%m-%d"), dates[119].strftime("%Y-%m-%d")
+    labels = [
+        {"symbol": "POS.SZ", "start_date": s, "end_date": e, "label": 1},
+        {"symbol": "NEG.SZ", "start_date": s, "end_date": e, "label": 0},
+    ]
+    res = pl.search_by_learned(_FakePool(panels), labels=labels, pool_id=1, top_k=10)
+    scores = {m["label"]: m["score"] for m in res["matches"]}
+    assert scores["UP_C.SZ"] > scores["DN_C.SZ"], \
+        "上升趋势上下文应得分更高"
 
 
 def test_window_length_follows_labeled_range():

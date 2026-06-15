@@ -25,55 +25,83 @@ from backend.storage.curve_cache import load_qfq_closes
 
 # 下采样归一化曲线的点数（形状特征）。
 _CURVE_FEATS = 16
+_CONTEXT_FEATS = 6
+_PRE_CONTEXT_DAYS = 60
 
 
-def extract_window_features(close: np.ndarray) -> np.ndarray | None:
+def _slope(x: np.ndarray) -> float:
+    """归一化线性回归斜率——去绝对价位量纲。"""
+    xs = np.linspace(0.0, 1.0, x.size)
+    xm = xs - xs.mean()
+    denom = float((xm * xm).sum())
+    if denom <= 0:
+        return 0.0
+    y = (x - x.mean()) / (x.std() + 1e-9)
+    return float((xm * (y - y.mean())).sum() / denom)
+
+
+def _extract_context_features(pre_close: np.ndarray | None) -> np.ndarray:
+    """窗口前价格 → 趋势上下文特征（上升/下降/震荡环境）。
+
+    供学习型选股模型区分"同一形状在上升趋势 vs 下跌趋势中"。
+    pre_close 不足时返回全 0（中性，不影响判别）。
+    """
+    zeros = np.zeros(_CONTEXT_FEATS, dtype=np.float64)
+    if pre_close is None:
+        return zeros
+    p = np.asarray(pre_close, dtype=np.float64)
+    p = p[np.isfinite(p)]
+    if p.size < 5 or p[0] <= 0:
+        return zeros
+    k20 = min(20, p.size)
+    rets = np.diff(p) / p[:-1]
+    return np.asarray([
+        float(p[-1] / p[-k20] - 1.0),                       # 近 20 日涨幅（短期趋势）
+        float(p[-1] / p[0] - 1.0),                           # 全段涨幅（中期趋势）
+        _slope(p),                                            # 趋势斜率
+        float(p[-1] / p.mean() - 1.0),                       # 末端 vs 均价（偏强/偏弱）
+        float((p / np.maximum.accumulate(p) - 1.0).min()),   # 最大回撤（趋势稳定度）
+        float(rets.std()) if rets.size else 0.0,              # 波动率
+    ], dtype=np.float64)
+
+
+def extract_window_features(close: np.ndarray, pre_close: np.ndarray | None = None) -> np.ndarray | None:
     """一段收盘价窗口 → 固定长度特征向量；点数不足返回 None。
 
-    特征分两块：
-    - 语义（捕捉趋势/涨幅/回撤/末端动量——z-score 会删掉的信息）；
-    - 形状（下采样归一化曲线——和形状检索同源，保留"长得像不像"）。
+    特征三块：语义 14 维 + 形状 16 维 + 趋势上下文 6 维。
+    上下文来自窗口前 ``pre_close``，让模型区分同一形状在不同趋势环境中的意义。
     """
     c = np.asarray(close, dtype=np.float64)
     c = c[np.isfinite(c)]
     if c.size < 10 or c[0] <= 0:
         return None
     L = c.size
-    ret = c / c[0] - 1.0                      # 整段累计涨跌
+    ret = c / c[0] - 1.0
     peak = np.maximum.accumulate(c)
-    dd = c / peak - 1.0                        # 逐日相对前高回撤
+    dd = c / peak - 1.0
     rmax = float(c.max())
     half = L // 2
 
-    def _slope(x: np.ndarray) -> float:
-        xs = np.linspace(0.0, 1.0, x.size)
-        xm = xs - xs.mean()
-        denom = float((xm * xm).sum())
-        if denom <= 0:
-            return 0.0
-        # 对归一化后的序列求斜率，去掉绝对价位量纲
-        y = (x - x.mean()) / (x.std() + 1e-9)
-        return float((xm * (y - y.mean())).sum() / denom)
-
     rets = np.diff(c) / c[:-1]
     feats = [
-        float(ret[-1]),                        # 整段涨幅
-        float(rmax / c[0] - 1.0),              # 期间最大涨幅（涨过一波）
-        float(c[-1] / rmax - 1.0),             # 末端相对窗口最高的回撤（跌穿/超跌）
-        float(dd.min()),                       # 期间最大回撤
-        float(c[-1] / c[max(0, L - 4)] - 1.0), # 近3日动量（末端那一下）
-        float(c[-1] / c[max(0, L - 6)] - 1.0), # 近5日动量
-        float(c[-1] / c[max(0, L - 11)] - 1.0),# 近10日动量
-        _slope(c),                             # 整段趋势斜率
-        _slope(c[:half]) if half >= 3 else 0.0,   # 前半段斜率（涨）
-        _slope(c[half:]) if L - half >= 3 else 0.0,  # 后半段斜率（跌）
-        float(np.argmax(c) / (L - 1)),         # 最高点位置（早/晚）
-        float(np.argmin(c) / (L - 1)),         # 最低点位置
-        float(rets.std()) if rets.size else 0.0,  # 波动率
-        float(c[-1] / c.mean() - 1.0),         # 末端相对窗口均价（位置）
+        float(ret[-1]),
+        float(rmax / c[0] - 1.0),
+        float(c[-1] / rmax - 1.0),
+        float(dd.min()),
+        float(c[-1] / c[max(0, L - 4)] - 1.0),
+        float(c[-1] / c[max(0, L - 6)] - 1.0),
+        float(c[-1] / c[max(0, L - 11)] - 1.0),
+        _slope(c),
+        _slope(c[:half]) if half >= 3 else 0.0,
+        _slope(c[half:]) if L - half >= 3 else 0.0,
+        float(np.argmax(c) / (L - 1)),
+        float(np.argmin(c) / (L - 1)),
+        float(rets.std()) if rets.size else 0.0,
+        float(c[-1] / c.mean() - 1.0),
     ]
     curve = np.asarray(_downsample(normalize_curve(c), _CURVE_FEATS), dtype=np.float64)
-    return np.concatenate([np.asarray(feats, dtype=np.float64), curve])
+    ctx = _extract_context_features(pre_close)
+    return np.concatenate([np.asarray(feats, dtype=np.float64), curve, ctx])
 
 
 def _train(features: np.ndarray, y: np.ndarray):
@@ -163,16 +191,20 @@ def search_by_learned(
         # 兼容两种 key：DB 读出来是 start_date/end_date；API 入参是 start/end。
         ws = lb.get("start") or lb.get("start_date")
         we = lb.get("end") or lb.get("end_date")
+        close_arr = close.to_numpy(dtype=float)
         if ws and we:
             mask = np.asarray(
                 (idx >= pd.Timestamp(ws)) & (idx <= pd.Timestamp(we))
             )
-            seg = close.to_numpy(dtype=float)[mask]
+            seg = close_arr[mask]
             seg_idx = idx[mask]
+            pre_mask = np.asarray(idx < pd.Timestamp(ws))
+            pre = close_arr[pre_mask][-_PRE_CONTEXT_DAYS:] if pre_mask.any() else None
         else:
-            seg = close.to_numpy(dtype=float)[-60:]
+            seg = close_arr[-60:]
             seg_idx = idx[-60:]
-        f = extract_window_features(seg)
+            pre = close_arr[:-60][-_PRE_CONTEXT_DAYS:] if len(close_arr) > 60 else None
+        f = extract_window_features(seg, pre_close=pre)
         if f is None:
             continue
         feats.append(f)
@@ -223,7 +255,8 @@ def search_by_learned(
                     starts = (n - tl,)   # 只看最近一段
                 for lo in starts:
                     seg = closes[lo:lo + tl]
-                    f = extract_window_features(seg)
+                    pre = closes[max(0, lo - _PRE_CONTEXT_DAYS):lo] if lo > 0 else None
+                    f = extract_window_features(seg, pre_close=pre)
                     if f is None:
                         continue
                     prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
