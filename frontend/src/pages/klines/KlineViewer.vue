@@ -5,7 +5,7 @@
  * - 右上角切换复权方式可以直接对比"前复权后"与"原始"的序列差异，方便验证 qfq 是否跑错。
  * - 分钟线自动把默认窗口限制到最近 5 个交易日（后端硬上限 10 个交易日）。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NInput, NButton, NSelect, NDatePicker,
@@ -368,7 +368,20 @@ function dateToTs(d: string): number {
 
 // 跨股跳转入口：图形检索页带 symbol/start/end query 进来时定位到对应股票与区间。
 const route = useRoute()
+const chartComp = ref<InstanceType<typeof CandlestickChart> | null>(null)
 const focusDates = ref<{ start: string; end: string } | null>(null)
+
+// 数据到位后聚焦到指定区间——通过 chartComp.setFocusZoom 直接控制 dataZoom。
+// 同时监听 categories（新数据到达）和 focusDates（跳转请求），任一变化都尝试应用。
+watch([() => chartData.value.categories, focusDates], () => {
+  if (!focusDates.value || !chartData.value.categories.length) return
+  const { start, end } = focusDates.value
+  nextTick(() => {
+    if (chartComp.value?.setFocusZoom(start, end)) {
+      focusDates.value = null
+    }
+  })
+})
 function applyRouteQuery() {
   const q = route.query
   const sym = typeof q.symbol === 'string' ? q.symbol : ''
@@ -506,6 +519,7 @@ function jumpToMatch(m: PatternMatch) {
     <n-spin :show="isLoading">
       <n-card v-if="chartData.categories.length > 0">
         <candlestick-chart
+          ref="chartComp"
           :categories="chartData.categories"
           :ohlc="chartData.ohlc"
           :volumes="chartData.volumes"
@@ -514,10 +528,8 @@ function jumpToMatch(m: PatternMatch) {
           :show-volume-profile="showVolumeProfile"
           :select-mode="selectMode"
           :zoom-select-mode="zoomSelectMode"
-          :focus-range="focusDates"
           @find-similar="onFindSimilar"
           @request-expand="onRequestExpand"
-          @focus-applied="focusDates = null"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">

@@ -79,17 +79,15 @@ const props = withDefaults(
     selectMode?: boolean
     /** 框选缩放模式。开启后拖拽横向区间 → 缩放到该区间。 */
     zoomSelectMode?: boolean
-    /** 一次性聚焦区间：数据到位后 dataZoom 自动定位到该日期范围，父组件收到 focus-applied 后清除。 */
-    focusRange?: { start: string; end: string } | null
   }>(),
-  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false, focusRange: null },
+  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false },
 )
 
 const emit = defineEmits<{
   (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
   (e: 'find-similar', payload: { start: string; end: string }): void
   (e: 'request-expand'): void
-  (e: 'focus-applied'): void
+
 }>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -555,16 +553,17 @@ onMounted(() => {
   document.addEventListener('visibilitychange', onVisibilityChange)
   window.addEventListener('focus', restoreChart)
   window.addEventListener('keydown', onKeyDown)
-  // 首次挂载后设置 dataZoom（此时 option 已 setOption，dataZoom 不存在，需手动添加）
+  // 首次挂载后设置 dataZoom；读 dataZoomRange 而非硬编码 0/100，
+  // 这样父组件若已通过 setFocusZoom 预设了聚焦区间，首帧就能定位到位。
   nextTick(() => {
     const inst = getInst()
     if (!inst) return
-    // 添加 dataZoom slider
+    const { start, end } = dataZoomRange.value
     inst.dispatchAction?.({
       type: 'dataZoom',
       dataZoomIndex: 0,
-      start: 0,
-      end: 100,
+      start,
+      end,
     })
   })
 })
@@ -599,32 +598,35 @@ watch([() => props.showVolumeProfile, () => props.selectMode, () => props.zoomSe
 // option 变化后（VP 添加/移除、数据更新等），恢复 dataZoom 位置
 // vue-echarts 通过 nextTick 异步调 setOption → ECharts 重建 dataZoom 重置到 0-100
 // 用 100ms setTimeout 等 setOption 完成后再 dispatchAction 恢复。
+// 必须在 setTimeout 内读 dataZoomRange——外部 setFocusZoom 可能在这 100ms 内更新它。
 watch(option, () => {
-  const { start, end } = dataZoomRange.value
   setTimeout(() => {
+    const { start, end } = dataZoomRange.value
     applyDataZoom(start, end)
     syncBrushCursor()
   }, 100)
 })
 
-// 外部跳转聚焦：图形检索点击结果时，dataZoom 自动定位到匹配的日期区间。
-watch([() => props.focusRange, () => props.categories.length], () => {
-  const range = props.focusRange
+/** 外部聚焦：父组件在数据到位后调用，将 dataZoom 定位到指定日期区间。 */
+function setFocusZoom(startDate: string, endDate: string): boolean {
   const cats = props.categories
-  if (!range || !cats.length) return
-  const lo = cats.findIndex(c => c >= range.start)
+  if (!cats.length) return false
+  const lo = cats.findIndex(c => c >= startDate)
   let hi = -1
   for (let i = cats.length - 1; i >= 0; i--) {
-    if (cats[i] <= range.end) { hi = i; break }
+    if (cats[i] <= endDate) { hi = i; break }
   }
-  if (lo < 0 || hi <= lo) return
+  if (lo < 0 || hi <= lo) return false
   const n = Math.max(cats.length - 1, 1)
   const s = (lo / n) * 100
   const e = (hi / n) * 100
   dataZoomRange.value = { start: s, end: e }
-  nextTick(() => applyDataZoom(s, e))
-  emit('focus-applied')
-})
+  applyDataZoom(s, e)
+  setTimeout(() => applyDataZoom(s, e), 120)
+  return true
+}
+
+defineExpose({ setFocusZoom })
 </script>
 
 <template>
