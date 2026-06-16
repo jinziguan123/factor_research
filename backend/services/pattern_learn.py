@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Callable
 
 import numpy as np
@@ -22,6 +24,8 @@ from backend.services.pattern_search import (
     normalize_curve,
 )
 from backend.storage.curve_cache import load_qfq_closes
+
+_log = logging.getLogger(__name__)
 
 # 下采样归一化曲线的点数（形状特征）。
 _CURVE_FEATS = 16
@@ -230,21 +234,25 @@ def search_by_learned(
     # 也可能 120 天形成，所以在每个真实尺度上各自找，避免「统一尺度」导致的错找/漏找。
     scale_set = _scale_buckets(pos_lens)
 
-    # 2) 给股票池打分：每只股在每个尺度上滑窗，取全局最佳窗口（长度随命中尺度而变）。
-    #    realtime=每个尺度只看最近一段；history=每个尺度历史滑窗。
+    # 2) 给股票池打分
     symbols = [s for s in data.resolve_pool(pool_id) if s not in exclude]
-    out: dict[str, Match] = {}
     if on_progress:
         on_progress(15)
+
+    out: dict[str, Match] = {}
     if symbols:
+        t0 = time.perf_counter()
         closes_map = load_qfq_closes(data, symbols)
+        t_load = time.perf_counter()
         if on_progress:
             on_progress(50)
+
+        # Phase 1: 提取所有候选窗口特征（纯 numpy，无 sklearn 开销）
+        feat_list: list[np.ndarray] = []
+        meta_list: list[tuple[str, int, int]] = []
         for sym, item in closes_map.items():
             closes = item["closes"]
-            dates = item["dates"]
             n = len(closes)
-            best: Match | None = None
             for tl in scale_set:
                 if n < tl:
                     continue
@@ -252,22 +260,41 @@ def search_by_learned(
                     lo_min = max(0, n - tl - max(0, history_days))
                     starts = range(lo_min, n - tl + 1, max(1, step))
                 else:
-                    starts = (n - tl,)   # 只看最近一段
+                    starts = (n - tl,)
                 for lo in starts:
                     seg = closes[lo:lo + tl]
                     pre = closes[max(0, lo - _PRE_CONTEXT_DAYS):lo] if lo > 0 else None
                     f = extract_window_features(seg, pre_close=pre)
                     if f is None:
                         continue
-                    prob = float(model.predict_proba(f.reshape(1, -1))[0, 1])
-                    if best is None or prob > best.score:
-                        best = Match(
-                            label=sym, score=round(prob, 4), scale=tl,
-                            start_date=dates[lo], end_date=dates[lo + tl - 1],
-                            curve=_downsample(normalize_curve(seg)),
-                        )
-            if best is not None:
-                out[sym] = best
+                    feat_list.append(f)
+                    meta_list.append((sym, tl, lo))
+        t_feat = time.perf_counter()
+        if on_progress:
+            on_progress(75)
+
+        # Phase 2: 批量预测——一次 predict_proba 替代逐样本调用
+        if feat_list:
+            X = np.vstack(feat_list)
+            probs = model.predict_proba(X)[:, 1]
+            for i, (sym, tl, lo) in enumerate(meta_list):
+                prob = float(probs[i])
+                prev = out.get(sym)
+                if prev is None or prob > prev.score:
+                    item = closes_map[sym]
+                    out[sym] = Match(
+                        label=sym, score=round(prob, 4), scale=tl,
+                        start_date=item["dates"][lo],
+                        end_date=item["dates"][lo + tl - 1],
+                        curve=_downsample(normalize_curve(
+                            item["closes"][lo:lo + tl])),
+                    )
+        t_pred = time.perf_counter()
+        _log.info(
+            "learned 检索耗时: 加载 %.0fms | 特征 %.0fms (%d窗口) | 预测 %.0fms",
+            (t_load - t0) * 1e3, (t_feat - t_load) * 1e3,
+            len(feat_list), (t_pred - t_feat) * 1e3,
+        )
 
     final = sorted(out.values(), key=lambda m: m.score, reverse=True)[:top_k]
     return {
