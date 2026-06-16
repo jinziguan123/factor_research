@@ -368,11 +368,11 @@ function dateToTs(d: string): number {
 
 // 跨股跳转入口：图形检索页带 symbol/start/end query 进来时定位到对应股票与区间。
 const route = useRoute()
+const focusDates = ref<{ start: string; end: string } | null>(null)
 function applyRouteQuery() {
   const q = route.query
   const sym = typeof q.symbol === 'string' ? q.symbol : ''
   if (!sym) return
-  // 只把 6 位代码主体放进输入框，后缀交给 symbolSuffix 实时推断
   symbolInput.value = sym.match(/^\d{6}/)?.[0] ?? sym.toUpperCase()
   freq.value = '1d'
   const start = typeof q.start === 'string' ? q.start : ''
@@ -380,6 +380,7 @@ function applyRouteQuery() {
   if (start && end) {
     const DAY = 86_400_000
     dailyRange.value = [dateToTs(start) - 20 * DAY, dateToTs(end) + 20 * DAY]
+    focusDates.value = { start, end }
   }
 }
 onMounted(applyRouteQuery)
@@ -392,6 +393,7 @@ function jumpToMatch(m: PatternMatch) {
   const DAY = 86_400_000
   freq.value = '1d'
   dailyRange.value = [dateToTs(m.start_date) - 20 * DAY, dateToTs(m.end_date) + 20 * DAY]
+  focusDates.value = { start: m.start_date, end: m.end_date }
   showSimilarDrawer.value = false
   handleRefresh()
 }
@@ -512,8 +514,10 @@ function jumpToMatch(m: PatternMatch) {
           :show-volume-profile="showVolumeProfile"
           :select-mode="selectMode"
           :zoom-select-mode="zoomSelectMode"
+          :focus-range="focusDates"
           @find-similar="onFindSimilar"
           @request-expand="onRequestExpand"
+          @focus-applied="focusDates = null"
         />
       </n-card>
       <n-alert v-else-if="!isLoading && !errorMsg" type="default">

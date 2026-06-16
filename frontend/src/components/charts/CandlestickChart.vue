@@ -79,14 +79,17 @@ const props = withDefaults(
     selectMode?: boolean
     /** 框选缩放模式。开启后拖拽横向区间 → 缩放到该区间。 */
     zoomSelectMode?: boolean
+    /** 一次性聚焦区间：数据到位后 dataZoom 自动定位到该日期范围，父组件收到 focus-applied 后清除。 */
+    focusRange?: { start: string; end: string } | null
   }>(),
-  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false },
+  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false, focusRange: null },
 )
 
 const emit = defineEmits<{
   (e: 'update:vpData', data: { startIdx: number; endIdx: number } | null): void
   (e: 'find-similar', payload: { start: string; end: string }): void
   (e: 'request-expand'): void
+  (e: 'focus-applied'): void
 }>()
 
 // 价格保留两位小数；成交量直接取整后加千分位（避免把 1,234,567 写成 1.2M 失真）。
@@ -602,6 +605,25 @@ watch(option, () => {
     applyDataZoom(start, end)
     syncBrushCursor()
   }, 100)
+})
+
+// 外部跳转聚焦：图形检索点击结果时，dataZoom 自动定位到匹配的日期区间。
+watch([() => props.focusRange, () => props.categories.length], () => {
+  const range = props.focusRange
+  const cats = props.categories
+  if (!range || !cats.length) return
+  const lo = cats.findIndex(c => c >= range.start)
+  let hi = -1
+  for (let i = cats.length - 1; i >= 0; i--) {
+    if (cats[i] <= range.end) { hi = i; break }
+  }
+  if (lo < 0 || hi <= lo) return
+  const n = Math.max(cats.length - 1, 1)
+  const s = (lo / n) * 100
+  const e = (hi / n) * 100
+  dataZoomRange.value = { start: s, end: e }
+  nextTick(() => applyDataZoom(s, e))
+  emit('focus-applied')
 })
 </script>
 
