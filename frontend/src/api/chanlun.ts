@@ -37,6 +37,7 @@ export interface ChanlunData {
   fx_list: ChanlunFx[]
   bi_list: ChanlunBi[]
   zs_list: ChanlunZs[]
+  zs_up_list: ChanlunZs[]
   bsp_list: ChanlunBsp[]
 }
 

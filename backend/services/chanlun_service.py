@@ -60,6 +60,7 @@ class ChanlunResult:
     fx_list: list[FxResult] = field(default_factory=list)
     bi_list: list[BiResult] = field(default_factory=list)
     zs_list: list[ZsResult] = field(default_factory=list)
+    zs_up_list: list[ZsResult] = field(default_factory=list)  # 中枢扩张合并后的高级别中枢
     bsp_list: list[BspResult] = field(default_factory=list)
 
 
@@ -283,6 +284,50 @@ def _find_zs(bis: list[_BI], freq: str) -> list[ZsResult]:
     return results
 
 
+def _merge_zs(zs_list: list[ZsResult]) -> list[ZsResult]:
+    """中枢扩张：相邻中枢的 [ZD, ZG] 有价格重叠时，合并为高级别中枢。
+
+    合并后的中枢：
+    - 时间范围取并集（最早 sdt ~ 最晚 edt）
+    - ZG/ZD 取交集（这是两个中枢真正重叠的核心区间）
+    - GG/DD 取全局极值
+    连续多个中枢两两重叠时会链式合并。
+    """
+    if len(zs_list) < 2:
+        return []
+
+    merged: list[ZsResult] = []
+    i = 0
+    while i < len(zs_list) - 1:
+        a = zs_list[i]
+        # 检查 a 是否能与后续中枢链式合并
+        group = [a]
+        j = i + 1
+        while j < len(zs_list):
+            b = zs_list[j]
+            prev = group[-1]
+            overlap_zg = min(prev.zg, b.zg)
+            overlap_zd = max(prev.zd, b.zd)
+            if overlap_zg > overlap_zd:
+                group.append(b)
+                j += 1
+            else:
+                break
+
+        if len(group) >= 2:
+            merged.append(ZsResult(
+                sdt=group[0].sdt,
+                edt=group[-1].edt,
+                zg=round(min(z.zg for z in group), 4),
+                zd=round(max(z.zd for z in group), 4),
+                gg=round(max(z.gg for z in group), 4),
+                dd=round(min(z.dd for z in group), 4),
+            ))
+        i = j
+
+    return merged
+
+
 def _find_bsp(bis: list[_BI], zs_list: list[ZsResult], freq: str) -> list[BspResult]:
     """基于笔和中枢识别买卖点。
 
@@ -417,6 +462,7 @@ def analyze(
     fxs = _find_fx(merged)
     bis = _connect_bi(fxs)
     zs_list = _find_zs(bis, freq)
+    zs_up_list = _merge_zs(zs_list)
     bsp_list = _find_bsp(bis, zs_list, freq)
 
     # 转输出格式
@@ -435,6 +481,7 @@ def analyze(
         fx_list=fx_out,
         bi_list=bi_out,
         zs_list=zs_list,
+        zs_up_list=zs_up_list,
         bsp_list=bsp_list,
     )
 
@@ -499,6 +546,10 @@ def to_dict(result: ChanlunResult) -> dict[str, Any]:
         "zs_list": [
             {"sdt": z.sdt, "edt": z.edt, "zg": z.zg, "zd": z.zd, "gg": z.gg, "dd": z.dd}
             for z in result.zs_list
+        ],
+        "zs_up_list": [
+            {"sdt": z.sdt, "edt": z.edt, "zg": z.zg, "zd": z.zd, "gg": z.gg, "dd": z.dd}
+            for z in result.zs_up_list
         ],
         "bsp_list": [
             {"dt": p.dt, "bsp_type": p.bsp_type, "price": p.price}

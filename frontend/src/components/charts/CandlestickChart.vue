@@ -70,6 +70,7 @@ interface ChanlunOverlay {
   fx_list: ChanlunFx[]
   bi_list: ChanlunBi[]
   zs_list: ChanlunZs[]
+  zs_up_list: ChanlunZs[]
   bsp_list: ChanlunBsp[]
 }
 
@@ -309,6 +310,30 @@ function buildChanlunSeries(cats: string[], cl: ChanlunOverlay): any[] {
       markArea: {
         silent: true,
         itemStyle: { color: 'rgba(100, 149, 237, 0.15)', borderColor: 'rgba(100, 149, 237, 0.6)', borderWidth: 1 },
+        data: areas,
+      },
+    })
+  }
+
+  // 中枢扩张（高级别中枢）：虚线矩形
+  if (cl.zs_up_list && cl.zs_up_list.length > 0) {
+    const areas = cl.zs_up_list.map(zs => [
+      { xAxis: zs.sdt, yAxis: zs.zd },
+      { xAxis: zs.edt, yAxis: zs.zg },
+    ])
+    series.push({
+      name: '高级别中枢',
+      type: 'line',
+      data: [],
+      silent: true,
+      markArea: {
+        silent: true,
+        itemStyle: {
+          color: 'rgba(255, 165, 0, 0.08)',
+          borderColor: 'rgba(255, 165, 0, 0.7)',
+          borderWidth: 2,
+          borderType: 'dashed',
+        },
         data: areas,
       },
     })
