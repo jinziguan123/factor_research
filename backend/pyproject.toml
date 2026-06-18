@@ -39,7 +39,6 @@ dependencies = [
     "akshare>=1.13.0",
     "lightgbm>=4.0",
     "redis>=5.0",
-    "czsc>=0.10.12",
 ]
 
 [tool.setuptools.packages.find]
