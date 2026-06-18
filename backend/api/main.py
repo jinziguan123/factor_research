@@ -31,6 +31,7 @@ from backend.api.routers import (
     admin,
     backtests,
     bars,
+    chanlun,
     compositions,
     cost_sensitivity,
     data_health,
@@ -347,3 +348,4 @@ app.include_router(fundamentals.router)
 app.include_router(factor_assistant.router)
 app.include_router(metrics_endpoint.router)
 app.include_router(pattern_search.router)
+app.include_router(chanlun.router)

@@ -19,6 +19,7 @@ import {
   useByStockSearch, usePatternNames, useAddLabel,
   type PatternResult, type PatternMatch,
 } from '@/api/patternSearch'
+import { useChanlunAnalysis, type ChanlunData, type ChanlunQuery } from '@/api/chanlun'
 import CandlestickChart from '@/components/charts/CandlestickChart.vue'
 import MatchResultList from '@/components/pattern/MatchResultList.vue'
 import { normalizeSymbol, symbolSuffix } from '@/utils/symbol'
@@ -184,6 +185,30 @@ const selectMode = ref(false)
 
 // 框选缩放模式：默认开启
 const zoomSelectMode = ref(true)
+
+// 缠论分析开关
+const chanlunEnabled = ref(false)
+
+const chanlunParams = computed<ChanlunQuery | null>(() => {
+  if (!chanlunEnabled.value || !symbol.value.trim()) return null
+  const r = freq.value === '1d'
+    ? (dailyRange.value ?? defaultDailyRange())
+    : (minuteRange.value ?? defaultMinuteRange())
+  return {
+    symbol: symbol.value.trim().toUpperCase(),
+    start: toIso(r[0]),
+    end: toIso(r[1]),
+    freq: freq.value,
+    adjust: adjust.value,
+  }
+})
+
+const chanlunQ = useChanlunAnalysis(chanlunParams)
+
+const chanlunData = computed<ChanlunData | null>(() => {
+  if (!chanlunEnabled.value) return null
+  return chanlunQ.data.value ?? null
+})
 
 function toggleMode(mode: 'zoom' | 'vp' | 'select') {
   if (mode === 'zoom') {
@@ -509,6 +534,13 @@ function jumpToMatch(m: PatternMatch) {
         <n-button :type="selectMode ? 'primary' : 'default'" @click="toggleMode('select')">
           🔍 框选找相似 {{ selectMode ? 'ON' : 'OFF' }}
         </n-button>
+        <n-button
+          :type="chanlunEnabled ? 'warning' : 'default'"
+          :loading="chanlunQ.isFetching.value"
+          @click="chanlunEnabled = !chanlunEnabled"
+        >
+          缠论 {{ chanlunEnabled ? 'ON' : 'OFF' }}
+        </n-button>
       </n-space>
     </n-card>
 
@@ -528,6 +560,7 @@ function jumpToMatch(m: PatternMatch) {
           :show-volume-profile="showVolumeProfile"
           :select-mode="selectMode"
           :zoom-select-mode="zoomSelectMode"
+          :chanlun="chanlunData"
           @find-similar="onFindSimilar"
           @request-expand="onRequestExpand"
         />

@@ -36,7 +36,10 @@ import {
   AxisPointerComponent,
   BrushComponent,
   ToolboxComponent,
+  MarkPointComponent,
+  MarkAreaComponent,
 } from 'echarts/components'
+import { ScatterChart } from 'echarts/charts'
 import VChart from 'vue-echarts'
 
 use([
@@ -45,6 +48,7 @@ use([
   BarChart,
   LineChart,
   CustomChart,
+  ScatterChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -52,9 +56,22 @@ use([
   AxisPointerComponent,
   BrushComponent,
   ToolboxComponent,
+  MarkPointComponent,
+  MarkAreaComponent,
 ])
 
 type ColorMode = 'a-share' | 'binance'
+
+interface ChanlunFx { dt: string; mark: 'top' | 'bottom'; price: number; high: number; low: number }
+interface ChanlunBi { sdt: string; edt: string; direction: 'up' | 'down'; high: number; low: number }
+interface ChanlunZs { sdt: string; edt: string; zg: number; zd: number; gg: number; dd: number }
+interface ChanlunBsp { dt: string; bsp_type: string; price: number }
+interface ChanlunOverlay {
+  fx_list: ChanlunFx[]
+  bi_list: ChanlunBi[]
+  zs_list: ChanlunZs[]
+  bsp_list: ChanlunBsp[]
+}
 
 const props = withDefaults(
   defineProps<{
@@ -79,8 +96,10 @@ const props = withDefaults(
     selectMode?: boolean
     /** 框选缩放模式。开启后拖拽横向区间 → 缩放到该区间。 */
     zoomSelectMode?: boolean
+    /** 缠论叠加数据。传入后在 K 线上叠加分型/笔/中枢/买卖点。 */
+    chanlun?: ChanlunOverlay | null
   }>(),
-  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false },
+  { colorMode: 'a-share', factorRows: () => [], showVolumeProfile: false, selectMode: false, zoomSelectMode: false, chanlun: null },
 )
 
 const emit = defineEmits<{
@@ -238,6 +257,129 @@ function tooltipFormatter(params: any[]): string {
   return lines.join('')
 }
 
+// ---- 缠论叠加 series 生成 ----
+function buildChanlunSeries(cats: string[], cl: ChanlunOverlay): any[] {
+  const catIdx = new Map<string, number>()
+  cats.forEach((c, i) => catIdx.set(c, i))
+
+  const series: any[] = []
+
+  // 笔：折线连接各笔端点
+  if (cl.bi_list.length > 0) {
+    const biPoints: [number, number][] = []
+    for (const bi of cl.bi_list) {
+      const si = catIdx.get(bi.sdt)
+      const ei = catIdx.get(bi.edt)
+      if (si == null || ei == null) continue
+      const startPrice = bi.direction === 'up' ? bi.low : bi.high
+      const endPrice = bi.direction === 'up' ? bi.high : bi.low
+      if (biPoints.length === 0 || biPoints[biPoints.length - 1][0] !== si) {
+        biPoints.push([si, startPrice])
+      }
+      biPoints.push([ei, endPrice])
+    }
+    // 转换为 category 坐标系的稀疏数据
+    const biData: (number | null)[] = new Array(cats.length).fill(null)
+    for (const [idx, price] of biPoints) biData[idx] = price
+    series.push({
+      name: '缠论笔',
+      type: 'line',
+      z: 10,
+      symbol: 'circle',
+      symbolSize: 4,
+      connectNulls: true,
+      lineStyle: { color: '#FF6600', width: 1.5 },
+      itemStyle: { color: '#FF6600' },
+      data: biData,
+      silent: true,
+    })
+  }
+
+  // 中枢：用 markArea 矩形
+  if (cl.zs_list.length > 0) {
+    const areas = cl.zs_list.map(zs => [
+      { xAxis: zs.sdt, yAxis: zs.zd },
+      { xAxis: zs.edt, yAxis: zs.zg },
+    ])
+    series.push({
+      name: '缠论中枢',
+      type: 'line',
+      data: [],
+      silent: true,
+      markArea: {
+        silent: true,
+        itemStyle: { color: 'rgba(100, 149, 237, 0.15)', borderColor: 'rgba(100, 149, 237, 0.6)', borderWidth: 1 },
+        data: areas,
+      },
+    })
+  }
+
+  // 买卖点：scatter
+  if (cl.bsp_list.length > 0) {
+    const BSP_STYLE: Record<string, { symbol: string; color: string; label: string }> = {
+      buy1:  { symbol: 'triangle',      color: '#FF2200', label: 'B1' },
+      buy2:  { symbol: 'triangle',      color: '#FF6600', label: 'B2' },
+      buy3:  { symbol: 'triangle',      color: '#FF9900', label: 'B3' },
+      sell1: { symbol: 'pin',           color: '#00CC44', label: 'S1' },
+      sell2: { symbol: 'pin',           color: '#00AA88', label: 'S2' },
+      sell3: { symbol: 'pin',           color: '#009999', label: 'S3' },
+    }
+    const scatterData = cl.bsp_list
+      .filter(p => catIdx.has(p.dt))
+      .map(p => {
+        const style = BSP_STYLE[p.bsp_type] ?? { symbol: 'circle', color: '#999', label: '?' }
+        const isBuy = p.bsp_type.startsWith('buy')
+        return {
+          value: [p.dt, p.price],
+          symbol: style.symbol,
+          symbolSize: 16,
+          symbolRotate: isBuy ? 0 : 180,
+          itemStyle: { color: style.color },
+          label: {
+            show: true,
+            formatter: style.label,
+            position: isBuy ? 'bottom' : 'top',
+            fontSize: 10,
+            fontWeight: 'bold',
+            color: style.color,
+          },
+        }
+      })
+    series.push({
+      name: '买卖点',
+      type: 'scatter',
+      z: 20,
+      data: scatterData,
+      silent: true,
+    })
+  }
+
+  // 分型标记：小三角
+  if (cl.fx_list.length > 0) {
+    const fxData = cl.fx_list
+      .filter(f => catIdx.has(f.dt))
+      .map(f => ({
+        value: [f.dt, f.mark === 'top' ? f.high : f.low],
+        symbol: f.mark === 'top' ? 'pin' : 'triangle',
+        symbolSize: 8,
+        symbolRotate: f.mark === 'top' ? 180 : 0,
+        itemStyle: {
+          color: f.mark === 'top' ? 'rgba(0,200,80,0.6)' : 'rgba(255,80,0,0.6)',
+          borderWidth: 0,
+        },
+      }))
+    series.push({
+      name: '分型',
+      type: 'scatter',
+      z: 8,
+      data: fxData,
+      silent: true,
+    })
+  }
+
+  return series
+}
+
 // ---- computed option：dataZoom 声明但不含 start/end，由 watch(option) + dispatchAction 恢复位置 ----
 const option = computed(() => {
   const N = Math.min(props.factorRows?.length ?? 0, 5)
@@ -380,6 +522,11 @@ const option = computed(() => {
     })
   }
 
+  // 缠论叠加
+  if (props.chanlun) {
+    series.push(...buildChanlunSeries(props.categories, props.chanlun))
+  }
+
   // VP / 框选找相似 / 框选缩放 任一开启时启用 brush
   const brushOn = vpOn || props.selectMode || props.zoomSelectMode
   const brushCfg = brushOn ? {
@@ -398,7 +545,14 @@ const option = computed(() => {
 
   return {
     animation: false,
-    legend: { data: ['K 线', '成交量', ...(props.factorRows ?? []).map(r => r.name)], top: 5 },
+    legend: {
+      data: [
+        'K 线', '成交量',
+        ...(props.factorRows ?? []).map(r => r.name),
+        ...(props.chanlun ? ['缠论笔', '分型', '买卖点'] : []),
+      ],
+      top: 5,
+    },
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
