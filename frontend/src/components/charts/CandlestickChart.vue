@@ -314,7 +314,7 @@ function buildChanlunSeries(cats: string[], cl: ChanlunOverlay): any[] {
     })
   }
 
-  // 买卖点：scatter
+  // 买卖点：scatter — 同一 dt 的多个信号上下错开展示
   if (cl.bsp_list.length > 0) {
     const BSP_STYLE: Record<string, { symbol: string; color: string; label: string }> = {
       buy1:  { symbol: 'triangle',      color: '#FF2200', label: 'B1' },
@@ -324,27 +324,49 @@ function buildChanlunSeries(cats: string[], cl: ChanlunOverlay): any[] {
       sell2: { symbol: 'pin',           color: '#00AA88', label: 'S2' },
       sell3: { symbol: 'pin',           color: '#009999', label: 'S3' },
     }
-    const scatterData = cl.bsp_list
-      .filter(p => catIdx.has(p.dt))
-      .map(p => {
-        const style = BSP_STYLE[p.bsp_type] ?? { symbol: 'circle', color: '#999', label: '?' }
-        const isBuy = p.bsp_type.startsWith('buy')
-        return {
-          value: [p.dt, p.price],
-          symbol: style.symbol,
-          symbolSize: 16,
-          symbolRotate: isBuy ? 0 : 180,
-          itemStyle: { color: style.color },
-          label: {
-            show: true,
-            formatter: style.label,
-            position: isBuy ? 'bottom' : 'top',
-            fontSize: 10,
-            fontWeight: 'bold',
-            color: style.color,
-          },
+    // 按 dt 分组，计算同一位置的偏移行号
+    const dtGroups = new Map<string, { bsp: ChanlunBsp; buyRow: number; sellRow: number }[]>()
+    for (const p of cl.bsp_list) {
+      if (!catIdx.has(p.dt)) continue
+      if (!dtGroups.has(p.dt)) dtGroups.set(p.dt, [])
+      dtGroups.get(p.dt)!.push({ bsp: p, buyRow: 0, sellRow: 0 })
+    }
+    // 为同一 dt 下的买/卖信号分配行号
+    for (const items of dtGroups.values()) {
+      let buyIdx = 0, sellIdx = 0
+      for (const item of items) {
+        if (item.bsp.bsp_type.startsWith('buy')) {
+          item.buyRow = buyIdx++
+        } else {
+          item.sellRow = sellIdx++
         }
-      })
+      }
+    }
+    const ROW_OFFSET_PX = 24
+    const scatterData = Array.from(dtGroups.values()).flat().map(({ bsp: p, buyRow, sellRow }) => {
+      const style = BSP_STYLE[p.bsp_type] ?? { symbol: 'circle', color: '#999', label: '?' }
+      const isBuy = p.bsp_type.startsWith('buy')
+      const row = isBuy ? buyRow : sellRow
+      // 买信号向下偏移，卖信号向上偏移；每多一行多偏移 ROW_OFFSET_PX 像素
+      const yOffset = isBuy ? (10 + row * ROW_OFFSET_PX) : -(10 + row * ROW_OFFSET_PX)
+      return {
+        value: [p.dt, p.price],
+        symbol: style.symbol,
+        symbolSize: 16,
+        symbolRotate: isBuy ? 0 : 180,
+        symbolOffset: [0, yOffset],
+        itemStyle: { color: style.color },
+        label: {
+          show: true,
+          formatter: style.label,
+          position: isBuy ? 'bottom' : 'top',
+          fontSize: 10,
+          fontWeight: 'bold',
+          color: style.color,
+          offset: [0, isBuy ? row * ROW_OFFSET_PX : -(row * ROW_OFFSET_PX)],
+        },
+      }
+    })
     series.push({
       name: '买卖点',
       type: 'scatter',
