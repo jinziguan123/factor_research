@@ -1,4 +1,4 @@
-"""QMT ``.DAT`` → ClickHouse ``stock_bar_1m`` 导入器（单进程串行版）。
+"""QMT ``.DAT`` → ClickHouse ``stock_bar_1m`` 导入器。
 
 对外唯一入口是 :func:`run_import`，被 ``backend.api.routers.admin`` 的
 BackgroundTask 调用，也可以通过命令行直跑。
@@ -10,15 +10,8 @@ BackgroundTask 调用，也可以通过命令行直跑。
 3. 增量：``run_import(mode="incremental")``，起点 = ClickHouse ``MAX(trade_date)``
    再回退 ``rewind_trading_days`` 个自然日作为安全窗，确保边界 K 线不漏。
 
-为什么不做基于文件 mtime 的 skip（像 timing_driven 那样）？
-- factor_research 没建 ``stock_bar_1m_import_state`` 表；
-- 直接查 ClickHouse 的 MAX(trade_date) 是 **更可信** 的增量起点（看真实入库状态，
-  不依赖"上次跑时记录了什么"这种外部快照），代价只是每股多一次索引扫描，
-  在 ``(symbol_id, trade_date, minute_slot)`` 主键下非常廉价。
-
-并发：**单进程串行**——前端触发一次跑几十秒到几分钟，对单用户研究场景够用。
-如果未来真要跑全市场 5000+ 只，再加 ProcessPool（会新增 worker 参数，届时在
-API 层加并发锁防止重复触发）。
+并发：通过 ``workers`` 参数控制线程数（默认 1 = 串行）。每个 worker
+独立创建 MySQL / ClickHouse 连接，互不干扰。
 """
 from __future__ import annotations
 
@@ -28,6 +21,7 @@ import logging
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -275,6 +269,34 @@ def _import_one_symbol(
     return affected
 
 
+def _worker(
+    symbol: str,
+    idx: int,
+    *,
+    effective_base: str,
+    incremental: bool,
+    rewind_days: int,
+    base_version: int,
+) -> tuple[str, int, str | None]:
+    """线程池 worker：独立连接，处理一只股票。返回 (symbol, rows, error_msg)。"""
+    dat_path = get_dat_file_path(symbol, period="1m", base_dir=effective_base)
+    try:
+        with mysql_conn() as conn:
+            n = _import_one_symbol(
+                conn=conn,
+                symbol=symbol,
+                dat_path=dat_path,
+                incremental=incremental,
+                rewind_days=rewind_days,
+                base_version=base_version + idx * 10_000_000,
+            )
+            conn.commit()
+        return symbol, n, None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("import failed for %s", symbol)
+        return symbol, 0, str(exc)[:200]
+
+
 def run_import(
     *,
     mode: str = "incremental",
@@ -282,6 +304,7 @@ def run_import(
     base_dir: str | None = None,
     rewind_days: int = _DEFAULT_REWIND_DAYS,
     limit: int | None = None,
+    workers: int = 1,
 ) -> dict:
     """统一入口。
 
@@ -293,8 +316,7 @@ def run_import(
     base_dir : QMT 数据根目录。None 则用环境变量 ``IQUANT_LOCAL_DATA_DIR``。
     rewind_days : 增量模式回退的自然日数，默认 3（留足除权/周末安全窗）。
     limit : 调试用，只处理前 N 只（None=不限制）。
-
-    返回 dict，字段含义与 ``stock_bar_import_job`` 对应列一致，便于上层前端展示。
+    workers : 并发线程数，默认 1（串行）。全量导入建议 4~8。
     """
     if mode not in {"full", "incremental"}:
         raise ValueError(f"mode must be 'full' or 'incremental', got {mode!r}")
@@ -302,7 +324,6 @@ def run_import(
     incremental = mode == "incremental"
     effective_base = base_dir or DEFAULT_LOCAL_DATA_DIR
 
-    # 任务样本清单：单股模式下就一条；全扫模式下遍历磁盘。
     if symbol:
         symbols: list[str] = [symbol.strip().upper()]
     else:
@@ -317,7 +338,6 @@ def run_import(
             effective_base,
             symbol,
         )
-        # 仍然创建一条 job 记录，方便前端看到"这次触发什么也没干"。
         with mysql_conn() as conn:
             job_id = _state.create_job(
                 conn,
@@ -353,41 +373,74 @@ def run_import(
             conn,
             job_type=_state.JOB_TYPE_INCREMENTAL if incremental else _state.JOB_TYPE_FULL,
             symbol_count=total,
-            note=f"factor_research.bar_1m base_dir={effective_base}",
+            note=f"factor_research.bar_1m base_dir={effective_base} workers={workers}",
         )
         conn.commit()
 
-        for idx, sym in enumerate(symbols):
-            # 单股模式下 base_dir 只是个 hint：get_dat_file_path 本身兼容 None。
-            dat_path = get_dat_file_path(sym, period="1m", base_dir=effective_base)
-            try:
-                n = _import_one_symbol(
-                    conn=conn,
-                    symbol=sym,
-                    dat_path=dat_path,
+    effective_workers = max(1, min(workers, total))
+
+    if effective_workers == 1:
+        # 串行快路径：复用单连接，与原逻辑一致
+        with mysql_conn() as conn:
+            for idx, sym in enumerate(symbols):
+                dat_path = get_dat_file_path(sym, period="1m", base_dir=effective_base)
+                try:
+                    n = _import_one_symbol(
+                        conn=conn,
+                        symbol=sym,
+                        dat_path=dat_path,
+                        incremental=incremental,
+                        rewind_days=rewind_days,
+                        base_version=base_version + idx * 10_000_000,
+                    )
+                    inserted_rows += n
+                    success += 1
+                    conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    conn.rollback()
+                    failed += 1
+                    failed_samples.append((sym, str(exc)[:200]))
+                    logger.exception("import failed for %s", sym)
+    else:
+        # 并发路径：每个 worker 独立 MySQL/CH 连接
+        logger.info("run_import: using %d workers for %d symbols", effective_workers, total)
+        with ThreadPoolExecutor(max_workers=effective_workers) as pool:
+            futures = {
+                pool.submit(
+                    _worker,
+                    sym,
+                    idx,
+                    effective_base=effective_base,
                     incremental=incremental,
                     rewind_days=rewind_days,
-                    # 每只股票预留 10M 个 version 步长：单股 10 年分钟线约 576k 行，
-                    # 10M 足够安全，且避免相邻股票 version 段重叠。
-                    base_version=base_version + idx * 10_000_000,
-                )
-                inserted_rows += n
-                success += 1
-                # 每只股票一次 commit，避免长事务占住 MySQL。
-                conn.commit()
-            except Exception as exc:  # noqa: BLE001
-                conn.rollback()
-                failed += 1
-                failed_samples.append((sym, str(exc)[:200]))
-                logger.exception("import failed for %s", sym)
+                    base_version=base_version,
+                ): sym
+                for idx, sym in enumerate(symbols)
+            }
+            done_count = 0
+            for fut in as_completed(futures):
+                sym, n, err = fut.result()
+                done_count += 1
+                if err is None:
+                    inserted_rows += n
+                    success += 1
+                else:
+                    failed += 1
+                    failed_samples.append((sym, err))
+                if done_count % 200 == 0:
+                    logger.info(
+                        "progress: %d/%d done (%d ok, %d fail)",
+                        done_count, total, success, failed,
+                    )
 
-        # 终态写回 job 表。
-        if failed == 0:
-            status = _state.JOB_STATUS_SUCCESS
-        elif success > 0:
-            status = _state.JOB_STATUS_PARTIAL
-        else:
-            status = _state.JOB_STATUS_FAILED
+    # 终态写回 job 表
+    if failed == 0:
+        status = _state.JOB_STATUS_SUCCESS
+    elif success > 0:
+        status = _state.JOB_STATUS_PARTIAL
+    else:
+        status = _state.JOB_STATUS_FAILED
+    with mysql_conn() as conn:
         _state.update_job(
             conn,
             job_id,
@@ -401,8 +454,9 @@ def run_import(
 
     elapsed = time.time() - started
     logger.info(
-        "run_import done: mode=%s symbols=%d success=%d failed=%d rows=%d elapsed=%.1fs",
+        "run_import done: mode=%s workers=%d symbols=%d success=%d failed=%d rows=%d elapsed=%.1fs",
         mode,
+        effective_workers,
         total,
         success,
         failed,
@@ -457,6 +511,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="只处理前 N 只股票（调试用）。",
     )
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并发线程数，默认 1（串行）。全量导入建议 4~8。",
+    )
     return p
 
 
@@ -473,6 +533,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         base_dir=args.base_dir,
         rewind_days=args.rewind_days,
         limit=args.limit,
+        workers=args.workers,
     )
     print(json.dumps(result, ensure_ascii=False, default=str))
     return 0
