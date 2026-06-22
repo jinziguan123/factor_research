@@ -278,20 +278,36 @@ def _worker(
     rewind_days: int,
     base_version: int,
 ) -> tuple[str, int, str | None]:
-    """线程池 worker：独立连接，处理一只股票。返回 (symbol, rows, error_msg)。"""
+    """线程池 worker：处理一只股票。返回 (symbol, rows, error_msg)。
+
+    MySQL 只在 upsert_symbol 时短暂持有，避免 CH 长写入期间连接空闲超时。
+    """
     dat_path = get_dat_file_path(symbol, period="1m", base_dir=effective_base)
     try:
+        if not os.path.exists(dat_path):
+            logger.info("skip %s: dat not found at %s", symbol, dat_path)
+            return symbol, 0, None
+
+        # 短连接：拿 symbol_id 后立即释放
         with mysql_conn() as conn:
-            n = _import_one_symbol(
-                conn=conn,
-                symbol=symbol,
-                dat_path=dat_path,
-                incremental=incremental,
-                rewind_days=rewind_days,
-                base_version=base_version + idx * 10_000_000,
+            symbol_id = _state.upsert_symbol(
+                conn, symbol, name=None, dat_path=dat_path, is_active=1
             )
             conn.commit()
-        return symbol, n, None
+
+        bv = base_version + idx * 10_000_000
+
+        start_ts: int | None = None
+        if incremental:
+            last = _query_ch_last_trade_date(symbol_id)
+            start_ts = _incremental_start_ts(last, rewind_days)
+
+        frame = read_iquant_mmap(dat_path, start_ts=start_ts)
+        rows = _normalize_frame_rows(symbol_id, symbol, frame)
+        affected = _insert_ch_rows(rows, base_version=bv)
+        if affected:
+            logger.info("imported %s: %d rows", symbol, affected)
+        return symbol, affected, None
     except Exception as exc:  # noqa: BLE001
         logger.exception("import failed for %s", symbol)
         return symbol, 0, str(exc)[:200]
