@@ -29,6 +29,7 @@ def get_client() -> Client:
         user=settings.clickhouse_user,
         password=settings.clickhouse_password,
         database=settings.clickhouse_database,
+        send_receive_timeout=300,
         settings={"use_numpy": True},
     )
 

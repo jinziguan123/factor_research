@@ -187,48 +187,56 @@ def _compute_batch_boundaries(rows: Sequence[tuple]) -> list[tuple[int, int]]:
     return boundaries
 
 
+_CH_INSERT_MAX_RETRIES = 3
+_CH_INSERT_RETRY_BASE_DELAY = 2.0
+
+
 def _insert_ch_rows(rows: Sequence[tuple], *, base_version: int) -> int:
     """把 (trade_date, minute_slot, symbol_id, o, h, l, c, volume, amount_k)
     批量写入 ClickHouse ``stock_bar_1m``。
 
-    - 使用 clickhouse-driver 的 ``columnar=True`` 列式 INSERT，避免逐行转 tuple 的开销。
-    - 切批走 :func:`_compute_batch_boundaries`：同时约束"行数"和"唯一月数"，
-      后者避免 B 股等稀疏数据（每天实际落盘 <10 根）按行数切出现单批跨 100+ 个月
-      被 CH 拒绝（Code 252）。
-    - version = base_version + global_offset + i，保证 ReplacingMergeTree 同一 PK
-      的新版本覆盖旧版本，且跨批递增不冲突。
+    每个批次失败时会重试（新建连接），最多 ``_CH_INSERT_MAX_RETRIES`` 次。
     """
     if not rows:
         return 0
-    # rows 是 normalize_symbol_bar_frame 的输出，列顺序：
-    # (trade_date, minute_slot, symbol_id, open, high, low, close, volume, amount_k)
     inserted = 0
-    with ch_client() as ch:
-        for start, end in _compute_batch_boundaries(rows):
-            batch = rows[start:end]
-            batch_n = len(batch)
-            cols = list(zip(*batch))
-            versions = np.arange(batch_n, dtype=np.int64) + int(base_version) + start
-            columns_np = [
-                np.asarray(cols[2], dtype=np.uint32),           # symbol_id
-                np.asarray(cols[0], dtype=object),              # trade_date (datetime.date)
-                np.asarray(cols[1], dtype=np.uint16),           # minute_slot
-                np.asarray(cols[3], dtype=np.float32),          # open
-                np.asarray(cols[4], dtype=np.float32),          # high
-                np.asarray(cols[5], dtype=np.float32),          # low
-                np.asarray(cols[6], dtype=np.float32),          # close
-                np.asarray(cols[7], dtype=np.uint32),           # volume
-                np.asarray(cols[8], dtype=np.uint32),           # amount_k
-                versions.astype(np.uint64),                     # version
-            ]
-            ch.execute(
-                "INSERT INTO quant_data.stock_bar_1m "
-                "(symbol_id, trade_date, minute_slot, open, high, low, close, "
-                "volume, amount_k, version) VALUES",
-                columns_np,
-                columnar=True,
-            )
-            inserted += batch_n
+    for start, end in _compute_batch_boundaries(rows):
+        batch = rows[start:end]
+        batch_n = len(batch)
+        cols = list(zip(*batch))
+        versions = np.arange(batch_n, dtype=np.int64) + int(base_version) + start
+        columns_np = [
+            np.asarray(cols[2], dtype=np.uint32),           # symbol_id
+            np.asarray(cols[0], dtype=object),              # trade_date (datetime.date)
+            np.asarray(cols[1], dtype=np.uint16),           # minute_slot
+            np.asarray(cols[3], dtype=np.float32),          # open
+            np.asarray(cols[4], dtype=np.float32),          # high
+            np.asarray(cols[5], dtype=np.float32),          # low
+            np.asarray(cols[6], dtype=np.float32),          # close
+            np.asarray(cols[7], dtype=np.uint32),           # volume
+            np.asarray(cols[8], dtype=np.uint32),           # amount_k
+            versions.astype(np.uint64),                     # version
+        ]
+        sql = (
+            "INSERT INTO quant_data.stock_bar_1m "
+            "(symbol_id, trade_date, minute_slot, open, high, low, close, "
+            "volume, amount_k, version) VALUES"
+        )
+        for attempt in range(_CH_INSERT_MAX_RETRIES):
+            try:
+                with ch_client() as ch:
+                    ch.execute(sql, columns_np, columnar=True)
+                break
+            except (ConnectionError, OSError) as exc:
+                if attempt == _CH_INSERT_MAX_RETRIES - 1:
+                    raise
+                delay = _CH_INSERT_RETRY_BASE_DELAY * (attempt + 1)
+                logger.warning(
+                    "CH insert retry %d/%d (rows %d-%d): %s, wait %.1fs",
+                    attempt + 1, _CH_INSERT_MAX_RETRIES, start, end, exc, delay,
+                )
+                time.sleep(delay)
+        inserted += batch_n
     return inserted
 
 
