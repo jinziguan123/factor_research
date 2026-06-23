@@ -37,7 +37,7 @@ import pandas as pd
 from backend.config import settings
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
-from backend.services import execution
+from backend.services import execution, optimizer
 from backend.services.abort_check import AbortedError, check_abort
 from backend.services.params_hash import params_hash as _hash
 from backend.storage.data_service import DataService
@@ -514,6 +514,15 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
         F, n_groups=n_groups, rebalance=rebalance, position=position,
         excluded_mask=excluded_mask,
     )
+    # 组内权重方法：equal（默认，等权）| inverse_vol | risk_parity。
+    # 默认 equal 保持与历史回测一致；opt-in 时用回看窗口收益做风险加权。
+    weighting = str(body.get("weighting", "equal"))
+    if weighting != "equal":
+        rets_for_w = close.pct_change(fill_method=None)
+        W = optimizer.reweight_intragroup(
+            W, rets_for_w, method=weighting,
+            lookback=int(body.get("weight_lookback", 60)),
+        )
     # T+1 执行：T 日目标权重后移一行，次日以 exec_price 成交，消除 T 日 close 前视。
     w_exec = execution.shift_for_t1(W)
     size = w_exec * init_cash / exec_price

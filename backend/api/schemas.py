@@ -94,6 +94,9 @@ class CreateBacktestIn(BaseModel):
     slippage_bps: float = Field(default=5.0, ge=0)            # 固定滑点，双边
     impact_coef: float = Field(default=0.1, ge=0)             # 平方根冲击系数，0 关闭
     max_volume_pct: float = Field(default=0.10, ge=0, le=1)   # 单日成交额占比上限，0 关闭
+    # 组内权重方法：equal | inverse_vol | risk_parity（非法值由 optimizer 抛错）
+    weighting: str = "equal"
+    weight_lookback: int = Field(default=60, ge=5)           # 风险加权的协方差回看天数
     filter_price_limit: bool = True
     # cost_bps 已废弃：保留字段避免旧前端 422；不再参与计算。
     cost_bps: float = 3.0
