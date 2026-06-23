@@ -37,7 +37,7 @@ import pandas as pd
 from backend.config import settings
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
-from backend.services import execution, optimizer
+from backend.services import execution, optimizer, risk_control
 from backend.services.abort_check import AbortedError, check_abort
 from backend.services.params_hash import params_hash as _hash
 from backend.storage.data_service import DataService
@@ -522,6 +522,14 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
         W = optimizer.reweight_intragroup(
             W, rets_for_w, method=weighting,
             lookback=int(body.get("weight_lookback", 60)),
+        )
+    # 组合级风控：个股集中度 + 目标波动率缩放（默认关闭，opt-in）。
+    max_pos_w = float(body.get("max_position_weight", 0.0))
+    target_vol = float(body.get("target_vol", 0.0))
+    if max_pos_w > 0 or target_vol > 0:
+        W = risk_control.apply_portfolio_risk(
+            W, close, max_position_weight=max_pos_w, target_vol=target_vol,
+            lookback=int(body.get("vol_lookback", 60)),
         )
     # T+1 执行：T 日目标权重后移一行，次日以 exec_price 成交，消除 T 日 close 前视。
     w_exec = execution.shift_for_t1(W)
