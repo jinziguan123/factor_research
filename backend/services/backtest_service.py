@@ -37,6 +37,7 @@ import pandas as pd
 from backend.config import settings
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
+from backend.services import execution
 from backend.services.abort_check import AbortedError, check_abort
 from backend.services.params_hash import params_hash as _hash
 from backend.storage.data_service import DataService
@@ -387,7 +388,14 @@ class BacktestInputs:
     symbols: list[str]
     F: pd.DataFrame  # 因子宽表，已与 close 按 (date × symbol) 内连接对齐
     close: pd.DataFrame  # qfq close 宽表，已 ffill + 非正数占位 1.0
-    size: pd.DataFrame  # target amount 宽表
+    size: pd.DataFrame  # 容量裁剪后的 target amount（目标持仓股数）宽表
+    exec_price: pd.DataFrame  # 成交价宽表（T+1 open / vwap），已非正数占位
+    fees_arr: np.ndarray  # 方向相关费率数组（买=佣金+过户，卖=+印花税）
+    slip_arr: np.ndarray  # 固定滑点 + 平方根冲击合成的 slippage 数组
+    w_exec: pd.DataFrame  # T+1 平移后的权重，供 cost_sensitivity 重算滑点
+    daily_amount: pd.DataFrame  # 当日成交额（元），供重算滑点
+    slippage_bps: float
+    impact_coef: float
     init_cash: float
     freq: str
     n_bars: int
@@ -457,25 +465,71 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
     close = close.loc[common_index, common_cols].astype("float64")
     F = F.loc[common_index, common_cols].astype("float64")
 
-    # 4) 权重 → size
+    # 4) 价格面板（成交价 / 滑点 / 容量所需）+ 权重 → size
     n_groups = n_groups_req
     rebalance = int(body.get("rebalance_period", 1))
     position = str(body.get("position", "top"))
     init_cash = float(body.get("init_cash", 1e7))
 
-    # 涨跌停过滤：默认关闭以保留与历史回测的可对比性；用户主动 opt-in 时按
-    # _compute_price_limit_mask 的近似口径剔除当日触板票。
-    filter_pl = bool(body.get("filter_price_limit", False))
+    # 执行/成本参数（2026-06-23 改造，默认值见 CreateBacktestIn / 设计文档）。
+    exec_mode = str(body.get("exec_price", "open"))
+    commission_bps = float(body.get("commission_bps", 2.5))
+    stamp_tax_bps = float(body.get("stamp_tax_bps", 5.0))
+    transfer_fee_bps = float(body.get("transfer_fee_bps", 0.1))
+    slippage_bps = float(body.get("slippage_bps", 5.0))
+    impact_coef = float(body.get("impact_coef", 0.1))
+    max_volume_pct = float(body.get("max_volume_pct", 0.10))
+
+    def _aligned(field: str, adjust: str = "qfq") -> pd.DataFrame:
+        """取单字段宽表并 reindex 到 close 的 (index × columns)；缺失补 NaN。"""
+        p = data.load_panel(
+            symbols, start.date(), end.date(), field=field, adjust=adjust
+        )
+        if p.empty:
+            return pd.DataFrame(np.nan, index=close.index, columns=close.columns)
+        return (
+            p.reindex(index=close.index, columns=close.columns).astype("float64")
+        )
+
+    # 成交价：open 模式取 open；vwap 模式用复权典型价 (high+low+close)/3。
+    if exec_mode == "vwap":
+        high = _aligned("high")
+        low = _aligned("low")
+        open_ = close  # 占位：vwap 模式不读 open
+    else:
+        open_ = _aligned("open")
+        high = low = close  # 占位：open 模式不读 high/low
+    exec_price = execution.build_exec_price(open_, high, low, close, exec_mode)
+    # 成交价非正数 / NaN（停牌等）占位，避免 size 除零；停牌不可交易由容量约束兜底。
+    exec_price = exec_price.where(exec_price > 0).ffill().fillna(1.0)
+
+    # 当日成交额（元）：amount_k 单位千元，不受 qfq 影响，用 adjust='none' 取原值。
+    daily_amount = (_aligned("amount_k", adjust="none") * 1000.0).fillna(0.0)
+
+    # 涨跌停过滤：默认开启（2026-06-23 起），剔除当日触板票。
+    filter_pl = bool(body.get("filter_price_limit", True))
     excluded_mask = _compute_price_limit_mask(close) if filter_pl else None
 
     W = _build_weights(
         F, n_groups=n_groups, rebalance=rebalance, position=position,
         excluded_mask=excluded_mask,
     )
-    size = W * init_cash / close
+    # T+1 执行：T 日目标权重后移一行，次日以 exec_price 成交，消除 T 日 close 前视。
+    w_exec = execution.shift_for_t1(W)
+    size = w_exec * init_cash / exec_price
     size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    # 成交量容量约束：单日成交额 ≤ max_volume_pct × 当日成交额（0 关闭）。
+    size = execution.apply_volume_cap(size, daily_amount, exec_price, max_volume_pct)
 
-    # close 零 / NaN 占位：详见 run_backtest 原注释
+    # 方向相关费率数组 + （固定滑点 + 平方根市场冲击）滑点数组。
+    fees_arr = execution.build_fee_array(
+        w_exec, commission_bps, stamp_tax_bps, transfer_fee_bps
+    )
+    slip_arr = execution.build_slippage_array(
+        w_exec, init_cash, daily_amount, exec_price, slippage_bps, impact_coef
+    )
+
+    # close 零 / NaN 占位：详见 run_backtest 原注释（用于 mark-to-market 估值）。
     close = close.where(close > 0).ffill().fillna(1.0)
 
     return BacktestInputs(
@@ -488,6 +542,13 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
         F=F,
         close=close,
         size=size,
+        exec_price=exec_price,
+        fees_arr=fees_arr,
+        slip_arr=slip_arr,
+        w_exec=w_exec,
+        daily_amount=daily_amount,
+        slippage_bps=slippage_bps,
+        impact_coef=impact_coef,
         init_cash=init_cash,
         freq=str(body.get("freq", "1d")),
         n_bars=len(close),
@@ -526,10 +587,9 @@ def run_backtest(run_id: str, body: dict) -> None:
         # 交给下面专属 except 分支落 aborted。
         check_abort("backtest", run_id)
 
-        # 1~4) 复用公共 prepare：因子 / close / size 一条龙
+        # 1~4) 复用公共 prepare：因子 / 价格 / size / 费率 / 滑点 一条龙
         inputs = _prepare_backtest_inputs(body)
         init_cash = inputs.init_cash
-        cost_bps = float(body.get("cost_bps", 3))
 
         _update_status(run_id, progress=70)
         check_abort("backtest", run_id)  # VectorBT 跑起来就停不下，先查一次
@@ -538,11 +598,15 @@ def run_backtest(run_id: str, body: dict) -> None:
         # 延迟 import：VectorBT 冷启动 ~1s（numba JIT），放函数内避免污染进程启动。
         import vectorbt as vbt
 
+        # price=exec_price → T+1 open/vwap 成交（close 仅用于估值）；
+        # fees 为方向相关数组（卖出含印花税）；slippage 含固定滑点 + 平方根冲击。
         pf = vbt.Portfolio.from_orders(
             close=inputs.close,
             size=inputs.size,
+            price=inputs.exec_price,
             size_type="targetamount",
-            fees=cost_bps / 1e4,
+            fees=inputs.fees_arr,
+            slippage=inputs.slip_arr,
             freq="1D",
             init_cash=init_cash,
             cash_sharing=True,

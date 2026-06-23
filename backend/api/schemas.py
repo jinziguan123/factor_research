@@ -61,11 +61,15 @@ class CreateEvalIn(BaseModel):
 class CreateBacktestIn(BaseModel):
     """``POST /api/backtests`` 请求体。
 
+    执行/成本模型（2026-06-23 回测真实性改造，见
+    ``docs/plans/2026-06-23-backtest-realism-redesign.md``）：
     - ``position`` 只能是 ``"top"`` 或 ``"long_short"``（_build_weights 会再校验一次）；
-    - ``cost_bps`` 默认 3bp = 万 3；``init_cash`` 默认 1000 万；
-    - ``filter_price_limit`` 默认 False（保留与历史回测的可对比性）。
-      开启后按 ``|pct_change| ≥ 0.097`` 的近似口径剔除当日触板票，详见
-      ``backtest_service._compute_price_limit_mask`` docstring 的误差方向说明。
+    - ``exec_price`` = ``"open"``（T+1 开盘价，默认、无前视）或 ``"vwap"``（复权典型价）；
+    - 成本拆分为佣金（双边）+ 印花税（仅卖出）+ 过户费（双边），不再用单一对称费率；
+    - ``slippage_bps`` 固定滑点 + ``impact_coef`` 平方根市场冲击（量相关）；
+    - ``max_volume_pct`` 单日成交额占比上限（0 关闭）；
+    - ``filter_price_limit`` 默认 ``True``（剔除当日触板票）。
+    - ``cost_bps`` 已废弃，仅为兼容旧前端保留，不参与计算。
     """
 
     factor_id: str
@@ -79,21 +83,36 @@ class CreateBacktestIn(BaseModel):
     # 不用 Literal 约束，避免 Pydantic v2 在枚举错误上输出 422 而非 400 —— 交给
     # _build_weights 抛 ValueError 走全局 handler 统一转 500；前端侧也能由下拉框兜底。
     position: str = "top"
-    cost_bps: float = 3.0
     init_cash: float = 1e7
-    filter_price_limit: bool = False
+
+    # —— 执行/成本模型 ——
+    # exec_price 不用 Literal，理由同 position；非法值由 execution.build_exec_price 抛错。
+    exec_price: str = "open"
+    commission_bps: float = Field(default=2.5, ge=0)          # 佣金，双边
+    stamp_tax_bps: float = Field(default=5.0, ge=0)           # 印花税，仅卖出
+    transfer_fee_bps: float = Field(default=0.1, ge=0)        # 过户费，双边
+    slippage_bps: float = Field(default=5.0, ge=0)            # 固定滑点，双边
+    impact_coef: float = Field(default=0.1, ge=0)             # 平方根冲击系数，0 关闭
+    max_volume_pct: float = Field(default=0.10, ge=0, le=1)   # 单日成交额占比上限，0 关闭
+    filter_price_limit: bool = True
+    # cost_bps 已废弃：保留字段避免旧前端 422；不再参与计算。
+    cost_bps: float = 3.0
 
 
 class CreateCostSensitivityIn(BaseModel):
     """``POST /api/cost-sensitivity`` 请求体。
 
-    和 ``CreateBacktestIn`` 几乎完全一致，只是把 ``cost_bps: float`` 替换成
-    ``cost_bps_list: list[float]``，让后端循环跑。
+    和 ``CreateBacktestIn`` 几乎完全一致，只是把单值滑点替换成
+    ``cost_bps_list: list[float]`` 让后端循环跑。
+
+    2026-06-23 改造后语义：``cost_bps_list`` 现解释为**待扫描的滑点 bp 列表**
+    （固定佣金/印花税/过户费不变，仅扫描滑点假设对收益的侵蚀）；其余执行/成本
+    参数与 ``CreateBacktestIn`` 对齐。
 
     校验策略：
     - ``cost_bps_list`` 至少 2 个点（否则跟 single backtest 没区别，应走 /backtests）；
       上限 20 个点，防止前端误传很长的 range 把后端拖满。
-    - 单点 ∈ [0, 200]（2% = 200bp 已是非常离谱的估算，留余量）。
+    - 单点 ∈ [0, 200]（200bp 滑点已是极端假设，留余量）。
     - 去重 + 升序由后端 service 统一处理，这里只做必要边界校验。
     """
 
@@ -107,8 +126,15 @@ class CreateCostSensitivityIn(BaseModel):
     rebalance_period: int = Field(default=1, ge=1)
     position: str = "top"
     init_cash: float = 1e7
+    exec_price: str = "open"
+    commission_bps: float = Field(default=2.5, ge=0)
+    stamp_tax_bps: float = Field(default=5.0, ge=0)
+    transfer_fee_bps: float = Field(default=0.1, ge=0)
+    impact_coef: float = Field(default=0.1, ge=0)
+    max_volume_pct: float = Field(default=0.10, ge=0, le=1)
+    # cost_bps_list 现解释为"待扫描的滑点 bp 列表"（slippage sweep）。
     cost_bps_list: list[float] = Field(..., min_length=2, max_length=20)
-    filter_price_limit: bool = False
+    filter_price_limit: bool = True
 
     @model_validator(mode="after")
     def _check_cost_bps_list(self) -> "CreateCostSensitivityIn":

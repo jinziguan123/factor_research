@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from backend.services import execution
 from backend.services.abort_check import AbortedError, check_abort
 from backend.services.backtest_service import (
     BacktestInputs,
@@ -92,25 +93,36 @@ def _nan_to_none(x: Any) -> Any:
 
 
 def _compute_point(
-    inputs: BacktestInputs, cost_bps: float
+    inputs: BacktestInputs, slippage_bps: float
 ) -> dict[str, Any]:
-    """对单个 cost_bps 跑一次 vbt，提取结构化指标。
+    """对单个滑点假设（slippage_bps）跑一次 vbt，提取结构化指标。
+
+    2026-06-23 改造：扫描维度从"对称费率"升级为"滑点假设"。固定的佣金 / 印花税 /
+    过户费已固化进 ``inputs.fees_arr``，这里只随 slippage_bps 重算滑点数组（含平方根
+    冲击），其余执行假设（T+1 成交价、容量裁剪）与单次回测保持一致。
 
     关键指标：
     - total_return / annual_return / sharpe_ratio / max_drawdown / win_rate / trade_count：
       和 fr_backtest_metrics 同款语义，单位统一成小数（不是百分比）；
-    - turnover_total：总周转 = Σ|order_size * order_price| / init_cash。表征"成本撬动"
-      —— 同样换手下，不同 cost_bps 的 trade_count 会相同，annual_return 却会差，
-      方便前端用"换手 × cost_bps"直观解读曲线走势。
+    - turnover_total：总周转 = Σ|order_size * order_price| / init_cash；
     - stats：vbt pf.stats() 原样 dict（Timedelta / Timestamp 已 str 化）。
+
+    返回 dict 的 ``cost_bps`` 键保留原名（前端 x 轴契约不变），其值现为滑点 bp。
     """
     import vectorbt as vbt
 
+    # 随滑点假设重算滑点数组（固定滑点 + 平方根冲击）；方向相关费率数组保持不变。
+    slip_arr = execution.build_slippage_array(
+        inputs.w_exec, inputs.init_cash, inputs.daily_amount,
+        inputs.exec_price, slippage_bps, inputs.impact_coef,
+    )
     pf = vbt.Portfolio.from_orders(
         close=inputs.close,
         size=inputs.size,
+        price=inputs.exec_price,
         size_type="targetamount",
-        fees=cost_bps / 1e4,
+        fees=inputs.fees_arr,
+        slippage=slip_arr,
         freq="1D",
         init_cash=inputs.init_cash,
         cash_sharing=True,
@@ -151,11 +163,11 @@ def _compute_point(
             )
     except Exception:  # noqa: BLE001
         # vbt API 漂移兜底：算不出换手不该让整个敏感性失败。
-        log.exception("compute turnover failed at cost_bps=%s", cost_bps)
+        log.exception("compute turnover failed at slippage_bps=%s", slippage_bps)
         turnover_total = 0.0
 
     return {
-        "cost_bps": float(cost_bps),
+        "cost_bps": float(slippage_bps),
         "total_return": _nan_to_none(total_return),
         "annual_return": _nan_to_none(annual_return),
         "sharpe_ratio": _nan_to_none(sharpe_ratio),
