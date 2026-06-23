@@ -138,47 +138,84 @@ def build_slippage_array(
     return (base_slip + impact).astype("float64")
 
 
-def apply_volume_cap(
+def apply_trading_constraints(
     target_size: pd.DataFrame,
     daily_amount: pd.DataFrame,
     exec_price: pd.DataFrame,
     max_volume_pct: float,
+    limit_up_mask: pd.DataFrame | None = None,
+    limit_down_mask: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """逐行路径裁剪：单票单日成交额 ≤ ``max_volume_pct × 当日成交额``。
+    """逐行施加涨跌停滞留 + 成交量容量约束，返回实际可达的目标持仓。
 
-    因为"实际持仓"依赖前一行裁剪后的结果（路径依赖），用逐行扫描（外层循环交易日，
-    内层向量化所有 symbol）。被限制的买入会留存现金（符合真实"买不到那么多"）；
-    停牌日 ``daily_amount=0`` → ``cap=0`` → 持仓不变（自动处理停牌不可交易）。
+    "实际持仓"依赖前一行结果（路径依赖），故逐行扫描（外层交易日、内层向量化 symbol）。
+    每个交易日按同一条 prev 持仓路径处理：
 
-    统一用成交额（元）口径，避开 ``volume`` 的"股 vs 手"单位歧义。
+    1. **涨跌停滞留**：跌停日想卖出（Δ<0）的部分无法成交 → 持仓保持（滞留到能卖出
+       的交易日）；涨停日想买入（Δ>0）的部分无法成交 → 持仓保持。精确建模 A 股
+       "想卖却跌停卖不掉 / 想买却涨停买不到"，在 size 层完成，无需 VectorBT order_func。
+    2. **容量约束**：封板过滤后剩余的成交额超过当日成交额 ``max_volume_pct`` 的部分
+       按比例裁剪；停牌（daily_amount=0）自动变为不可交易。
 
     Args:
         target_size: 目标持仓股数宽表（``W_exec * init_cash / exec_price``）。
         daily_amount: 当日成交额宽表（元）。
-        exec_price: 成交价宽表（元/股），把成交股数折算成成交额。
-        max_volume_pct: 单日成交额占比上限（如 0.10）；≤0 表示关闭裁剪。
+        exec_price: 成交价宽表（元/股）。
+        max_volume_pct: 单日成交额占比上限；≤0 关闭容量约束。
+        limit_up_mask: 涨停 bool 宽表（True=当日封涨停，不能买）；None 关闭。
+        limit_down_mask: 跌停 bool 宽表（True=当日封跌停，不能卖）；None 关闭。
 
     Returns:
-        裁剪后的实际目标持仓宽表，与 ``target_size`` 同 index / columns。
+        约束后的实际目标持仓宽表，与 ``target_size`` 同 index / columns。
     """
-    if max_volume_pct is None or max_volume_pct <= 0:
+    cap_on = max_volume_pct is not None and max_volume_pct > 0
+    if not cap_on and limit_up_mask is None and limit_down_mask is None:
         return target_size.copy()
 
     tgt = target_size.values.astype("float64")
     amt = np.nan_to_num(daily_amount.values.astype("float64"), nan=0.0)
     px = np.nan_to_num(exec_price.values.astype("float64"), nan=0.0)
     n, m = tgt.shape
+
+    def _mask_arr(mask: pd.DataFrame | None):
+        if mask is None:
+            return None
+        return mask.reindex(
+            index=target_size.index, columns=target_size.columns, fill_value=False
+        ).to_numpy(dtype=bool)
+
+    up = _mask_arr(limit_up_mask)
+    down = _mask_arr(limit_down_mask)
+
     actual = np.zeros_like(tgt)
     prev = np.zeros(m)
     for t in range(n):
-        cap_value = max_volume_pct * amt[t]
         delta = tgt[t] - prev
-        order_value = np.abs(delta) * px[t]
-        over = (order_value > cap_value) & (order_value > 0)
-        scale = np.ones(m)
-        # 仅在超额位置写入 cap/order（≤1）；其余保持 1.0 不裁剪。
-        np.divide(cap_value, order_value, out=scale, where=over)
-        delta = delta * scale
+        # 1) 涨跌停滞留：封板方向的成交被取消（Δ 置 0 = 持仓不变，留待后续交易日）。
+        if down is not None:
+            delta = np.where(down[t] & (delta < 0), 0.0, delta)  # 跌停不能卖
+        if up is not None:
+            delta = np.where(up[t] & (delta > 0), 0.0, delta)    # 涨停不能买
+        # 2) 容量约束：超额成交额按比例裁剪。
+        if cap_on:
+            cap_value = max_volume_pct * amt[t]
+            order_value = np.abs(delta) * px[t]
+            over = (order_value > cap_value) & (order_value > 0)
+            scale = np.ones(m)
+            np.divide(cap_value, order_value, out=scale, where=over)
+            delta = delta * scale
         prev = prev + delta
         actual[t] = prev
     return pd.DataFrame(actual, index=target_size.index, columns=target_size.columns)
+
+
+def apply_volume_cap(
+    target_size: pd.DataFrame,
+    daily_amount: pd.DataFrame,
+    exec_price: pd.DataFrame,
+    max_volume_pct: float,
+) -> pd.DataFrame:
+    """成交量容量约束：``apply_trading_constraints`` 不带涨跌停 mask 的特例（保留兼容）。"""
+    return apply_trading_constraints(
+        target_size, daily_amount, exec_price, max_volume_pct
+    )

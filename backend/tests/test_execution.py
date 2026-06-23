@@ -163,3 +163,48 @@ def test_apply_volume_cap_halt_zero_amount():
     out = ex.apply_volume_cap(target, amount, px, max_volume_pct=0.1)
     assert out.iloc[0, 0] == pytest.approx(0.0)    # 停牌买不进
     assert out.iloc[1, 0] == pytest.approx(100.0)  # 复牌补到目标
+
+
+# ---------------------------- apply_trading_constraints（涨跌停滞留）----------------------------
+
+
+def test_trading_constraints_limit_down_blocks_sell():
+    idx = pd.date_range("2024-01-01", periods=2)
+    target = pd.DataFrame({"a": [100.0, 0.0]}, index=idx)  # 第1日想清仓
+    amount = pd.DataFrame({"a": [1e12, 1e12]}, index=idx)
+    px = pd.DataFrame({"a": [10.0, 10.0]}, index=idx)
+    down = pd.DataFrame({"a": [False, True]}, index=idx)   # 第1日跌停
+    out = ex.apply_trading_constraints(target, amount, px, 0.0, limit_down_mask=down)
+    assert out.iloc[0, 0] == pytest.approx(100.0)  # 建仓
+    assert out.iloc[1, 0] == pytest.approx(100.0)  # 跌停卖不掉 → 滞留
+
+
+def test_trading_constraints_limit_up_blocks_buy():
+    idx = pd.date_range("2024-01-01", periods=2)
+    target = pd.DataFrame({"a": [0.0, 100.0]}, index=idx)  # 第1日想买入
+    amount = pd.DataFrame({"a": [1e12, 1e12]}, index=idx)
+    px = pd.DataFrame({"a": [10.0, 10.0]}, index=idx)
+    up = pd.DataFrame({"a": [False, True]}, index=idx)     # 第1日涨停
+    out = ex.apply_trading_constraints(target, amount, px, 0.0, limit_up_mask=up)
+    assert out.iloc[1, 0] == pytest.approx(0.0)  # 涨停买不到 → 保持空仓
+
+
+def test_trading_constraints_sell_allowed_when_not_limit():
+    idx = pd.date_range("2024-01-01", periods=2)
+    target = pd.DataFrame({"a": [100.0, 0.0]}, index=idx)
+    amount = pd.DataFrame({"a": [1e12, 1e12]}, index=idx)
+    px = pd.DataFrame({"a": [10.0, 10.0]}, index=idx)
+    down = pd.DataFrame({"a": [False, False]}, index=idx)  # 不跌停
+    out = ex.apply_trading_constraints(target, amount, px, 0.0, limit_down_mask=down)
+    assert out.iloc[1, 0] == pytest.approx(0.0)  # 正常清仓
+
+
+def test_trading_constraints_limit_down_allows_buy():
+    # 跌停只挡卖出，不挡买入（想买仍可买）
+    idx = pd.date_range("2024-01-01", periods=2)
+    target = pd.DataFrame({"a": [0.0, 100.0]}, index=idx)
+    amount = pd.DataFrame({"a": [1e12, 1e12]}, index=idx)
+    px = pd.DataFrame({"a": [10.0, 10.0]}, index=idx)
+    down = pd.DataFrame({"a": [False, True]}, index=idx)
+    out = ex.apply_trading_constraints(target, amount, px, 0.0, limit_down_mask=down)
+    assert out.iloc[1, 0] == pytest.approx(100.0)  # 跌停不挡买

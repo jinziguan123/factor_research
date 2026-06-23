@@ -101,7 +101,8 @@ class CreateBacktestIn(BaseModel):
     max_position_weight: float = Field(default=0.0, ge=0, le=1)  # 个股集中度上限,0=关闭
     target_vol: float = Field(default=0.0, ge=0)                 # 目标年化波动率,0=关闭
     vol_lookback: int = Field(default=60, ge=5)                  # 波动率估计回看天数
-    filter_price_limit: bool = True
+    filter_price_limit: bool = True   # 选股侧：剔除当日触板票
+    lock_price_limit: bool = True     # 执行侧：封板日无法买入/卖出（滞留）
     # cost_bps 已废弃：保留字段避免旧前端 422；不再参与计算。
     cost_bps: float = 3.0
 

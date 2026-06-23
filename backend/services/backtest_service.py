@@ -220,6 +220,24 @@ def _compute_price_limit_mask(
     return mask
 
 
+def _compute_directional_limit_masks(
+    close: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """分方向涨跌停 bool 宽表 ``(limit_up, limit_down)``。
+
+    基于 close 相对昨收的涨跌幅，板块阈值同 ``_compute_price_limit_mask``。
+    True = 当日收盘封板：limit_up 用于挡买入、limit_down 用于挡卖出。
+    """
+    pct = close.pct_change(fill_method=None)
+    up = pd.DataFrame(False, index=pct.index, columns=pct.columns)
+    down = pd.DataFrame(False, index=pct.index, columns=pct.columns)
+    for col in pct.columns:
+        thr = _get_price_limit_threshold(str(col))
+        up[col] = pct[col].ge(thr).fillna(False)
+        down[col] = pct[col].le(-thr).fillna(False)
+    return up, down
+
+
 def _build_weights(
     F: pd.DataFrame,
     n_groups: int,
@@ -535,8 +553,16 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
     w_exec = execution.shift_for_t1(W)
     size = w_exec * init_cash / exec_price
     size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    # 成交量容量约束：单日成交额 ≤ max_volume_pct × 当日成交额（0 关闭）。
-    size = execution.apply_volume_cap(size, daily_amount, exec_price, max_volume_pct)
+    # 涨跌停滞留 + 成交量容量约束：封板日无法买入/卖出，超量成交按比例裁剪。
+    lock_pl = bool(body.get("lock_price_limit", True))
+    if lock_pl:
+        limit_up_mask, limit_down_mask = _compute_directional_limit_masks(close)
+    else:
+        limit_up_mask = limit_down_mask = None
+    size = execution.apply_trading_constraints(
+        size, daily_amount, exec_price, max_volume_pct,
+        limit_up_mask=limit_up_mask, limit_down_mask=limit_down_mask,
+    )
 
     # 方向相关费率数组 + （固定滑点 + 平方根市场冲击）滑点数组。
     fees_arr = execution.build_fee_array(
