@@ -43,14 +43,15 @@ def build_exec_price(
     low: pd.DataFrame,
     close: pd.DataFrame,
     mode: str = "open",
+    vwap: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """构造成交价宽表。
 
     Args:
         open_ / high / low / close: 已对齐的复权价宽表（同 index / columns）。
-        mode: ``"open"`` 用开盘价（最诚实、无前视）；``"vwap"`` 用复权典型价
-            ``(high + low + close) / 3``（量纲与复权价自洽，作为日内成交均价代理；
-            真实 amount/volume VWAP 列入 roadmap）。
+        mode: ``"open"`` 用开盘价（最诚实、无前视）；``"vwap"`` 用成交均价。
+        vwap: 真实成交额 VWAP 宽表（``amount/volume`` 复权后）。mode='vwap' 且传入时
+            优先用它；缺省（None）回退复权典型价 ``(high + low + close) / 3``。
 
     Returns:
         成交价宽表，与入参同 shape。
@@ -61,6 +62,8 @@ def build_exec_price(
     if mode == "open":
         return open_.copy()
     if mode == "vwap":
+        if vwap is not None:
+            return vwap.copy()
         return (high + low + close) / 3.0
     raise ValueError(f"exec_price mode 必须是 'open' 或 'vwap'，收到 {mode!r}")
 

@@ -137,6 +137,18 @@ class DataService:
         for col in _PRICE_COLS:
             df[col] = df[col].astype("float64")
 
+        # vwap（真实成交均价，元/股）：amount_k 千元 → 元，除以 volume（股）。
+        # 仅调用方请求时计算；volume=0 / 非正用 close 兜底。随后与 OHLC 一起被复权。
+        if "vwap" in fields:
+            amt = df["amount_k"].to_numpy(dtype="float64") * 1000.0
+            vol = df["volume"].to_numpy(dtype="float64")
+            with np.errstate(divide="ignore", invalid="ignore"):
+                vwap_raw = amt / vol
+            close_arr = df["close"].to_numpy(dtype="float64")
+            df["vwap"] = np.where(
+                np.isfinite(vwap_raw) & (vwap_raw > 0), vwap_raw, close_arr
+            )
+
         if adjust == "qfq":
             factor_map = self._load_qfq_factors(sid_list, start, end)
             df = self._apply_qfq(df, factor_map)
@@ -681,6 +693,10 @@ class DataService:
                 )
             # 这里显式用 pandas 的 fillna：numpy 的 isnan 对 object dtype 不稳。
             factors = factors_series.fillna(1.0).to_numpy()
-            for col in _PRICE_COLS:
+            # vwap（若调用方请求并已在 load_bars 计算）与 OHLC 同向复权。
+            adj_cols = (
+                (*_PRICE_COLS, "vwap") if "vwap" in df.columns else _PRICE_COLS
+            )
+            for col in adj_cols:
                 df.loc[mask, col] = df.loc[mask, col].to_numpy() * factors
         return df

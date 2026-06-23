@@ -48,6 +48,13 @@ def test_build_exec_price_vwap():
     assert out.iloc[0, 0] == pytest.approx((6.0 + 3.0 + 3.0) / 3.0)
 
 
+def test_build_exec_price_vwap_real_takes_priority():
+    z = _df([[9.0]])
+    vwap = _df([[12.34]])
+    out = ex.build_exec_price(z, z, z, z, "vwap", vwap=vwap)
+    assert out.iloc[0, 0] == pytest.approx(12.34)  # 传入真实 vwap 时优先用它
+
+
 def test_build_exec_price_bad_mode():
     z = _df([[1.0]])
     with pytest.raises(ValueError):

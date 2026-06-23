@@ -491,15 +491,15 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
             p.reindex(index=close.index, columns=close.columns).astype("float64")
         )
 
-    # 成交价：open 模式取 open；vwap 模式用复权典型价 (high+low+close)/3。
+    # 成交价：open 模式取 open；vwap 模式用真实成交额 VWAP（amount/volume 复权）。
     if exec_mode == "vwap":
-        high = _aligned("high")
-        low = _aligned("low")
-        open_ = close  # 占位：vwap 模式不读 open
+        vwap_panel = _aligned("vwap")
+        exec_price = execution.build_exec_price(
+            close, close, close, close, "vwap", vwap=vwap_panel
+        )
     else:
         open_ = _aligned("open")
-        high = low = close  # 占位：open 模式不读 high/low
-    exec_price = execution.build_exec_price(open_, high, low, close, exec_mode)
+        exec_price = execution.build_exec_price(open_, close, close, close, "open")
     # 成交价非正数 / NaN（停牌等）占位，避免 size 除零；停牌不可交易由容量约束兜底。
     exec_price = exec_price.where(exec_price > 0).ffill().fillna(1.0)
 
