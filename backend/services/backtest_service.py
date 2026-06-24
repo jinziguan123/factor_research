@@ -834,8 +834,14 @@ def run_walk_forward(
         F, close_aligned = F_raw.align(close, join="inner")
 
         # 逐窗口
+        from backend.services import metrics  # noqa: F811
+
+        # 全局下一日收益（forward 1d）：各窗口切片算 IS / OOS IC 用。
+        fwd_all = close_aligned.pct_change(fill_method=None).shift(-1)
         windows: list[dict] = []
         oos_equity_parts: list[pd.Series] = []
+        train_ics: list[float] = []
+        test_ics: list[float] = []
         cursor = full_start
         win_idx = 0
         while cursor + pd.Timedelta(days=train_days + test_days) <= full_end:
@@ -868,6 +874,20 @@ def run_walk_forward(
             cum = (1 + daily_ret).cumprod()
             oos_equity_parts.append(cum)
 
+            # 训练段 / 测试段 IC：训练高、测试塌（衰减比 < 1 或变号）= 过拟合信号。
+            ic_tr = metrics.cross_sectional_ic(
+                F.loc[cursor:train_end], fwd_all.loc[cursor:train_end]
+            )
+            ic_te = metrics.cross_sectional_ic(
+                F_test, fwd_all.loc[train_end:test_end]
+            )
+            train_ic = float(ic_tr.mean()) if not ic_tr.empty else float("nan")
+            test_ic = float(ic_te.mean()) if not ic_te.empty else float("nan")
+            if math.isfinite(train_ic):
+                train_ics.append(train_ic)
+            if math.isfinite(test_ic):
+                test_ics.append(test_ic)
+
             windows.append({
                 "window": win_idx,
                 "train_start": str(cursor.date()),
@@ -876,6 +896,8 @@ def run_walk_forward(
                 "test_end": str(test_end.date()),
                 "n_stocks": len(C_test.columns),
                 "total_return": float(cum.iloc[-1] - 1) if len(cum) > 0 else 0.0,
+                "train_ic": _nan_to_none(train_ic),
+                "test_ic": _nan_to_none(test_ic),
             })
             cursor += pd.Timedelta(days=step_days)
 
@@ -896,6 +918,21 @@ def run_walk_forward(
         sharpe = float(oos_ret.mean() / vol * np.sqrt(252)) if vol > 1e-12 else 0.0
         max_dd = float((oos_equity / oos_equity.cummax() - 1).min())
 
+        # IC 衰减汇总：oos/is 衰减比越接近 1 越稳健，< 1（甚至变号）提示过拟合。
+        is_ic_mean = float(np.mean(train_ics)) if train_ics else None
+        oos_ic_mean = float(np.mean(test_ics)) if test_ics else None
+        oos_ic_std = float(np.std(test_ics, ddof=1)) if len(test_ics) > 1 else None
+        oos_ic_ir = (
+            oos_ic_mean / oos_ic_std
+            if (oos_ic_mean is not None and oos_ic_std not in (None, 0.0))
+            else None
+        )
+        ic_decay_ratio = (
+            oos_ic_mean / is_ic_mean
+            if (is_ic_mean not in (None, 0.0) and oos_ic_mean is not None)
+            else None
+        )
+
         payload = {
             "method": "walk_forward",
             "params": {
@@ -903,6 +940,12 @@ def run_walk_forward(
                 "test_days": test_days,
                 "step_days": step_days,
                 "n_windows": len(windows),
+            },
+            "ic_decay": {
+                "is_ic_mean": _nan_to_none(is_ic_mean),
+                "oos_ic_mean": _nan_to_none(oos_ic_mean),
+                "oos_ic_ir": _nan_to_none(oos_ic_ir),
+                "ic_decay_ratio": _nan_to_none(ic_decay_ratio),
             },
             "summary": {
                 "total_return": total_ret,
