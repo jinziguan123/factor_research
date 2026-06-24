@@ -39,4 +39,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/param-sensitivity', component: () => import('@/pages/param-sensitivity/ParamSensitivityList.vue') },
   { path: '/param-sensitivity/new', component: () => import('@/pages/param-sensitivity/ParamSensitivityCreate.vue') },
   { path: '/param-sensitivity/:runId', component: () => import('@/pages/param-sensitivity/ParamSensitivityDetail.vue') },
+  { path: '/paper-accounts', component: () => import('@/pages/paper/PaperAccountList.vue') },
+  { path: '/paper-accounts/new', component: () => import('@/pages/paper/PaperAccountCreate.vue') },
+  { path: '/paper-accounts/:accountId', component: () => import('@/pages/paper/PaperAccountDetail.vue') },
 ]

@@ -39,6 +39,8 @@ const menuOptions: MenuOption[] = [
 
   { label: '实盘信号', key: '/signals' },
 
+  { label: '模拟盘', key: '/paper-accounts' },
+
   {
     label: '数据',
     key: 'group-data',
