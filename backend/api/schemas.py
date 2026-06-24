@@ -358,6 +358,22 @@ class PoolImportIn(BaseModel):
 # ---------------------------- 响应包装 ----------------------------
 
 
+class CreatePaperAccountIn(BaseModel):
+    """``POST /api/paper-accounts`` 请求体：新建模拟盘账户。
+
+    绑定一个策略(因子组合 + 合成方法 + 股票池),后续手动/定时 rebalance 时
+    跑 signal 出目标持仓、用快照价撮合。
+    """
+
+    name: str = Field(..., min_length=1, max_length=128)
+    factor_items: list[dict] = Field(..., min_length=1)
+    method: str = "equal"
+    pool_id: int
+    n_groups: int = Field(default=5, ge=2, le=20)
+    top_n: int | None = Field(default=None, ge=1)
+    init_cash: float = Field(default=1e6, gt=0)
+
+
 def ok(data: Any = None) -> dict:
     """统一成功响应。
 

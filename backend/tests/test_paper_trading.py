@@ -8,7 +8,9 @@ signal/DB，验证串联无 bug(防 run_backtest 式盲区)。
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
+from backend.api.schemas import CreatePaperAccountIn
 from backend.execution_layer import OrderSide, SimulatedBroker
 from backend.services import paper_trading_service as pt
 
@@ -116,3 +118,23 @@ def test_rebalance_orchestration(monkeypatch):
     _, new_pos = calls["saved"]
     assert "C" not in new_pos
     assert "A" in new_pos and "B" in new_pos
+
+
+# ---------------------------- CreatePaperAccountIn schema 校验 ----------------------------
+
+
+def test_paper_account_schema_valid_defaults():
+    m = CreatePaperAccountIn(name="t", factor_items=[{"factor_id": "x"}], pool_id=1)
+    assert m.init_cash == 1e6 and m.method == "equal" and m.n_groups == 5
+
+
+def test_paper_account_schema_rejects_empty_factor_items():
+    with pytest.raises(ValidationError):
+        CreatePaperAccountIn(name="t", factor_items=[], pool_id=1)
+
+
+def test_paper_account_schema_rejects_nonpositive_cash():
+    with pytest.raises(ValidationError):
+        CreatePaperAccountIn(
+            name="t", factor_items=[{"factor_id": "x"}], pool_id=1, init_cash=0,
+        )

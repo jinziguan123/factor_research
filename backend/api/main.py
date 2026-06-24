@@ -41,6 +41,7 @@ from backend.api.routers import (
     fundamentals,
     indices,
     metrics_endpoint,
+    paper_trading,
     param_sensitivity,
     pattern_search,
     pools,
@@ -352,3 +353,4 @@ app.include_router(metrics_endpoint.router)
 app.include_router(pattern_search.router)
 app.include_router(chanlun.router)
 app.include_router(observability_router)  # GET /metrics（Prometheus 抓取）
+app.include_router(paper_trading.router)  # 模拟盘(纸上交易)
