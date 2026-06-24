@@ -252,17 +252,19 @@ pf = vbt.Portfolio.from_orders(
 
 ---
 
-## 10. 后续 Roadmap（本次不做，登记备忘）
+## 10. 后续 Roadmap —— 已全部落地（2026-06-23）
 
-按"走向实盘"的优先级，回测真实性之后的下一批：
+按"走向实盘"的优先级，回测真实性之后的下一批已全部实现并测试通过：
 
-- **样本外验证框架**：Walk-Forward 滚动回测 + Purged K-Fold，识别过拟合（如 V1–V14 多版本调参）。
-- **组合级风控**：回撤熔断、行业/风格集中度约束、目标波动率。
-- **卖出侧涨跌停滞留**：`order_func_nb` 精确建模"想卖卖不掉"。
-- **真实成交额 VWAP**：`data_service` 扩展 `amount/volume` 复权，替换典型价近似。
-- **执行层对接**：QMT/CTP 模拟盘，信号→订单 last mile。
-- **组合优化器**：均值-方差 / 风险平价 / IC 加权，替换等权分配。
-- **可观测性**：Prometheus + Grafana，任务与数据健康监控。
+- ✅ **样本外验证框架**：`services/validation.py` —— Walk-Forward 滚动 + Purged K-Fold（embargo 防泄露），`oos_validation_report` 用 IC 衰减比量化过拟合。测试 13。
+- ✅ **组合级风控**：`services/risk_control.py` —— 集中度（个股水填充 + 行业缩减）、目标波动率缩放、回撤熔断；`apply_portfolio_risk` 接入回测权重链路。测试 11。
+- ✅ **卖出侧涨跌停滞留**：`execution.apply_trading_constraints` —— 在 size 层逐行路径裁剪建模封板滞留（等价 `order_func_nb` 且更简洁），与容量约束共用 prev 路径，`lock_price_limit` 默认开启。
+- ✅ **真实成交额 VWAP**：`data_service` 支持 vwap 字段（`amount/volume` 复权），替换复权典型价近似（典型价仅作回退）。
+- ✅ **执行层对接**：`execution_layer/` —— 统一 `Broker` 抽象 + 内存 `SimulatedBroker`（A 股不对称费用/资金/持仓约束）。测试 8。实盘 QMT/CTP 按接口扩展（需外部 SDK + 账户，本仓库不内置）。
+- ✅ **组合优化器**：`services/optimizer.py` —— 均值-方差 / 风险平价 / 逆波动率 / IC 加权合成 + 换手预算；`reweight_intragroup` 接入回测组内加权（`weighting` 参数）。测试 15。
+- ✅ **可观测性**：`observability/` + `deploy/observability/` —— 零依赖 Prometheus 导出 + `/metrics` 端点 + Grafana 监控栈样例。测试 6。
+
+> 仍依赖外部环境、本仓库不内置的部分：QMT/CTP 实盘适配器的真实对接（券商 SDK + 资金账户）、Prometheus/Grafana 生产部署（持久化 / 告警 / 抓取鉴权）。这些已留好 `Broker` 接口与 `deploy/observability/` 配置样例，就绪后即可接。
 
 ---
 
@@ -271,6 +273,6 @@ pf = vbt.Portfolio.from_orders(
 | 近似 | 影响 | 接受理由 |
 |------|------|---------|
 | 成交方向用 `W_exec.diff()` 符号 | 现金约束下少买时方向可能不符 | 一阶近似，调仓场景绝大多数一致 |
-| VWAP 用复权典型价 (h+l+c)/3 | 与真实成交额 VWAP 有偏差 | 量纲自洽、数据现成；精确版进 roadmap |
+| ~~VWAP 用复权典型价~~ | — | ✅ 已升级为真实成交额 VWAP（§10），典型价仅作回退 |
 | 容量/冲击用成交额比值 | qfq 复权二阶偏差 | factor 近 1；避开股/手单位歧义 |
-| 卖出涨跌停不滞留 | 跌停时高估可卖出量 | 框架限制，进 roadmap，前端提示 |
+| ~~卖出涨跌停不滞留~~ | — | ✅ 已实现封板滞留（§10，size 层路径裁剪），`lock_price_limit` 默认开启 |
