@@ -112,7 +112,8 @@ async def _rate_limit(request: Request, call_next: Callable):
 async def _api_key_auth(request: Request, call_next: Callable):
     if not settings.api_key:
         return await call_next(request)
-    if request.url.path in ("/api/health", "/api/factors/categories"):
+    # /metrics 供 Prometheus 抓取（抓取请求不带 x-api-key），必须豁免，否则 target DOWN。
+    if request.url.path in ("/api/health", "/api/factors/categories", "/metrics"):
         return await call_next(request)
     key = request.headers.get("x-api-key", "")
     if key != settings.api_key:
