@@ -38,6 +38,7 @@ class SimulatedBroker(Broker):
         transfer_fee_bps: float = 0.1,
         lot_size: int = 100,
         allow_partial: bool = True,
+        init_positions: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         self.cash = float(init_cash)
         self.commission_bps = commission_bps
@@ -45,7 +46,11 @@ class SimulatedBroker(Broker):
         self.transfer_fee_bps = transfer_fee_bps
         self.lot_size = lot_size
         self.allow_partial = allow_partial
-        self._pos: dict[str, Position] = {}
+        # 从已有持仓恢复（模拟盘跨调仓持久化后重建 broker 状态）：{symbol: (qty, avg_price)}
+        self._pos: dict[str, Position] = {
+            s: Position(s, float(q), float(avg))
+            for s, (q, avg) in (init_positions or {}).items()
+        }
         self._fills: list[Fill] = []
         self._orders: list[Order] = []
         self._oid = 0
