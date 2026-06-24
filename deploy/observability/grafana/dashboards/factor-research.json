@@ -1,0 +1,75 @@
+{
+  "title": "Factor Research 监控",
+  "uid": "factor-research",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "任务速率（按结果）",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind, status) (rate(fr_task_total[5m]))",
+          "legendFormat": "{{kind}} {{status}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "任务时延 P95（秒）",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (kind, le) (rate(fr_task_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{kind}} p95"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "任务失败累计",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (fr_task_total{status=\"failed\"})",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "数据健康度",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "异常", "color": "red" } } },
+            { "type": "value", "options": { "1": { "text": "健康", "color": "green" } } }
+          ]
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "fr_data_health",
+          "legendFormat": "{{check}}"
+        }
+      ]
+    }
+  ]
+}

@@ -50,6 +50,7 @@ from backend.api.routers import (
 )
 from backend.api.schemas import ok
 from backend.config import settings
+from backend.observability.router import router as observability_router
 from backend.runtime.factor_registry import FactorRegistry
 from backend.runtime.hot_reload import start_hot_reload
 
@@ -349,3 +350,4 @@ app.include_router(factor_assistant.router)
 app.include_router(metrics_endpoint.router)
 app.include_router(pattern_search.router)
 app.include_router(chanlun.router)
+app.include_router(observability_router)  # GET /metrics（Prometheus 抓取）

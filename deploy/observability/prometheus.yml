@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: factor-research-backend
+    metrics_path: /metrics
+    static_configs:
+      # backend 与本栈在同一 docker 网络时用服务名；否则改为 host.docker.internal:8000
+      - targets: ['backend:8000']
+        labels:
+          service: factor-research
