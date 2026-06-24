@@ -21,3 +21,36 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+  # ---- 可观测性（Prometheus 抓取 backend:/metrics，Grafana 展示）----
+  # 与 backend 同 compose 网络，prometheus.yml 的 targets 用服务名 backend:8000 直达，
+  # 配置/面板来自 deploy/observability。生产请改 Grafana 默认密码 + 收紧端口暴露。
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:

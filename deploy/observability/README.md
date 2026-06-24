@@ -17,17 +17,27 @@
 
 ## 启动
 
+**方式一（推荐）：随主 compose 一起起。** 监控已整合进项目根 `docker-compose.yml`，
+backend / frontend / prometheus / grafana 在同一网络，开箱即用：
+
+```bash
+docker compose up -d
+```
+
+**方式二：单独起监控栈**（backend 已在别处运行时）：
+
 ```bash
 docker compose -f deploy/observability/docker-compose.yml up -d
 ```
 
-- Prometheus：http://localhost:9090
-- Grafana：http://localhost:3000 （admin / admin），已预置数据源与「Factor Research 监控」面板。
+起好后：
+- Prometheus：http://localhost:9090 （`/targets` 看 backend 是否 UP）
+- Grafana：http://localhost:3000 （首次 admin / admin，**请改密码**），已预置数据源与「Factor Research 监控」面板。
 
 ## 网络
 
-`prometheus.yml` 的抓取目标默认是 `backend:8000`（假设 backend 与本栈在同一 docker
-网络）。若 backend 跑在宿主机或别处，把 targets 改成 `host.docker.internal:8000` 或实际地址。
+随主 compose 启动时，`prometheus.yml` 的 `backend:8000` 直接走 compose 网络的服务名，无需改动。
+单独起监控栈且 backend 跑在宿主机时，把 targets 改成 `host.docker.internal:8000`。
 
 ## 生产化（外部依赖，本仓库不内置）
 
