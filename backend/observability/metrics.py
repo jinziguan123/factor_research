@@ -148,29 +148,10 @@ class MetricsRegistry:
         return "\n".join(lines) + "\n"
 
 
-# ---------------------------- 全局 registry + 业务指标 ----------------------------
+# ---------------------------- 全局 registry ----------------------------
 
+# 注意：任务计数 / 时延 / 数据健康改由 ``observability/db_metrics.py`` 从 MySQL 的
+# fr_*_runs 表实时派生——回测/评估等任务在 ProcessPool worker 子进程执行，其进程内
+# 计数器无法被主进程 /metrics 读取（内存隔离）；从持久化的 DB 状态派生则跨进程一致、
+# 重启不丢。此 REGISTRY 保留给未来真正在主进程内累积的指标（如 HTTP 请求计数）。
 REGISTRY = MetricsRegistry()
-
-TASK_TOTAL = REGISTRY.counter(
-    "fr_task_total", "因子任务计数（按类型与结果）", ["kind", "status"]
-)
-TASK_DURATION = REGISTRY.histogram(
-    "fr_task_duration_seconds", "因子任务时延（秒）", ["kind"]
-)
-DATA_HEALTH = REGISTRY.gauge(
-    "fr_data_health", "数据健康度（1=健康，0=异常）", ["check"]
-)
-
-
-def observe_task(kind: str, status: str, duration_s: float | None = None) -> None:
-    """业务埋点便捷函数：记录一次任务的结果计数与时延。
-
-    Args:
-        kind: 任务类型，如 ``"eval"`` / ``"backtest"`` / ``"cost_sensitivity"``。
-        status: ``"success"`` / ``"failed"`` / ``"aborted"``。
-        duration_s: 耗时秒数，None 则不记时延。
-    """
-    TASK_TOTAL.inc(kind=kind, status=status)
-    if duration_s is not None:
-        TASK_DURATION.observe(float(duration_s), kind=kind)

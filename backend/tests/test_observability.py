@@ -54,12 +54,3 @@ def test_label_escaping():
     c.inc(msg='a"b\\c')
     line = [x for x in c.render() if x.startswith("fr_e_total{")][0]
     assert '\\"' in line and "\\\\" in line
-
-
-def test_observe_task_updates_global_metrics():
-    before = dict(om.TASK_TOTAL._v)
-    om.observe_task("eval", "success", duration_s=1.5)
-    key = ("eval", "success")
-    assert om.TASK_TOTAL._v[key] == before.get(key, 0.0) + 1.0
-    # 时延落入直方图
-    assert om.TASK_DURATION._cnt[("eval",)] >= 1

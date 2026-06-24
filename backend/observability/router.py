@@ -8,6 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import PlainTextResponse
 
+from backend.observability.db_metrics import render_db_metrics
 from backend.observability.metrics import REGISTRY
 
 router = APIRouter(tags=["observability"])
@@ -15,5 +16,6 @@ router = APIRouter(tags=["observability"])
 
 @router.get("/metrics", response_class=PlainTextResponse)
 def prometheus_metrics() -> str:
-    """渲染全局 REGISTRY 为 Prometheus 文本格式（version=0.0.4）。"""
-    return REGISTRY.render()
+    """Prometheus 文本（version 0.0.4）：任务指标从 MySQL 派生（跨进程一致），
+    叠加进程内 REGISTRY（未来主进程指标）。"""
+    return render_db_metrics() + REGISTRY.render()

@@ -36,7 +36,6 @@ import pandas as pd
 
 from backend.config import settings
 from backend.engine.base_factor import FactorContext
-from backend.observability.metrics import observe_task
 from backend.runtime.factor_registry import FactorRegistry
 from backend.services import execution, optimizer, risk_control
 from backend.services.abort_check import AbortedError, check_abort
@@ -625,9 +624,6 @@ def run_backtest(run_id: str, body: dict) -> None:
         - 成功写 ``fr_backtest_artifacts`` 三条（equity / orders / trades）；
         - 成功写 ``data/artifacts/<run_id>/{equity,orders,trades}.parquet``。
     """
-    import time
-
-    start_ts = time.monotonic()
     try:
         _update_status(run_id, status="running", started=True, progress=5)
         # 协作式中断：阶段边界轮询 status='aborting'，命中就抛 AbortedError
@@ -747,18 +743,15 @@ def run_backtest(run_id: str, body: dict) -> None:
             c.commit()
 
         _update_status(run_id, status="success", progress=100, finished=True)
-        observe_task("backtest", "success", time.monotonic() - start_ts)
     except AbortedError as exc:
         # 主动中断：落 aborted，不写 error_message；与 failed 区分语义，前端按不同 badge 展示。
         log.info("backtest aborted: run_id=%s reason=%s", run_id, exc)
-        observe_task("backtest", "aborted", time.monotonic() - start_ts)
         try:
             _update_status(run_id, status="aborted", finished=True)
         except Exception:
             log.exception("_update_status 落 aborted 失败: run_id=%s", run_id)
     except Exception:
         log.exception("backtest failed: run_id=%s", run_id)
-        observe_task("backtest", "failed", time.monotonic() - start_ts)
         # 嵌套 try：_update_status 自己也可能抛（例如 DB 挂了），避免把 run 永远卡在 running。
         try:
             _update_status(
