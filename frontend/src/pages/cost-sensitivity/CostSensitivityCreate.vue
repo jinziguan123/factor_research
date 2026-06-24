@@ -8,7 +8,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NSelect, NInputNumber,
-  NDatePicker, NDynamicTags, NButton, NSwitch, NTooltip, useMessage,
+  NDatePicker, NDynamicTags, NButton, NSwitch, NTooltip, NCollapse, NCollapseItem, useMessage,
 } from 'naive-ui'
 import { useFactors, useFactor } from '@/api/factors'
 import { useCreateCostSensitivity } from '@/api/cost_sensitivity'
@@ -46,7 +46,14 @@ const nGroups = ref(5)
 const rebalancePeriod = ref(1)
 const position = ref('top')
 const initCash = ref(1e7)
-const filterPriceLimit = ref(false)
+const filterPriceLimit = ref(true)
+// 执行/成本模型（与 BacktestCreate 对齐；cost_bps_list 现为滑点扫描维度）
+const execPrice = ref('open')
+const commissionBps = ref(2.5)
+const stampTaxBps = ref(5.0)
+const transferFeeBps = ref(0.1)
+const impactCoef = ref(0.1)
+const maxVolumePct = ref(0.10)
 
 // cost_bps_list：NDynamicTags 操作字符串数组，提交时再转 number。
 // 默认 5 个点覆盖"无 / 典型 / 中 / 偏高 / 极端"四档，用户可任意增删。
@@ -55,6 +62,11 @@ const costBpsList = ref<string[]>(['0', '3', '5', '10', '20'])
 const positionOptions = [
   { label: '做多头部 (top)', value: 'top' },
   { label: '多空对冲 (long_short)', value: 'long_short' },
+]
+
+const execPriceOptions = [
+  { label: '次日开盘价 (T+1 open)', value: 'open' },
+  { label: '次日 VWAP (T+1 vwap)', value: 'vwap' },
 ]
 
 // 因子切换：默认参数回填
@@ -112,6 +124,12 @@ async function handleSubmit() {
     rebalance_period: rebalancePeriod.value,
     position: position.value,
     init_cash: initCash.value,
+    exec_price: execPrice.value,
+    commission_bps: commissionBps.value,
+    stamp_tax_bps: stampTaxBps.value,
+    transfer_fee_bps: transferFeeBps.value,
+    impact_coef: impactCoef.value,
+    max_volume_pct: maxVolumePct.value,
     cost_bps_list: unique,
     filter_price_limit: filterPriceLimit.value,
   }
@@ -178,7 +196,42 @@ async function handleSubmit() {
         <n-input-number v-model:value="initCash" :min="10000" :step="1000000" style="width: 200px" />
       </n-form-item>
 
-      <n-form-item label="成本点 (bps)">
+      <!-- 成交价口径 -->
+      <n-form-item label="成交价">
+        <n-select v-model:value="execPrice" :options="execPriceOptions" style="width: 240px" />
+      </n-form-item>
+
+      <!-- 固定成本（高级，默认折叠）：滑点之外的法定/固定费用，扫描维度走 cost_bps_list -->
+      <n-collapse style="margin: 8px 0 20px">
+        <n-collapse-item title="固定成本（高级·滑点之外的费用）" name="cost">
+          <n-form-item label="佣金(bps)">
+            <n-input-number v-model:value="commissionBps" :min="0" :max="100" :precision="2" style="width: 160px" />
+          </n-form-item>
+          <n-form-item label="印花税(bps·仅卖出)">
+            <n-input-number v-model:value="stampTaxBps" :min="0" :max="100" :precision="2" style="width: 160px" />
+          </n-form-item>
+          <n-form-item label="过户费(bps)">
+            <n-input-number v-model:value="transferFeeBps" :min="0" :max="100" :precision="2" style="width: 160px" />
+          </n-form-item>
+          <n-form-item label="市场冲击系数">
+            <n-input-number v-model:value="impactCoef" :min="0" :max="10" :precision="3" style="width: 160px" />
+          </n-form-item>
+          <n-form-item label="单日成交额上限(0=关闭)">
+            <n-input-number v-model:value="maxVolumePct" :min="0" :max="1" :precision="3" style="width: 160px" />
+          </n-form-item>
+        </n-collapse-item>
+      </n-collapse>
+
+      <!-- 滑点扫描维度（原 cost_bps_list，语义已升级为滑点假设） -->
+      <n-form-item>
+        <template #label>
+          <n-tooltip>
+            <template #trigger>
+              <span style="cursor: help; border-bottom: 1px dashed #999">滑点扫描点 (bps)</span>
+            </template>
+            扫描不同滑点假设对收益的侵蚀（固定佣金 / 印花税 / 过户费不变）。每个点是一档滑点(bp)。
+          </n-tooltip>
+        </template>
         <n-dynamic-tags v-model:value="costBpsList" />
       </n-form-item>
 
