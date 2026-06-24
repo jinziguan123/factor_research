@@ -681,8 +681,8 @@ def run_backtest(run_id: str, body: dict) -> None:
         # 7) 指标 + JSON payload
         stats = pf.stats()
         stats_payload = _stats_to_payload(stats)
-        # 基准对比：等权市场组合
-        stats_payload["benchmark"] = _benchmark_metrics(equity, close)
+        # 基准对比：等权市场组合（close 已封装进 inputs）
+        stats_payload["benchmark"] = _benchmark_metrics(equity, inputs.close)
 
         # 核心结构化指标：尽量从 stats payload 里取，字段名按 VectorBT 约定；
         # stats 里 "Total Return [%]" 是百分数，换成小数更通用。
