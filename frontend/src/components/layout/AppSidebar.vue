@@ -31,6 +31,7 @@ const menuOptions: MenuOption[] = [
       { label: '栅格搜索', key: '/evals/grid-search/list' },
       { label: '多因子合成', key: '/compositions' },
       { label: '回测记录', key: '/backtests' },
+      { label: '样本外验证', key: '/backtests/walk-forward' },
       { label: '成本敏感性', key: '/cost-sensitivity' },
       { label: '参数敏感性', key: '/param-sensitivity' },
     ],

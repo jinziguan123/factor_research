@@ -42,6 +42,14 @@ export function useCreateBacktest() {
   })
 }
 
+/** 创建 walk-forward 样本外验证任务（复用回测 run 表，结果 payload.method='walk_forward'）。 */
+export function useCreateWalkForward() {
+  return useMutation({
+    mutationFn: (body: Record<string, any>) =>
+      client.post('/backtests/walk-forward', body).then(r => r.data),
+  })
+}
+
 /** 获取单个回测详情（带轮询） */
 export function useBacktest(runId: Ref<string>) {
   return useQuery<BacktestRun>({
