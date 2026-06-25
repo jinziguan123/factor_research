@@ -42,6 +42,41 @@ const nGroups = ref(5)
 const trainDays = ref(252)
 const testDays = ref(63)
 const stepDays = ref<number | null>(null)
+const autoHint = ref('')
+
+function recommendWindows(range: [number, number]) {
+  const totalCalDays = (range[1] - range[0]) / (1000 * 60 * 60 * 24)
+  const totalTradeDays = Math.round(totalCalDays * 252 / 365)
+  if (totalTradeDays < 120) {
+    autoHint.value = `区间约 ${totalTradeDays} 个交易日，太短，无法切出有效窗口`
+    return
+  }
+  // 目标：3~8 个不重叠窗口，训练窗 ≈ 1 年，测试窗 ≈ 训练窗的 1/4
+  let train: number, test: number
+  if (totalTradeDays <= 504) {
+    // ≤2年：紧凑模式
+    test = Math.max(21, Math.round(totalTradeDays * 0.12))
+    train = Math.round(totalTradeDays * 0.5)
+  } else if (totalTradeDays <= 1260) {
+    // 2~5年：标准模式
+    train = 252
+    test = 63
+  } else {
+    // >5年：宽裕模式
+    train = Math.min(504, Math.round(totalTradeDays * 0.35))
+    test = Math.round(train / 4)
+  }
+  const nWindows = Math.floor((totalTradeDays - train) / test)
+  trainDays.value = train
+  testDays.value = test
+  stepDays.value = null
+  autoHint.value = `区间约 ${totalTradeDays} 个交易日，推荐训练 ${train} / 测试 ${test}，约 ${nWindows} 个窗口`
+}
+
+watch(dateRange, (v) => {
+  if (v) recommendWindows(v)
+  else autoHint.value = ''
+})
 
 watch(() => selectedFactor.data.value, (f) => {
   if (f?.default_params) factorParams.value = { ...f.default_params }
@@ -113,6 +148,10 @@ async function handleSubmit() {
 
       <n-form-item label="分组数">
         <n-input-number v-model:value="nGroups" :min="2" :max="20" style="width: 160px" />
+      </n-form-item>
+
+      <n-form-item v-if="autoHint" label=" ">
+        <span style="color: #18a058; font-size: 12px">{{ autoHint }}</span>
       </n-form-item>
 
       <n-form-item label="训练窗(交易日)">
