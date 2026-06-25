@@ -975,3 +975,76 @@ class TestAlphalensExtras:
             pd.DataFrame(), pd.DataFrame(), fwd_periods=[1], n_groups=5,
         )
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# 因子等级判定 _build_quality_verdict 测试
+# ---------------------------------------------------------------------------
+
+class TestQualityVerdict:
+
+    @staticmethod
+    def _mk_g_rets(n_groups: int = 5, n_dates: int = 60, monotonic: bool = True) -> pd.DataFrame:
+        idx = pd.date_range("2024-01-01", periods=n_dates, freq="B")
+        if monotonic:
+            base = np.linspace(0.0002, 0.002, n_groups)
+            data = np.tile(base, (n_dates, 1)) + np.random.default_rng(0).normal(0, 0.0001, (n_dates, n_groups))
+        else:
+            data = np.random.default_rng(0).normal(0, 0.01, (n_dates, n_groups))
+        return pd.DataFrame(data, index=idx, columns=list(range(n_groups)))
+
+    def test_grade_s(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": 0.08, "ic_ir": 1.0, "long_short_sharpe": 2.0, "turnover_mean": 0.3}
+        v = _build_quality_verdict(s, self._mk_g_rets(monotonic=True))
+        assert v["grade"] == "S"
+        assert v["next_action"] == "validate"
+
+    def test_grade_a(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": 0.05, "ic_ir": 0.6, "long_short_sharpe": 1.2, "turnover_mean": 0.4}
+        v = _build_quality_verdict(s, self._mk_g_rets(monotonic=False))
+        assert v["grade"] == "A"
+        assert v["next_action"] == "param_sensitivity"
+
+    def test_grade_b(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": 0.04, "ic_ir": 0.35, "long_short_sharpe": 0.5, "turnover_mean": 0.8}
+        v = _build_quality_verdict(s, self._mk_g_rets(monotonic=False))
+        assert v["grade"] == "B"
+        assert v["next_action"] == "compose"
+
+    def test_grade_c(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": 0.025, "ic_ir": 0.15, "long_short_sharpe": 0.2, "turnover_mean": 1.0}
+        v = _build_quality_verdict(s, self._mk_g_rets(monotonic=False))
+        assert v["grade"] == "C"
+        assert v["next_action"] == "evolve"
+
+    def test_grade_d_negate(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": -0.01, "ic_ir": 0.1, "long_short_sharpe": -0.5, "turnover_mean": 1.0}
+        v = _build_quality_verdict(s, self._mk_g_rets(monotonic=False))
+        assert v["grade"] == "D"
+        assert v["next_action"] == "negate"
+
+    def test_grade_d_rethink(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": 0.005, "ic_ir": 0.05, "long_short_sharpe": 0.01, "turnover_mean": 1.5}
+        v = _build_quality_verdict(s, self._mk_g_rets(monotonic=False))
+        assert v["grade"] == "D"
+        assert v["next_action"] == "rethink"
+
+    def test_empty_g_rets(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": 0.08, "ic_ir": 1.0, "long_short_sharpe": 2.0, "turnover_mean": 0.3}
+        v = _build_quality_verdict(s, pd.DataFrame())
+        assert v["monotonicity"] == 0.0
+        assert v["grade"] in ("A", "B", "C", "D", "S")
+
+    def test_all_none_metrics(self):
+        from backend.services.eval_service import _build_quality_verdict
+        s = {"ic_mean": None, "ic_ir": None, "long_short_sharpe": None, "turnover_mean": None}
+        v = _build_quality_verdict(s, pd.DataFrame())
+        assert v["grade"] == "D"
+        assert v["next_action"] == "rethink"

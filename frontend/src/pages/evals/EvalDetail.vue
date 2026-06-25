@@ -258,6 +258,49 @@ function overallBadge(level: string): { type: 'success' | 'warning' | 'error'; t
   return { type: 'success', text: '整体健康' }
 }
 
+// 因子等级判定卡片
+interface VerdictPayload {
+  grade: string
+  grade_label: string
+  next_action: string
+  next_action_label: string
+  monotonicity: number | null
+  metrics_summary: Record<string, number | null>
+}
+const verdict = computed<VerdictPayload | null>(() => {
+  const v = payload.value?.verdict
+  if (!v || !v.grade) return null
+  return v as VerdictPayload
+})
+function gradeColor(grade: string): string {
+  const map: Record<string, string> = { S: '#e6a700', A: '#18a058', B: '#2080f0', C: '#f0a020', D: '#d03050' }
+  return map[grade] || '#999'
+}
+function handleVerdictAction() {
+  if (!verdict.value || !evalRun.value) return
+  const fid = evalRun.value.factor_id
+  switch (verdict.value.next_action) {
+    case 'validate':
+      router.push(`/backtests/walk-forward/new?factor_id=${fid}`)
+      break
+    case 'param_sensitivity':
+      router.push(`/backtests/walk-forward/new?factor_id=${fid}`)
+      break
+    case 'compose':
+      router.push('/compositions/new')
+      break
+    case 'evolve':
+      openEvolveDialog()
+      break
+    case 'negate':
+      handleNegateFactor()
+      break
+    case 'rethink':
+      router.push('/')
+      break
+  }
+}
+
 // 后端 SELECT * 直出 params_json 列（JSON 字符串），这里解析一次供展示
 const paramsDisplay = computed(() => {
   const raw = evalRun.value?.params_json
@@ -358,6 +401,28 @@ const rankIcMeanDiverged = computed(() =>
       <n-alert v-if="evalRun?.status === 'failed'" type="error" title="运行失败" style="margin-bottom: 16px">
         {{ evalRun.error_message || '未知错误' }}
       </n-alert>
+
+      <!-- 因子等级判定卡片 -->
+      <div v-if="evalRun?.status === 'success' && verdict" class="verdict-card" :style="{ borderColor: gradeColor(verdict.grade) }" style="margin-bottom: 16px">
+        <div class="verdict-left" :style="{ color: gradeColor(verdict.grade) }">
+          <div class="verdict-grade">{{ verdict.grade }}</div>
+          <div class="verdict-label">{{ verdict.grade_label }}</div>
+        </div>
+        <div class="verdict-center">
+          <div class="verdict-metrics">
+            <span>IC: <b>{{ fmtNum(verdict.metrics_summary?.ic_mean) }}</b></span>
+            <span>IC IR: <b>{{ fmtNum(verdict.metrics_summary?.ic_ir) }}</b></span>
+            <span>Sharpe: <b>{{ fmtNum(verdict.metrics_summary?.long_short_sharpe) }}</b></span>
+            <span>换手: <b>{{ fmtNum(verdict.metrics_summary?.turnover_mean, 2) }}</b></span>
+            <span>单调性: <b>{{ fmtNum(verdict.monotonicity, 2) }}</b></span>
+          </div>
+        </div>
+        <div class="verdict-right">
+          <n-button type="primary" size="small" @click="handleVerdictAction" style="border-radius: 14px">
+            {{ verdict.next_action_label }}
+          </n-button>
+        </div>
+      </div>
 
       <!-- L1.2 借鉴 RD-Agent 反馈三元组：service 写的诊断 + 改进建议（success/failed 都可能写） -->
       <n-alert
@@ -970,6 +1035,41 @@ const rankIcMeanDiverged = computed(() =>
 .ts-sort-th:hover {
   color: var(--n-text-color, #333);
   background: var(--n-merged-color-fill, #f5f5f5);
+}
+.verdict-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 16px 20px;
+  border: 2px solid;
+  border-radius: 8px;
+  background: var(--n-color, #fff);
+}
+.verdict-left {
+  text-align: center;
+  min-width: 64px;
+}
+.verdict-grade {
+  font-size: 36px;
+  font-weight: 800;
+  line-height: 1;
+}
+.verdict-label {
+  font-size: 12px;
+  margin-top: 4px;
+}
+.verdict-center {
+  flex: 1;
+}
+.verdict-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  font-size: 13px;
+  color: var(--n-text-color-2, #606266);
+}
+.verdict-right {
+  flex-shrink: 0;
 }
 .health-cell {
   display: flex;

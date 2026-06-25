@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.stats import spearmanr
 
 from backend.engine.base_factor import FactorContext
 from backend.runtime.factor_registry import FactorRegistry
@@ -556,6 +557,119 @@ def _build_health(
     return {"overall": overall, "items": items}
 
 
+# ---- 因子等级判定（A 股日频横截面因子经验阈值）----
+
+_GRADE_LABELS = {
+    "S": "顶级因子",
+    "A": "实战可用",
+    "B": "信号可合成",
+    "C": "边缘因子",
+    "D": "无效因子",
+}
+
+_NEXT_ACTION_LABELS = {
+    "validate": "Walk-Forward 验证 → 回测 → 模拟盘",
+    "param_sensitivity": "参数敏感性分析 + 滚动稳定性验证",
+    "compose": "多因子合成（与互补因子组合放大信号）",
+    "evolve": "信号增强（EMA 平滑 / 变量交叉 / 窗口调优）",
+    "negate": "尝试反转方向（取负号）",
+    "rethink": "重新审视假设，更换因子思路",
+}
+
+
+def _safe_ge(v: Any, threshold: float) -> bool:
+    return isinstance(v, (int, float)) and math.isfinite(v) and v >= threshold
+
+
+def _safe_le(v: Any, threshold: float) -> bool:
+    return isinstance(v, (int, float)) and math.isfinite(v) and v <= threshold
+
+
+def _safe_gt(v: Any, threshold: float) -> bool:
+    return isinstance(v, (int, float)) and math.isfinite(v) and v > threshold
+
+
+def _safe_lt(v: Any, threshold: float) -> bool:
+    return isinstance(v, (int, float)) and math.isfinite(v) and v < threshold
+
+
+def _safe_abs_ge(v: Any, threshold: float) -> bool:
+    return isinstance(v, (int, float)) and math.isfinite(v) and abs(v) >= threshold
+
+
+def _group_monotonicity(g_rets: pd.DataFrame) -> float:
+    if g_rets.empty or g_rets.shape[1] < 3:
+        return 0.0
+    group_ann = g_rets.mean() * 252
+    valid = group_ann.dropna()
+    if len(valid) < 3:
+        return 0.0
+    rho, _ = spearmanr(range(len(valid)), valid.values)
+    if not math.isfinite(rho):
+        return 0.0
+    return abs(rho)
+
+
+def _build_quality_verdict(structured: dict, g_rets: pd.DataFrame) -> dict:
+    ic_mean = structured.get("ic_mean")
+    ic_ir = structured.get("ic_ir")
+    sharpe = structured.get("long_short_sharpe")
+    turnover = structured.get("turnover_mean")
+    mono = _group_monotonicity(g_rets)
+
+    if (
+        _safe_ge(ic_ir, 0.8)
+        and _safe_ge(sharpe, 1.5)
+        and _safe_le(turnover, 0.5)
+        and mono >= 0.9
+    ):
+        grade = "S"
+    elif (
+        _safe_ge(ic_ir, 0.5)
+        and _safe_ge(sharpe, 1.0)
+        and _safe_le(turnover, 0.6)
+    ):
+        grade = "A"
+    elif (
+        _safe_abs_ge(ic_mean, 0.03)
+        and _safe_ge(ic_ir, 0.3)
+        and _safe_gt(sharpe, 0)
+    ):
+        grade = "B"
+    elif _safe_abs_ge(ic_mean, 0.02) and _safe_gt(sharpe, 0):
+        grade = "C"
+    else:
+        grade = "D"
+
+    if grade == "D" and _safe_lt(sharpe, 0):
+        next_action = "negate"
+    elif grade == "D":
+        next_action = "rethink"
+    elif grade == "C":
+        next_action = "evolve"
+    elif grade == "B":
+        next_action = "compose"
+    elif grade == "A":
+        next_action = "param_sensitivity"
+    else:
+        next_action = "validate"
+
+    return {
+        "grade": grade,
+        "grade_label": _GRADE_LABELS[grade],
+        "next_action": next_action,
+        "next_action_label": _NEXT_ACTION_LABELS[next_action],
+        "monotonicity": _nan_to_none(mono),
+        "metrics_summary": {
+            "ic_mean": ic_mean,
+            "ic_ir": ic_ir,
+            "long_short_sharpe": sharpe,
+            "turnover_mean": turnover,
+            "monotonicity": _nan_to_none(mono),
+        },
+    }
+
+
 # ---------------------------- 公共评估内核（供 composition_service 复用）----------------------------
 
 
@@ -628,6 +742,16 @@ def evaluate_factor_panel(
         n_groups=n_groups,
     )
 
+    _sp = {
+        "ic_mean": _nan_to_none(ic_sum["ic_mean"]),
+        "ic_ir": _nan_to_none(ic_sum["ic_ir"]),
+        "long_short_sharpe": _nan_to_none(ls_stats["long_short_sharpe"]),
+        "turnover_mean": _nan_to_none(
+            float(to.mean()) if not to.empty else 0.0
+        ),
+    }
+    verdict = _build_quality_verdict(_sp, g_rets)
+
     payload = {
         "ic": {str(k): _series_to_obj(ic[k]) for k in fwd_periods},
         "rank_ic": {str(k): _series_to_obj(rank_ic[k]) for k in fwd_periods},
@@ -639,6 +763,7 @@ def evaluate_factor_panel(
         "value_hist": hist,
         "long_short_n_effective": ls_stats["long_short_n_effective"],
         "health": health,
+        "verdict": verdict,
     }
     if split_date:
         payload["split_date"] = str(split_date)
@@ -958,6 +1083,13 @@ def run_eval(run_id: str, body: dict) -> None:
                 factor_id=body["factor_id"],
             )
             if feedback_text:
+                v = payload.get("verdict") or {}
+                if v.get("grade"):
+                    grade_line = (
+                        f"因子等级：{v['grade']}（{v.get('grade_label', '')}）"
+                        f"→ 建议下一步：{v.get('next_action_label', '')}\n\n"
+                    )
+                    feedback_text = grade_line + feedback_text
                 _set_status(run_id, feedback=feedback_text)
         except Exception:  # noqa: BLE001
             log.exception("生成 feedback 失败 run_id=%s（不影响主流程）", run_id)
