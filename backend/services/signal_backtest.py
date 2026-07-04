@@ -10,7 +10,7 @@ import json
 import logging
 import math
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
@@ -22,7 +22,18 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class SignalConfig:
-    signal_threshold: float = 0.0        # 因子值 > 阈值算买入信号
+    # 信号口径 signal_mode（跨因子通用，避免不同因子值域不一致导致绝对阈值失效）：
+    #   absolute       —— 因子值 > signal_threshold（仅适合事件/0-1 型因子）
+    #   cross_quantile —— 每日取因子值排在前 (1-signal_quantile) 的股（截面分位，尺度无关）
+    #   top_n          —— 每日取因子值最高的 signal_top_n 只
+    #   ts_zscore      —— 每只股按自身历史 z-score，z > signal_threshold
+    # 默认 absolute（向后兼容，且事件/0-1 型因子只能用它——对 0/1 稀疏因子做截面分位会
+    # 把当日所有股都选中）。连续型因子（z-score/rank/原始值）请显式选 cross_quantile/top_n。
+    signal_mode: str = "absolute"
+    signal_threshold: float = 0.0        # absolute/ts_zscore 模式的阈值
+    signal_quantile: float = 0.9         # cross_quantile：分位切点（0.9=前10%）
+    signal_top_n: int = 10               # top_n：每日取前 N 只
+    signal_zscore_window: int = 60       # ts_zscore：z-score 回看窗口（交易日）
     cash_per_lot: float = 1_000_000.0
     max_concurrent_lots: int = 10
     allow_pyramiding: bool = False
@@ -451,6 +462,39 @@ def summarize(res: SignalResult) -> dict:
 # 又能让测试对 bs.<name> 的 monkeypatch 生效（引擎通过 bs 模块命名空间引用它们）。
 
 
+def build_signal_panel(factor: pd.DataFrame, cfg: SignalConfig) -> pd.DataFrame:
+    """把因子宽表按 signal_mode 转成 0/1 买入信号面板（1=当日出买入信号）。
+
+    四种口径都只用「当日截面」或「历史窗口」，无未来函数：
+    - absolute：因子值 > signal_threshold（事件/0-1 型因子）。
+    - cross_quantile：因子值 ≥ 当日截面 signal_quantile 分位（尺度无关；不适合 0/1 因子）。
+    - top_n：因子值排当日截面前 signal_top_n（并列按出现顺序，尺度无关）。
+    - ts_zscore：每列按自身历史 signal_zscore_window 窗口 z-score，z > signal_threshold。
+
+    返回与 factor 同形状的 0.0/1.0 DataFrame；NaN 因子处一律 0（不出信号）。
+    """
+    mode = cfg.signal_mode
+    if mode == "cross_quantile":
+        q = cfg.signal_quantile
+        # 逐行（逐日）截面分位切点；min_count 由 quantile 自动跳过 NaN。
+        cutoff = factor.quantile(q, axis=1)
+        sig = factor.ge(cutoff, axis=0) & factor.notna()
+    elif mode == "top_n":
+        n = max(1, int(cfg.signal_top_n))
+        # 逐日降序排名，取前 N；method='first' 让并列按列序稳定切分，避免超额入选。
+        ranks = factor.rank(axis=1, ascending=False, method="first")
+        sig = ranks.le(n) & factor.notna()
+    elif mode == "ts_zscore":
+        w = max(2, int(cfg.signal_zscore_window))
+        mu = factor.rolling(w, min_periods=w).mean()
+        sd = factor.rolling(w, min_periods=w).std()
+        z = (factor - mu) / sd.where(sd > 0)
+        sig = z > cfg.signal_threshold
+    else:  # absolute（默认）
+        sig = factor > cfg.signal_threshold
+    return sig.astype(float).fillna(0.0)
+
+
 def _signal_config_from_body(body: dict, bundle) -> SignalConfig:
     """从 body 的信号配置字段 + bundle 的成本标量构造 SignalConfig。
 
@@ -463,7 +507,11 @@ def _signal_config_from_body(body: dict, bundle) -> SignalConfig:
         bundle.commission_bps + bundle.transfer_fee_bps + bundle.stamp_tax_bps
     ) / 1e4
     return SignalConfig(
+        signal_mode=str(body.get("signal_mode", "absolute")),
         signal_threshold=float(body.get("signal_threshold", 0.0)),
+        signal_quantile=float(body.get("signal_quantile", 0.9)),
+        signal_top_n=int(body.get("signal_top_n", 10)),
+        signal_zscore_window=int(body.get("signal_zscore_window", 60)),
         cash_per_lot=float(body.get("cash_per_lot", 1_000_000.0)),
         max_concurrent_lots=int(body.get("max_concurrent_lots", 10)),
         allow_pyramiding=bool(body.get("allow_pyramiding", False)),
@@ -594,7 +642,11 @@ def run_signal_backtest(run_id: str, body: dict) -> None:
         # 2) 信号配置 + 面板。阈值比较在引擎里做（signal > threshold），
         # 故直接把因子宽表当 signal 传入。
         cfg = _signal_config_from_body(body, bundle)
-        signal = bundle.factor
+        # 按 signal_mode 把因子宽表转成 0/1 买入信号面板（跨因子通用，尺度无关）。
+        signal = build_signal_panel(bundle.factor, cfg)
+        # 面板已是 0/1，引擎按 >阈值 判定 → 用阈值 0 统一取 1（各模式的阈值已在
+        # build_signal_panel 里消化）。
+        engine_cfg = replace(cfg, signal_threshold=0.0)
         close = bundle.close
 
         # 3) 固定滑点面板：值 = slippage_bps/1e4，与 close 同 shape。
@@ -608,7 +660,7 @@ def run_signal_backtest(run_id: str, body: dict) -> None:
         res = simulate_signal_book(
             signal, bundle.open_, bundle.high, bundle.low, close,
             bundle.exec_price, slip_df, bundle.limit_up_mask,
-            bundle.limit_down_mask, init_cash, cfg,
+            bundle.limit_down_mask, init_cash, engine_cfg,
         )
         summary = summarize(res)
 

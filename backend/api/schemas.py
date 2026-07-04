@@ -111,7 +111,13 @@ class CreateBacktestIn(BaseModel):
     # 下列字段仅在 mode="signal" 时生效，分位模式忽略。设计见
     # docs/plans/2026-07-04-signal-backtest-engine-design.md。
     mode: str = "quantile"                                          # quantile | signal
-    signal_threshold: float = 0.0                                   # 因子值 > 阈值算买入信号
+    # 信号口径（跨因子通用）：absolute 绝对阈值 | cross_quantile 截面分位 |
+    #   top_n 每日TopN | ts_zscore 时序z-score。默认 absolute（事件/0-1因子）。
+    signal_mode: str = "absolute"
+    signal_threshold: float = 0.0                                   # absolute/ts_zscore 的阈值
+    signal_quantile: float = Field(default=0.9, ge=0.5, le=0.999)  # cross_quantile 分位切点(0.9=前10%)
+    signal_top_n: int = Field(default=10, ge=1, le=500)           # top_n 每日取前N只
+    signal_zscore_window: int = Field(default=60, ge=5, le=500)   # ts_zscore 回看窗口
     cash_per_lot: float = Field(default=1e6, gt=0)                  # 每笔固定投入金额
     max_concurrent_lots: int = Field(default=10, ge=1)             # 最大并发持仓笔数
     allow_pyramiding: bool = False                                  # 是否允许对已持仓股加仓

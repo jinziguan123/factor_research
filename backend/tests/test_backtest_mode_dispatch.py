@@ -21,9 +21,14 @@ def test_schema_signal_fields_roundtrip():
                          stop_mode="avg_cost", allow_pyramiding=True,
                          max_adds_per_symbol=2, min_hold_days=3, max_hold_days=20,
                          atr_stop_multiplier=2.5, atr_window=10,
-                         trailing_stop=True, pyramid_min_profit_pct=0.03)
+                         trailing_stop=True, pyramid_min_profit_pct=0.03,
+                         signal_mode="cross_quantile", signal_quantile=0.95,
+                         signal_top_n=20, signal_zscore_window=40)
     assert m.mode == "signal"
     assert m.stop_mode == "avg_cost"
+    assert m.signal_mode == "cross_quantile"
+    assert m.signal_quantile == 0.95
+    assert m.signal_top_n == 20
     assert m.max_adds_per_symbol == 2
     assert m.atr_stop_multiplier == 2.5
     assert m.trailing_stop is True

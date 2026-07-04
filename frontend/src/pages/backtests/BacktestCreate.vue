@@ -68,7 +68,18 @@ const lockPriceLimit = ref(true)
 
 // —— 信号回测模式（mode="signal"）专用状态 ——
 // 止损/止盈用百分比输入（8 表示 8%），提交时 /100 转成后端要的小数。
+// 信号口径：不同因子值域不一，绝对阈值不通用；提供截面分位/TopN/z-score 等尺度无关口径。
+const signalMode = ref<'absolute' | 'cross_quantile' | 'top_n' | 'ts_zscore'>('absolute')
+const signalQuantilePctUi = ref(10)   // 截面分位取"前 X%"，提交转分位切点 1-X/100
+const signalTopN = ref(10)
+const signalZscoreWindow = ref(60)
 const signalThreshold = ref(0)
+const signalModeOptions = [
+  { label: '绝对阈值（事件/0-1 型因子）', value: 'absolute' },
+  { label: '截面分位（前 X%，尺度无关）', value: 'cross_quantile' },
+  { label: '每日 Top-N', value: 'top_n' },
+  { label: '时序 z-score', value: 'ts_zscore' },
+]
 const cashPerLot = ref(1e6)
 const maxConcurrentLots = ref(10)
 const allowPyramiding = ref(false)
@@ -154,7 +165,12 @@ async function handleSubmit() {
   if (mode.value === 'signal') {
     // 信号回测：止损/止盈由 % 转小数
     Object.assign(body, {
+      signal_mode: signalMode.value,
       signal_threshold: signalThreshold.value,
+      // 截面分位取"前 X%" → 分位切点 = 1 - X/100
+      signal_quantile: 1 - signalQuantilePctUi.value / 100,
+      signal_top_n: signalTopN.value,
+      signal_zscore_window: signalZscoreWindow.value,
       cash_per_lot: cashPerLot.value,
       max_concurrent_lots: maxConcurrentLots.value,
       allow_pyramiding: allowPyramiding.value,
@@ -274,9 +290,25 @@ async function handleSubmit() {
 
       <!-- ===== 信号回测专用 ===== -->
       <template v-if="mode === 'signal'">
-        <n-form-item label="信号阈值">
+        <n-form-item label="信号口径">
+          <n-select v-model:value="signalMode" :options="signalModeOptions" style="width: 320px" />
+        </n-form-item>
+        <n-form-item v-if="signalMode === 'absolute' || signalMode === 'ts_zscore'" label="信号阈值">
           <n-input-number v-model:value="signalThreshold" :step="0.1" style="width: 160px" />
-          <span style="margin-left: 12px; color: #999; font-size: 12px">因子值 &gt; 阈值即买入信号</span>
+          <span style="margin-left: 12px; color: #999; font-size: 12px">
+            {{ signalMode === 'ts_zscore' ? 'z-score > 阈值即买入（如 2 = 高于 2 个标准差）'
+              : '因子值 > 阈值即买入信号（仅适合事件/0-1 型因子）' }}
+          </span>
+        </n-form-item>
+        <n-form-item v-if="signalMode === 'cross_quantile'" label="取前 (%)">
+          <n-input-number v-model:value="signalQuantilePctUi" :min="0.1" :max="50" :precision="2" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">每日取因子值排在前 X% 的股（尺度无关）</span>
+        </n-form-item>
+        <n-form-item v-if="signalMode === 'top_n'" label="每日 Top-N">
+          <n-input-number v-model:value="signalTopN" :min="1" :max="500" style="width: 160px" />
+        </n-form-item>
+        <n-form-item v-if="signalMode === 'ts_zscore'" label="z-score 窗口(天)">
+          <n-input-number v-model:value="signalZscoreWindow" :min="5" :max="500" style="width: 160px" />
         </n-form-item>
         <n-form-item label="止损(%)">
           <n-input-number v-model:value="stopLossPctUi" :min="0" :max="100" :precision="2" style="width: 160px" />

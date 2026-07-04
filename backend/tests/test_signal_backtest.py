@@ -421,3 +421,66 @@ def test_conditional_pyramiding_profit_gate():
     buys = res.orders[res.orders["side"] == "buy"]
     assert len(buys) == 2                       # 首仓 + 顺势加仓（中间那次被拒）
     assert (res.skipped["reason"] == "pyramid_profit_gate").any()
+
+
+# ---------------------------- build_signal_panel（信号口径） ----------------------------
+
+def _factor_df():
+    dates = pd.date_range("2026-01-05", periods=3, freq="B")
+    # 3 日 × 4 股，值域各异（模拟连续因子）
+    return pd.DataFrame(
+        {"A": [1.0, 5.0, 9.0],
+         "B": [2.0, 6.0, 8.0],
+         "C": [3.0, 7.0, np.nan],
+         "D": [4.0, 8.0, 6.0]},
+        index=dates,
+    )
+
+
+def test_signal_panel_absolute():
+    f = _factor_df()
+    cfg = sbt.SignalConfig(signal_mode="absolute", signal_threshold=5.0)
+    sig = sbt.build_signal_panel(f, cfg)
+    # >5：第0日无，第1日 B/C/D，第2日 A/B/D
+    assert sig.loc[f.index[0]].sum() == 0
+    assert sig.loc[f.index[1], "B"] == 1.0 and sig.loc[f.index[1], "A"] == 0.0
+    assert set(sig.columns) == {"A", "B", "C", "D"}
+
+
+def test_signal_panel_cross_quantile_scale_invariant():
+    f = _factor_df()
+    cfg = sbt.SignalConfig(signal_mode="cross_quantile", signal_quantile=0.75)
+    sig = sbt.build_signal_panel(f, cfg)
+    # 每日截面前 25%（4 只股 → 约取排最前的）；D=4 是第0日最大，A=9 第2日最大
+    assert sig.loc[f.index[0], "D"] == 1.0
+    assert sig.loc[f.index[2], "A"] == 1.0
+    # NaN 因子（第2日 C）不出信号
+    assert sig.loc[f.index[2], "C"] == 0.0
+    # 尺度无关：整体放大 1000 倍，信号不变
+    sig2 = sbt.build_signal_panel(f * 1000.0, cfg)
+    assert (sig.values == sig2.values).all()
+
+
+def test_signal_panel_top_n():
+    f = _factor_df()
+    cfg = sbt.SignalConfig(signal_mode="top_n", signal_top_n=2)
+    sig = sbt.build_signal_panel(f, cfg)
+    # 每日恰好 2 只（NaN 不计）
+    assert sig.loc[f.index[0]].sum() == 2
+    assert sig.loc[f.index[1]].sum() == 2
+    # 第0日最大的两只 C(3)、D(4)
+    assert sig.loc[f.index[0], "D"] == 1.0 and sig.loc[f.index[0], "C"] == 1.0
+
+
+def test_signal_panel_no_lookahead_truncation():
+    # ts_zscore/rolling 只用历史窗口；截断未来数据，历史信号不变
+    dates = pd.date_range("2026-01-05", periods=20, freq="B")
+    rng = np.random.default_rng(11)
+    f = pd.DataFrame({"A": rng.normal(0, 1, 20), "B": rng.normal(0, 1, 20)},
+                     index=dates)
+    cfg = sbt.SignalConfig(signal_mode="ts_zscore", signal_threshold=0.5,
+                           signal_zscore_window=5)
+    full = sbt.build_signal_panel(f, cfg)
+    trunc = sbt.build_signal_panel(f.loc[:dates[12]], cfg)
+    a, b = full.loc[:dates[12]].align(trunc, join="inner")
+    assert (a.values == b.values).all()
