@@ -106,6 +106,22 @@ class CreateBacktestIn(BaseModel):
     # cost_bps 已废弃：保留字段避免旧前端 422；不再参与计算。
     cost_bps: float = 3.0
 
+    # —— 信号回测模式（mode="signal"）——
+    # 事件驱动、按笔(lot)管理的择时回测。mode 默认 "quantile" 走上面的分位换仓；
+    # 下列字段仅在 mode="signal" 时生效，分位模式忽略。设计见
+    # docs/plans/2026-07-04-signal-backtest-engine-design.md。
+    mode: str = "quantile"                                          # quantile | signal
+    signal_threshold: float = 0.0                                   # 因子值 > 阈值算买入信号
+    cash_per_lot: float = Field(default=1e6, gt=0)                  # 每笔固定投入金额
+    max_concurrent_lots: int = Field(default=10, ge=1)             # 最大并发持仓笔数
+    allow_pyramiding: bool = False                                  # 是否允许对已持仓股加仓
+    max_adds_per_symbol: int = Field(default=0, ge=0)             # 每股最多额外加仓笔数
+    stop_loss_pct: float = Field(default=0.08, ge=0, le=1)        # 止损%（相对成本），0=关闭
+    take_profit_pct: float = Field(default=0.20, ge=0)           # 止盈%（相对成本），0=关闭
+    stop_mode: str = "per_lot"                                      # per_lot 分笔独立 | avg_cost 均价统一
+    min_hold_days: int = Field(default=0, ge=0)                    # 最小持仓交易日（止损优先，不锁止损）
+    max_hold_days: int = Field(default=0, ge=0)                    # 最大持仓交易日，0=不限
+
 
 class CreateCostSensitivityIn(BaseModel):
     """``POST /api/cost-sensitivity`` 请求体。

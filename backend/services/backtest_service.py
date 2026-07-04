@@ -730,6 +730,13 @@ def run_backtest(run_id: str, body: dict) -> None:
         - 成功写 ``fr_backtest_artifacts`` 三条（equity / orders / trades）；
         - 成功写 ``data/artifacts/<run_id>/{equity,orders,trades}.parquet``。
     """
+    # 回测模式分发：mode="signal" 走事件驱动·按笔管理的信号回测引擎，
+    # 其余（默认 "quantile"）走下面的 vectorbt 分位换仓回测。延迟 import
+    # 避免与 signal_backtest 的循环依赖（后者会 import 本模块的 _prepare_price_cost）。
+    if str(body.get("mode", "quantile")) == "signal":
+        from backend.services.signal_backtest import run_signal_backtest
+        return run_signal_backtest(run_id, body)
+
     try:
         _update_status(run_id, status="running", started=True, progress=5)
         # 协作式中断：阶段边界轮询 status='aborting'，命中就抛 AbortedError
