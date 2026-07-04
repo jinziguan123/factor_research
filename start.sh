@@ -57,7 +57,10 @@ fi
 echo "==> 启动前端 (vite :$FRONTEND_PORT)"
 (
   cd "$ROOT/frontend"
-  nohup npm run dev > "$FRONTEND_LOG" 2>&1 &
+  # 关闭 HMR：本脚本用于经反向代理访问的部署场景，HMR 的 WS 连不通会触发整页重载
+  # （切走浏览器→自动刷新→窗口被拉回前台）。本地纯前端开发想要热更新时直接
+  # `npm run dev`（不设此变量）即可。
+  VITE_DISABLE_HMR=1 nohup npm run dev > "$FRONTEND_LOG" 2>&1 &
   echo $! > "$FRONTEND_PID"
 )
 
