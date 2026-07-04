@@ -37,6 +37,19 @@ const TRADE_COLUMN_LABELS: Record<string, string> = {
   'Direction': '方向',
   'Status': '状态',
   'Position Id': '持仓编号',
+  // —— 信号回测（按笔）产物列名 ——
+  'symbol': '股票代码',
+  'entry_date': '开仓时间',
+  'entry_price': '开仓价',
+  'exit_date': '平仓时间',
+  'exit_price': '平仓价',
+  'qty': '数量',
+  'pnl': '损益',
+  'return_pct': '收益率',
+  'hold_days': '持有天数',
+  'exit_reason': '出场原因',
+  'add_seq': '加仓序号',
+  'lot_id': '笔号',
 }
 
 // Direction / Status 是 VectorBT 内置枚举字符串，渲染时翻译成中文；
@@ -44,6 +57,13 @@ const TRADE_COLUMN_LABELS: Record<string, string> = {
 const TRADE_VALUE_LABELS: Record<string, Record<string, string>> = {
   Direction: { Long: '多', Short: '空' },
   Status: { Open: '持仓中', Closed: '已平仓' },
+  // 信号回测的出场原因枚举
+  exit_reason: {
+    stop_loss: '止损',
+    take_profit: '止盈',
+    max_hold: '到期',
+    end_of_data: '回测结束',
+  },
 }
 
 const route = useRoute()
@@ -128,7 +148,7 @@ function renderTradeValue(col: string, v: any): string {
   const map = TRADE_VALUE_LABELS[col]
   if (map && typeof v === 'string' && v in map) return map[v]
   if (typeof v === 'number') {
-    if (col === 'Return') return (v * 100).toFixed(2) + '%'
+    if (col === 'Return' || col === 'return_pct') return (v * 100).toFixed(2) + '%'
     return Number.isInteger(v) ? String(v) : v.toFixed(4)
   }
   return String(v)
