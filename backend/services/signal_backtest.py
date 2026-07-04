@@ -85,6 +85,36 @@ def simulate_signal_book(
     # pending 建仓意向：上一日产生、待今日成交，元素为列索引 j
     pending_entries: list[int] = []
 
+    def _sell(lot: Lot, sym: str, jj: int, t: int,
+              fill_price: float, reason: str) -> None:
+        """在 t 日以 fill_price 卖出并平掉 lot：计算有效卖价（含滑点）、
+        现金流入、pnl，记录 trade + sell order，并从 book[sym] 移除。
+        供止损/止盈/到期/末日强平等所有出场分支复用。"""
+        nonlocal cash
+        eff_sell = fill_price * (1.0 - slip_np[t, jj])
+        proceeds = lot.qty * eff_sell * (1.0 - cfg.sell_fee_rate)
+        cost_in = lot.qty * lot.entry_price * (1.0 + cfg.buy_fee_rate)
+        pnl = proceeds - cost_in
+        ei = entry_index[lot.lot_id]
+        cash += proceeds
+        trades.append({
+            "symbol": sym,
+            "entry_date": lot.entry_date,
+            "entry_price": lot.entry_price,
+            "exit_date": dates[t],
+            "exit_price": eff_sell,
+            "qty": lot.qty,
+            "pnl": pnl,
+            "return_pct": pnl / cost_in if cost_in else 0.0,
+            "hold_days": t - ei,
+            "exit_reason": reason,
+            "add_seq": lot.add_seq,
+            "lot_id": lot.lot_id,
+        })
+        orders.append({"date": dates[t], "symbol": sym, "side": "sell",
+                       "price": eff_sell, "qty": lot.qty})
+        book[sym].remove(lot)
+
     for t in range(n):
         # 1) 先消化 pending：用当日 exec_price[t] 成交建仓
         next_pending: list[int] = []
@@ -100,8 +130,10 @@ def simulate_signal_book(
                 continue
             cash -= cost
             lot_counter += 1
+            sl_price = (eff_buy * (1.0 - cfg.stop_loss_pct)
+                        if cfg.stop_loss_pct > 0 else None)
             lot = Lot(symbol=sym, entry_date=dates[t], entry_price=eff_buy,
-                      qty=qty, sl_price=None, tp_price=None,
+                      qty=qty, sl_price=sl_price, tp_price=None,
                       lot_id=lot_counter, add_seq=0)
             book[sym].append(lot)
             entry_index[lot_counter] = t
@@ -109,36 +141,26 @@ def simulate_signal_book(
                            "price": eff_buy, "qty": qty})
         pending_entries = next_pending
 
-        # 2) 出场：本任务只在末日按 close 强平所有未平仓 Lot
+        # 2) 出场：优先级 止损 > ...（后续任务插止盈/到期）> 末日强平
+        for jj, sym in enumerate(symbols):
+            if not book[sym]:
+                continue
+            # 复制一份遍历，_sell 会从 book[sym] 移除，避免边遍历边删
+            for lot in list(book[sym]):
+                # T+1 守卫：建仓当日不可卖，只对 t>建仓行号 的 Lot 判出场
+                if t <= entry_index[lot.lot_id]:
+                    continue
+                # 止损：当日 low 触及止损位；跳空穿越（open<=sl）则以 open 成交
+                if lot.sl_price is not None and low_np[t, jj] <= lot.sl_price:
+                    fill = (open_np[t, jj] if open_np[t, jj] <= lot.sl_price
+                            else lot.sl_price)
+                    _sell(lot, sym, jj, t, fill, "stop_loss")
+
+        # 末日强平仍未平仓的 Lot（止损已平的不重复处理）
         if t == n - 1:
             for jj, sym in enumerate(symbols):
-                if not book[sym]:
-                    continue
-                for lot in book[sym]:
-                    eff_sell = close_np[t, jj] * (1.0 - slip_np[t, jj])
-                    proceeds = lot.qty * eff_sell * (1.0 - cfg.sell_fee_rate)
-                    cost_in = lot.qty * lot.entry_price * (1.0 + cfg.buy_fee_rate)
-                    pnl = proceeds - cost_in
-                    ei = entry_index[lot.lot_id]
-                    cash += proceeds
-                    trades.append({
-                        "symbol": sym,
-                        "entry_date": lot.entry_date,
-                        "entry_price": lot.entry_price,
-                        "exit_date": dates[t],
-                        "exit_price": eff_sell,
-                        "qty": lot.qty,
-                        "pnl": pnl,
-                        "return_pct": pnl / cost_in if cost_in else 0.0,
-                        "hold_days": t - ei,
-                        "exit_reason": "end_of_data",
-                        "add_seq": lot.add_seq,
-                        "lot_id": lot.lot_id,
-                    })
-                    orders.append({"date": dates[t], "symbol": sym,
-                                   "side": "sell", "price": eff_sell,
-                                   "qty": lot.qty})
-                book[sym] = []
+                for lot in list(book[sym]):
+                    _sell(lot, sym, jj, t, close_np[t, jj], "end_of_data")
 
         # 3) 产生今日信号的 pending（下一日消化）
         if t + 1 < n:

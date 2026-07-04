@@ -47,3 +47,38 @@ def test_entry_t1_and_equity_curve():
     # 数据末尾强平一笔
     assert (res.trades["exit_reason"] == "end_of_data").all()
     assert len(res.trades) == 1
+
+
+def test_stop_loss_intraday_low():
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    # 建仓价10，止损8%→止损位9.2；第3日 low=9.0 触发止损，成交在9.2
+    close = pd.DataFrame({"A": [10, 10, 10, 9.5, 10, 10]}, index=dates)
+    open_ = close.copy()
+    high = close.copy()
+    low = pd.DataFrame({"A": [10, 10, 10, 9.0, 10, 10]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.0, buy_fee_rate=0.0,
+                           sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    tr = res.trades.iloc[0]
+    assert tr["exit_reason"] == "stop_loss"
+    assert tr["exit_price"] == pytest.approx(9.2)   # 非跳空，成交在止损位
+    assert tr["exit_date"] == dates[3]
+
+
+def test_stop_loss_gap_through_open():
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    close = pd.DataFrame({"A": [10, 10, 10, 8.5, 8.5, 8.5]}, index=dates)
+    open_ = pd.DataFrame({"A": [10, 10, 10, 8.8, 8.5, 8.5]}, index=dates)  # 跳空开在止损位下方
+    high = open_.copy()
+    low = pd.DataFrame({"A": [10, 10, 10, 8.3, 8.5, 8.5]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.0, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    assert res.trades.iloc[0]["exit_price"] == pytest.approx(8.8)  # 跳空→open成交
