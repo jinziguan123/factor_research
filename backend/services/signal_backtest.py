@@ -298,3 +298,52 @@ def simulate_signal_book(
 
     return SignalResult(equity=equity_s, trades=trades_df,
                         orders=orders_df, skipped=skipped_df)
+
+
+def summarize(res: SignalResult) -> dict:
+    """把 SignalResult 汇总成一组标量指标，供 Phase 2 落到 metrics payload。
+
+    产出：胜率、盈亏比、平均持有天数、出场原因分布、总笔数、跳过数。
+    所有数值均转成 Python float/int，避免 numpy 类型影响后续 json 序列化。
+    """
+    trades = res.trades
+    total = int(len(trades))
+    skipped_count = int(len(res.skipped))
+
+    if total == 0:
+        return {
+            "total_trades": 0,
+            "win_rate": 0.0,
+            "profit_factor": 0.0,
+            "avg_hold_days": 0.0,
+            "exit_reason_dist": {},
+            "skipped_count": skipped_count,
+        }
+
+    pnl = trades["pnl"].to_numpy(float)
+    wins = pnl > 0
+    win_rate = float(wins.sum()) / total
+
+    gross_profit = float(pnl[wins].sum())
+    gross_loss = float(-pnl[pnl < 0].sum())   # 亏损绝对值之和（>=0）
+    if gross_loss > 0:
+        profit_factor = gross_profit / gross_loss
+    else:
+        # 无亏损：有盈利则视为无穷大盈亏比，无盈利（全为 0）则 0.0
+        profit_factor = float("inf") if gross_profit > 0 else 0.0
+
+    avg_hold_days = float(trades["hold_days"].mean())
+
+    exit_reason_dist = {
+        str(k): int(v)
+        for k, v in trades["exit_reason"].value_counts().to_dict().items()
+    }
+
+    return {
+        "total_trades": total,
+        "win_rate": float(win_rate),
+        "profit_factor": float(profit_factor),
+        "avg_hold_days": avg_hold_days,
+        "exit_reason_dist": exit_reason_dist,
+        "skipped_count": skipped_count,
+    }

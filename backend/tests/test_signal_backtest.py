@@ -275,3 +275,55 @@ def test_limit_and_suspension_block_trades():
     res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
                                    slip, None, ld, 1000.0, cfg)
     assert res.trades.iloc[0]["exit_date"] == dates[3]  # 跌停日卖不出，顺延
+
+
+def test_summary_metrics():
+    # 构造 1 胜 1 负两笔：A 止盈、B 止损
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    close = pd.DataFrame({"A": [10, 10, 13, 13, 13, 13],
+                          "B": [10, 10, 9, 9, 9, 9]}, index=dates)
+    open_ = close.copy()
+    high = pd.DataFrame({"A": [10, 10, 13, 13, 13, 13],
+                         "B": [10, 10, 9, 9, 9, 9]}, index=dates)
+    low = pd.DataFrame({"A": [10, 10, 13, 13, 13, 13],
+                        "B": [10, 10, 8, 9, 9, 9]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0],
+                           "B": [1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A", "B"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.20, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 2000.0, cfg)
+    m = sbt.summarize(res)
+    assert 0.0 <= m["win_rate"] <= 1.0
+    assert "profit_factor" in m
+    assert "avg_hold_days" in m
+    assert "exit_reason_dist" in m
+    assert m["total_trades"] == len(res.trades)
+
+
+def test_no_lookahead_truncation():
+    dates = pd.date_range("2026-01-05", periods=30, freq="B")
+    rng = np.random.default_rng(3)
+    px = 10 + np.cumsum(rng.normal(0, 0.2, 30))
+    close = pd.DataFrame({"A": px}, index=dates)
+    open_ = close.copy()
+    high = close * 1.02
+    low = close * 0.98
+    signal = pd.DataFrame({"A": (px < np.roll(px, 1)).astype(float)}, index=dates)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.05,
+                           take_profit_pct=0.10, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    def run(upto):
+        sl = slice(None, upto)
+        return sbt.simulate_signal_book(signal.loc[sl], open_.loc[sl], high.loc[sl],
+            low.loc[sl], close.loc[sl], open_.loc[sl], slip.loc[sl], None, None,
+            1000.0, cfg)
+    full = run(dates[-1]); trunc = run(dates[20])
+    # 截断点前已平仓（非 end_of_data）的 trade 应与全量完全一致
+    a = full.trades[(full.trades["exit_date"] <= dates[20]) &
+                    (full.trades["exit_reason"] != "end_of_data")].reset_index(drop=True)
+    b = trunc.trades[trunc.trades["exit_reason"] != "end_of_data"].reset_index(drop=True)
+    assert len(a) == len(b)
+    for col in ["symbol", "entry_date", "exit_date", "exit_price", "exit_reason"]:
+        assert list(a[col]) == list(b[col])
