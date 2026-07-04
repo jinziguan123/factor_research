@@ -407,6 +407,9 @@ def get_trades_page(
     symbol: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    exit_reason: str | None = None,
+    sort_by: str | None = None,
+    sort_order: str = "asc",
 ) -> dict:
     """读 trades.parquet → 分页 JSON ``{total, page, size, columns, rows}``。
 
@@ -428,6 +431,9 @@ def get_trades_page(
             symbol=symbol,
             start_date=start_date,
             end_date=end_date,
+            exit_reason=exit_reason,
+            sort_by=sort_by,
+            sort_order=sort_order,
         )
     except ValueError as e:
         # schema mismatch / 非法日期格式——用户层可读的 400 错，胜过全局 500

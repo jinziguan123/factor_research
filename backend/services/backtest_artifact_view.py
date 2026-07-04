@@ -127,6 +127,9 @@ def load_trades_page(
     symbol: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    exit_reason: str | None = None,
+    sort_by: str | None = None,
+    sort_order: str = "asc",
 ) -> dict[str, Any]:
     """读 ``trades.parquet`` → 分页 JSON ``{total, page, size, columns, rows}``。
 
@@ -138,9 +141,14 @@ def load_trades_page(
     筛选参数（可选）：
     - ``symbol``：股票代码子串匹配（大小写不敏感），对 ``Column`` 列应用。
     - ``start_date`` / ``end_date``（``YYYY-MM-DD``）：按 ``Entry Timestamp`` 做闭区间过滤。
+    - ``exit_reason``：按出场原因精确匹配（信号回测的 ``exit_reason`` 列，如
+      ``stop_loss``/``take_profit``/``max_hold``）；产物无该列时忽略该筛选。
 
-    筛选发生在分页之前，因此 ``total`` 是筛选后的总数，而非原始全量；前端
-    ``itemCount`` 直接来自 ``total`` 即可，不会让用户翻页穿越被筛掉的行。
+    排序参数（可选）：
+    - ``sort_by``：按某列排序；列名必须在 parquet 列里，否则忽略。
+    - ``sort_order``：``asc``（默认）/ ``desc``。
+
+    筛选 + 排序发生在分页之前，因此 ``total`` 是筛选后的总数，翻页顺序稳定。
     """
     page = max(1, int(page))
     size = max(1, min(int(size), 500))
@@ -176,6 +184,19 @@ def load_trades_page(
                 hours=23, minutes=59, seconds=59
             )
             df = df[et_series <= end_ts]
+
+    # 出场原因精确筛选：仅信号回测产物有 exit_reason 列；产物无该列则忽略（分位回测不受影响）。
+    if exit_reason and exit_reason.strip():
+        if "exit_reason" in columns:
+            df = df[df["exit_reason"].astype(str) == exit_reason.strip()]
+        # 无该列：静默忽略（避免对老/分位产物报错）
+
+    # 排序（在分页之前）：sort_by 必须是合法列名，否则忽略；desc 时降序。na 排末尾。
+    if sort_by and sort_by in columns:
+        ascending = str(sort_order).lower() != "desc"
+        df = df.sort_values(
+            by=sort_by, ascending=ascending, kind="stable", na_position="last"
+        )
 
     total = len(df)
 

@@ -126,6 +126,12 @@ export interface TradesFilter {
   startDate?: string | null
   /** 按 Entry Timestamp 结束日，YYYY-MM-DD（闭区间）。 */
   endDate?: string | null
+  /** 出场原因精确匹配（信号回测：stop_loss/take_profit/max_hold/end_of_data）。 */
+  exitReason?: string | null
+  /** 排序列名（parquet 列名）。 */
+  sortBy?: string | null
+  /** 排序方向：asc / desc。 */
+  sortOrder?: 'asc' | 'desc' | null
 }
 
 /**
@@ -152,6 +158,8 @@ export function useTradesPage(
       if (f.symbol && f.symbol.trim()) params.symbol = f.symbol.trim()
       if (f.startDate) params.start_date = f.startDate
       if (f.endDate) params.end_date = f.endDate
+      if (f.exitReason) params.exit_reason = f.exitReason
+      if (f.sortBy) { params.sort_by = f.sortBy; params.sort_order = f.sortOrder || 'asc' }
       return client
         .get(`/backtests/${runId.value}/trades_page`, { params })
         .then(r => r.data)

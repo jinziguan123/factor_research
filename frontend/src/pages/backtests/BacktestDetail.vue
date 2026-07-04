@@ -8,7 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NAlert, NEmpty, NDataTable, NTag,
-  NInput, NDatePicker, NGrid, NGridItem, NFormItem,
+  NInput, NDatePicker, NGrid, NGridItem, NFormItem, NSelect,
   type DataTableColumns,
 } from 'naive-ui'
 import { useBacktest, useEquitySeries, useTradesPage, type TradesFilter } from '@/api/backtests'
@@ -102,7 +102,21 @@ const tradesSize = ref(20)
 // 日期选择器双向绑定的是 naive-ui 的 daterange [startTs, endTs]（毫秒 ts）或 null。
 const symbolInput = ref('')
 const dateRange = ref<[number, number] | null>(null)
+const exitReasonInput = ref<string | null>(null)
+// 服务端排序状态：{列名, 方向}；null=不排序（用产物原始顺序）
+const sorter = ref<{ key: string; order: 'asc' | 'desc' } | null>(null)
 const tradesFilter = ref<TradesFilter>({})
+
+// 出场原因下拉仅在信号回测产物（有 exit_reason 列）时出现；分位回测无此列。
+const hasExitReason = computed(() =>
+  (tradesData.value?.columns ?? []).includes('exit_reason')
+)
+const exitReasonOptions = [
+  { label: '止损', value: 'stop_loss' },
+  { label: '止盈', value: 'take_profit' },
+  { label: '到期', value: 'max_hold' },
+  { label: '回测结束', value: 'end_of_data' },
+]
 
 const { data: tradesData, isLoading: tradesLoading, isError: tradesError, error: tradesErrObj } = useTradesPage(
   runId,
@@ -121,20 +135,41 @@ function tsToYmd(ts: number | null | undefined): string | null {
   return `${y}-${m}-${day}`
 }
 
-function applyTradesFilter() {
-  tradesPage.value = 1  // 换筛选条件必须回到第 1 页，否则容易停在"超出结果范围"的页号上
-  tradesFilter.value = {
+// 从各 state 组装完整筛选（含当前排序），供筛选/排序/重置统一调用，避免互相覆盖。
+function buildTradesFilter(): TradesFilter {
+  return {
     symbol: symbolInput.value.trim() || undefined,
     startDate: tsToYmd(dateRange.value?.[0] ?? null) ?? null,
     endDate: tsToYmd(dateRange.value?.[1] ?? null) ?? null,
+    exitReason: exitReasonInput.value || null,
+    sortBy: sorter.value?.key ?? null,
+    sortOrder: sorter.value?.order ?? null,
   }
+}
+
+function applyTradesFilter() {
+  tradesPage.value = 1  // 换筛选条件必须回到第 1 页，否则容易停在"超出结果范围"的页号上
+  tradesFilter.value = buildTradesFilter()
 }
 
 function resetTradesFilter() {
   symbolInput.value = ''
   dateRange.value = null
+  exitReasonInput.value = null
+  sorter.value = null
   tradesPage.value = 1
   tradesFilter.value = {}
+}
+
+// n-data-table 服务端排序：点表头触发。order 为 'ascend'/'descend'/false。
+function handleSorterChange(s: { columnKey: string; order: 'ascend' | 'descend' | false } | null) {
+  if (s && s.order) {
+    sorter.value = { key: String(s.columnKey), order: s.order === 'ascend' ? 'asc' : 'desc' }
+  } else {
+    sorter.value = null
+  }
+  tradesPage.value = 1
+  tradesFilter.value = buildTradesFilter()
 }
 
 // 未识别的英文列也要有合理回退：直接用原列名，保证 vectorbt 改动不会让表头空白。
@@ -160,6 +195,11 @@ const tradesColumns = computed<DataTableColumns<Record<string, any>>>(() => {
     title: columnTitle(c),
     key: c,
     ellipsis: { tooltip: true },
+    // 服务端排序：sorter:true 表示"排序交给后端"；sortOrder 反映当前列的排序态。
+    sorter: true,
+    sortOrder: sorter.value?.key === c
+      ? (sorter.value.order === 'asc' ? 'ascend' : 'descend')
+      : false,
     render: (row) => renderTradeValue(c, row[c]),
   }))
 })
@@ -306,7 +346,7 @@ function downloadArtifact(type: string) {
         <n-card title="交易记录" size="small" style="margin-bottom: 16px">
           <!-- 筛选条：股票代码子串 + 开仓时间范围。符合后端"按 Entry Timestamp 过滤"的语义。 -->
           <n-grid :cols="24" :x-gap="12" :y-gap="8" style="margin-bottom: 12px" responsive="screen">
-            <n-grid-item :span="8">
+            <n-grid-item :span="7">
               <n-form-item label="股票代码" label-placement="left" :show-feedback="false">
                 <n-input
                   v-model:value="symbolInput"
@@ -316,7 +356,7 @@ function downloadArtifact(type: string) {
                 />
               </n-form-item>
             </n-grid-item>
-            <n-grid-item :span="10">
+            <n-grid-item :span="9">
               <n-form-item label="开仓日期" label-placement="left" :show-feedback="false">
                 <n-date-picker
                   v-model:value="dateRange"
@@ -327,7 +367,18 @@ function downloadArtifact(type: string) {
                 />
               </n-form-item>
             </n-grid-item>
-            <n-grid-item :span="6">
+            <n-grid-item v-if="hasExitReason" :span="4">
+              <n-form-item label="出场原因" label-placement="left" :show-feedback="false">
+                <n-select
+                  v-model:value="exitReasonInput"
+                  :options="exitReasonOptions"
+                  placeholder="全部"
+                  clearable
+                  @update:value="applyTradesFilter"
+                />
+              </n-form-item>
+            </n-grid-item>
+            <n-grid-item :span="hasExitReason ? 4 : 8">
               <n-space style="margin-top: 4px">
                 <n-button type="primary" size="small" @click="applyTradesFilter">查询</n-button>
                 <n-button size="small" @click="resetTradesFilter">重置</n-button>
@@ -350,6 +401,7 @@ function downloadArtifact(type: string) {
             :scroll-x="1200"
             @update:page="onPageChange"
             @update:page-size="onPageSizeChange"
+            @update:sorter="handleSorterChange"
           />
         </n-card>
 

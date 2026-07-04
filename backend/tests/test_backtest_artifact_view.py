@@ -174,6 +174,43 @@ def _write_signal_trades_parquet(path, n: int = 10) -> None:
     df.to_parquet(path)
 
 
+def test_load_trades_page_exit_reason_filter_and_sort(tmp_path):
+    """出场原因精确筛选 + 按列升降序（信号回测产物）。"""
+    from backend.services.backtest_artifact_view import load_trades_page
+
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    df = pd.DataFrame({
+        "symbol": [f"00000{i}.SZ" for i in range(6)],
+        "entry_date": dates,
+        "pnl": [3.0, -1.0, 5.0, -2.0, 1.0, -4.0],
+        "exit_reason": ["stop_loss", "take_profit", "stop_loss",
+                        "max_hold", "take_profit", "stop_loss"],
+    })
+    p = tmp_path / "trades.parquet"
+    df.to_parquet(p)
+
+    # 出场原因筛选：只留 stop_loss（3 条）
+    out = load_trades_page(p, page=1, size=20, exit_reason="stop_loss")
+    assert out["total"] == 3
+    assert all(r["exit_reason"] == "stop_loss" for r in out["rows"])
+
+    # 按 pnl 升序：首行是最小的 -4.0
+    asc = load_trades_page(p, page=1, size=20, sort_by="pnl", sort_order="asc")
+    assert asc["rows"][0]["pnl"] == -4.0
+    # 降序：首行最大 5.0
+    desc = load_trades_page(p, page=1, size=20, sort_by="pnl", sort_order="desc")
+    assert desc["rows"][0]["pnl"] == 5.0
+
+    # 筛选 + 排序叠加：stop_loss 里按 pnl 降序，首行 5.0
+    both = load_trades_page(p, page=1, size=20, exit_reason="stop_loss",
+                            sort_by="pnl", sort_order="desc")
+    assert both["total"] == 3 and both["rows"][0]["pnl"] == 5.0
+
+    # 非法排序列 / 无 exit_reason 列的产物：忽略、不报错
+    ignore = load_trades_page(p, page=1, size=20, sort_by="不存在的列")
+    assert ignore["total"] == 6
+
+
 def test_load_trades_page_signal_entry_date_filter(tmp_path):
     """回归：信号回测产物用 entry_date 列，按开仓日筛选不应报 400。"""
     from backend.services.backtest_artifact_view import load_trades_page
