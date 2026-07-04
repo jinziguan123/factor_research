@@ -7,7 +7,8 @@ import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   NPageHeader, NForm, NFormItem, NSelect, NInputNumber,
-  NDatePicker, NButton, NSwitch, NTooltip, NCollapse, NCollapseItem, useMessage,
+  NDatePicker, NButton, NSwitch, NTooltip, NCollapse, NCollapseItem,
+  NRadioGroup, NRadioButton, useMessage,
 } from 'naive-ui'
 import { useFactors, useFactor } from '@/api/factors'
 import { useCreateBacktest } from '@/api/backtests'
@@ -42,6 +43,8 @@ const selectedFactor = useFactor(selectedFactorId)
 const factorParams = ref<Record<string, any>>({})
 const poolId = ref<number | null>(null)
 const dateRange = ref<[number, number] | null>(null)
+// 回测模式：quantile 分位换仓 | signal 事件驱动·按笔管理的信号回测
+const mode = ref<'quantile' | 'signal'>('quantile')
 const nGroups = ref(5)
 const rebalancePeriod = ref(1)
 const position = ref('top')
@@ -62,6 +65,24 @@ const maxPositionWeight = ref(0.0)
 const targetVol = ref(0.0)
 const volLookback = ref(60)
 const lockPriceLimit = ref(true)
+
+// —— 信号回测模式（mode="signal"）专用状态 ——
+// 止损/止盈用百分比输入（8 表示 8%），提交时 /100 转成后端要的小数。
+const signalThreshold = ref(0)
+const cashPerLot = ref(1e6)
+const maxConcurrentLots = ref(10)
+const allowPyramiding = ref(false)
+const maxAddsPerSymbol = ref(0)
+const stopLossPctUi = ref(8)          // %
+const takeProfitPctUi = ref(20)       // %
+const stopMode = ref<'per_lot' | 'avg_cost'>('per_lot')
+const minHoldDays = ref(0)
+const maxHoldDays = ref(0)
+
+const stopModeOptions = [
+  { label: '分笔独立止盈止损 (per_lot)', value: 'per_lot' },
+  { label: '按持仓均价统一 (avg_cost)', value: 'avg_cost' },
+]
 
 const positionOptions = [
   { label: '做多头部 (top)', value: 'top' },
@@ -105,15 +126,14 @@ async function handleSubmit() {
   const startDate = new Date(dateRange.value[0]).toISOString().slice(0, 10)
   const endDate = new Date(dateRange.value[1]).toISOString().slice(0, 10)
 
-  const body = {
+  // 两模式共用的基础 + 执行/成本参数
+  const body: Record<string, any> = {
     factor_id: selectedFactorId.value,
     params: factorParams.value,
     pool_id: poolId.value,
     start_date: startDate,
     end_date: endDate,
-    n_groups: nGroups.value,
-    rebalance_period: rebalancePeriod.value,
-    position: position.value,
+    mode: mode.value,
     exec_price: execPrice.value,
     commission_bps: commissionBps.value,
     stamp_tax_bps: stampTaxBps.value,
@@ -121,14 +141,37 @@ async function handleSubmit() {
     slippage_bps: slippageBps.value,
     impact_coef: impactCoef.value,
     max_volume_pct: maxVolumePct.value,
-    weighting: weighting.value,
-    weight_lookback: weightLookback.value,
-    max_position_weight: maxPositionWeight.value,
-    target_vol: targetVol.value,
-    vol_lookback: volLookback.value,
     init_cash: initCash.value,
     filter_price_limit: filterPriceLimit.value,
     lock_price_limit: lockPriceLimit.value,
+  }
+
+  if (mode.value === 'signal') {
+    // 信号回测：止损/止盈由 % 转小数
+    Object.assign(body, {
+      signal_threshold: signalThreshold.value,
+      cash_per_lot: cashPerLot.value,
+      max_concurrent_lots: maxConcurrentLots.value,
+      allow_pyramiding: allowPyramiding.value,
+      max_adds_per_symbol: allowPyramiding.value ? maxAddsPerSymbol.value : 0,
+      stop_loss_pct: stopLossPctUi.value / 100,
+      take_profit_pct: takeProfitPctUi.value / 100,
+      stop_mode: stopMode.value,
+      min_hold_days: minHoldDays.value,
+      max_hold_days: maxHoldDays.value,
+    })
+  } else {
+    // 分位换仓专用参数
+    Object.assign(body, {
+      n_groups: nGroups.value,
+      rebalance_period: rebalancePeriod.value,
+      position: position.value,
+      weighting: weighting.value,
+      weight_lookback: weightLookback.value,
+      max_position_weight: maxPositionWeight.value,
+      target_vol: targetVol.value,
+      vol_lookback: volLookback.value,
+    })
   }
 
   const result = await createBacktest.mutateAsync(body)
@@ -177,36 +220,92 @@ async function handleSubmit() {
         />
       </n-form-item>
 
-      <!-- 分组数 -->
-      <n-form-item label="分组数">
-        <n-input-number v-model:value="nGroups" :min="2" :max="20" style="width: 160px" />
+      <!-- 回测模式 -->
+      <n-form-item label="回测模式">
+        <n-radio-group v-model:value="mode">
+          <n-radio-button value="quantile">分位换仓</n-radio-button>
+          <n-radio-button value="signal">信号驱动</n-radio-button>
+        </n-radio-group>
+        <span style="margin-left: 12px; color: #999; font-size: 12px">
+          {{ mode === 'signal'
+            ? '事件驱动·按笔管理，支持止盈止损/加仓/持仓天数（择时型因子）'
+            : '因子分位定期换仓（横截面选股型因子）' }}
+        </span>
       </n-form-item>
 
-      <!-- 调仓周期 -->
-      <n-form-item label="调仓周期(天)">
-        <n-input-number v-model:value="rebalancePeriod" :min="1" :max="60" style="width: 160px" />
-      </n-form-item>
+      <!-- ===== 分位换仓专用 ===== -->
+      <template v-if="mode === 'quantile'">
+        <!-- 分组数 -->
+        <n-form-item label="分组数">
+          <n-input-number v-model:value="nGroups" :min="2" :max="20" style="width: 160px" />
+        </n-form-item>
 
-      <!-- 持仓方式 -->
-      <n-form-item label="持仓方式">
-        <n-select
-          v-model:value="position"
-          :options="positionOptions"
-          style="width: 240px"
-        />
-      </n-form-item>
+        <!-- 调仓周期 -->
+        <n-form-item label="调仓周期(天)">
+          <n-input-number v-model:value="rebalancePeriod" :min="1" :max="60" style="width: 160px" />
+        </n-form-item>
 
-      <!-- 成交价口径 -->
+        <!-- 持仓方式 -->
+        <n-form-item label="持仓方式">
+          <n-select
+            v-model:value="position"
+            :options="positionOptions"
+            style="width: 240px"
+          />
+        </n-form-item>
+
+        <!-- 组内权重方法 -->
+        <n-form-item label="权重方法">
+          <n-select v-model:value="weighting" :options="weightingOptions" style="width: 240px" />
+        </n-form-item>
+        <n-form-item v-if="weighting !== 'equal'" label="权重回看(天)">
+          <n-input-number v-model:value="weightLookback" :min="5" :max="252" style="width: 160px" />
+        </n-form-item>
+      </template>
+
+      <!-- ===== 信号回测专用 ===== -->
+      <template v-if="mode === 'signal'">
+        <n-form-item label="信号阈值">
+          <n-input-number v-model:value="signalThreshold" :step="0.1" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">因子值 &gt; 阈值即买入信号</span>
+        </n-form-item>
+        <n-form-item label="止损(%)">
+          <n-input-number v-model:value="stopLossPctUi" :min="0" :max="100" :precision="2" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">0=关闭</span>
+        </n-form-item>
+        <n-form-item label="止盈(%)">
+          <n-input-number v-model:value="takeProfitPctUi" :min="0" :max="500" :precision="2" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">0=关闭</span>
+        </n-form-item>
+        <n-form-item label="止损模式">
+          <n-select v-model:value="stopMode" :options="stopModeOptions" style="width: 280px" />
+        </n-form-item>
+        <n-form-item label="每笔金额">
+          <n-input-number v-model:value="cashPerLot" :min="1000" :step="100000" style="width: 200px" />
+        </n-form-item>
+        <n-form-item label="最大并发笔数">
+          <n-input-number v-model:value="maxConcurrentLots" :min="1" :max="1000" style="width: 160px" />
+        </n-form-item>
+        <n-form-item label="允许加仓">
+          <n-switch v-model:value="allowPyramiding" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">对已持仓股再次出信号时加仓</span>
+        </n-form-item>
+        <n-form-item v-if="allowPyramiding" label="每股最大加仓笔数">
+          <n-input-number v-model:value="maxAddsPerSymbol" :min="0" :max="50" style="width: 160px" />
+        </n-form-item>
+        <n-form-item label="最小持仓天数">
+          <n-input-number v-model:value="minHoldDays" :min="0" :max="250" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">止损优先，不锁止损</span>
+        </n-form-item>
+        <n-form-item label="最大持仓天数">
+          <n-input-number v-model:value="maxHoldDays" :min="0" :max="250" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">0=不限，到期强平</span>
+        </n-form-item>
+      </template>
+
+      <!-- 成交价口径（两模式共用） -->
       <n-form-item label="成交价">
         <n-select v-model:value="execPrice" :options="execPriceOptions" style="width: 240px" />
-      </n-form-item>
-
-      <!-- 组内权重方法 -->
-      <n-form-item label="权重方法">
-        <n-select v-model:value="weighting" :options="weightingOptions" style="width: 240px" />
-      </n-form-item>
-      <n-form-item v-if="weighting !== 'equal'" label="权重回看(天)">
-        <n-input-number v-model:value="weightLookback" :min="5" :max="252" style="width: 160px" />
       </n-form-item>
 
       <!-- 初始资金 -->

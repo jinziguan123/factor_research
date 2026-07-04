@@ -270,6 +270,13 @@ function downloadArtifact(type: string) {
           <n-descriptions-item label="最大回撤">{{ fmtPct(metrics.max_drawdown) }}</n-descriptions-item>
           <n-descriptions-item label="胜率">{{ fmtPct(metrics.win_rate) }}</n-descriptions-item>
           <n-descriptions-item label="交易次数">{{ metrics.trade_count ?? '-' }}</n-descriptions-item>
+          <!-- 信号回测专属指标（分位模式 payload 无这些字段，自动隐藏） -->
+          <n-descriptions-item v-if="metrics.payload?.profit_factor != null" label="盈亏比">
+            {{ fmtNum(metrics.payload.profit_factor, 2) }}
+          </n-descriptions-item>
+          <n-descriptions-item v-if="metrics.payload?.avg_hold_days != null" label="平均持有天数">
+            {{ fmtNum(metrics.payload.avg_hold_days, 1) }}
+          </n-descriptions-item>
         </n-descriptions>
         <n-alert v-else type="info" style="margin-bottom: 24px">
           暂无指标数据
