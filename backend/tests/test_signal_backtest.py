@@ -21,9 +21,11 @@ def test_config_and_result_types_exist():
     cfg = sbt.SignalConfig(cash_per_lot=1e6)
     assert cfg.stop_mode == "per_lot"
     lot = sbt.Lot(symbol="A", entry_date=pd.Timestamp("2026-01-05"),
-                  entry_price=10.0, qty=100, sl_price=9.2, tp_price=12.0,
+                  entry_price=10.0, qty=100, stop_distance=0.8, tp_price=12.0,
                   lot_id=1, add_seq=0)
     assert lot.qty == 100
+    # sl_price 现为计算属性：成本价 − 距离
+    assert lot.sl_price == pytest.approx(9.2)
 
 
 def test_entry_t1_and_equity_curve():
@@ -342,3 +344,80 @@ def test_suspension_during_hold_valuation_not_nan():
                                    slip, None, None, 1000.0, cfg)
     assert res.equity.notna().all()                      # 整条净值无 NaN
     assert res.equity.iloc[2] == pytest.approx(1000.0)   # 停牌日用停牌前 close=10 计价
+
+
+# ---------------------------- 增强：跟踪/ATR/条件加仓 ----------------------------
+
+def test_trailing_stop_ratchets_with_peak():
+    dates = pd.date_range("2026-01-05", periods=5, freq="B")
+    # 建仓@10，止损距离=10*0.10=1。价格冲到最高15→跟踪止损位=15-1=14；
+    # 随后 low=13.9<14 触发，成交在14（远高于固定止损位9）。
+    close = pd.DataFrame({"A": [10, 10, 15, 14, 14]}, index=dates)
+    open_ = pd.DataFrame({"A": [10, 10, 15, 14.5, 14]}, index=dates)
+    high = pd.DataFrame({"A": [10, 10, 15, 15, 14]}, index=dates)
+    low = pd.DataFrame({"A": [10, 10, 14.5, 13.9, 14]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.10,
+                           take_profit_pct=0.0, trailing_stop=True,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    tr = res.trades.iloc[0]
+    assert tr["exit_reason"] == "stop_loss"
+    assert tr["exit_price"] == pytest.approx(14.0)   # 跟踪止损位=峰值15-距离1
+    assert tr["exit_date"] == dates[3]
+
+    # 对照：关闭跟踪，固定止损位=10-1=9，同样的价格路径不会触发（low 最低13.9>9）
+    cfg_fixed = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.10,
+                                 take_profit_pct=0.0, trailing_stop=False,
+                                 buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res2 = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                    slip, None, None, 1000.0, cfg_fixed)
+    assert (res2.trades["exit_reason"] == "end_of_data").all()
+
+
+def test_atr_stop_distance_overrides_fixed_pct():
+    dates = pd.date_range("2026-01-05", periods=9, freq="B")
+    # 收盘恒10、H=10.5、L=9.5 → TR=1.0、ATR(3)=1.0。倍数2 → 止损距离=2.0，
+    # 止损位=10-2=8.0（比固定 10*0.08=0.8→9.2 宽）。dates[5]建仓、dates[6]砸到7.9→止损@8.0。
+    n = 9
+    close = pd.DataFrame({"A": [10.0]*n}, index=dates)
+    open_ = pd.DataFrame({"A": [10.0]*n}, index=dates)
+    high = pd.DataFrame({"A": [10.5]*n}, index=dates)
+    low = pd.DataFrame({"A": [9.5]*n}, index=dates)
+    # dates[4] 出信号 → dates[5] 建仓；dates[6] 盘中最低 7.9 触及 ATR 止损位 8.0
+    low.loc[dates[6], "A"] = 7.9
+    open_.loc[dates[6], "A"] = 8.3   # 不跳空（open>sl）→ 成交在止损位 8.0
+    signal = pd.DataFrame({"A": [0, 0, 0, 0, 1, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.0, atr_stop_multiplier=2.0,
+                           atr_window=3, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    tr = res.trades.iloc[0]
+    assert tr["exit_reason"] == "stop_loss"
+    assert tr["exit_price"] == pytest.approx(8.0)    # ATR 距离2，非固定的9.2
+    assert tr["exit_date"] == dates[6]
+
+
+def test_conditional_pyramiding_profit_gate():
+    dates = pd.date_range("2026-01-05", periods=7, freq="B")
+    # 首仓@10。第二次信号时价仍10（浮盈0<5%）→加仓被拒；第三次价11（浮盈10%≥5%）→放行。
+    close = pd.DataFrame({"A": [10, 10, 10, 10, 11, 11, 11]}, index=dates)
+    open_ = close.copy(); high = close.copy(); low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 1, 0, 1, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    # cash_per_lot=2000 保证价 11 时也能买到 100 股（否则会因数量为 0 被资金不足拦掉，
+    # 混淆利润门语义）。
+    cfg = sbt.SignalConfig(cash_per_lot=2000, stop_loss_pct=0.0,
+                           take_profit_pct=0.0, allow_pyramiding=True,
+                           max_adds_per_symbol=5, max_concurrent_lots=10,
+                           pyramid_min_profit_pct=0.05,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 6000.0, cfg)
+    buys = res.orders[res.orders["side"] == "buy"]
+    assert len(buys) == 2                       # 首仓 + 顺势加仓（中间那次被拒）
+    assert (res.skipped["reason"] == "pyramid_profit_gate").any()
