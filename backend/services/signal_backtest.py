@@ -6,9 +6,18 @@
 simulate_signal_book（逻辑由后续任务逐步实现）。
 """
 from __future__ import annotations
+import json
+import logging
+import math
+import traceback
 from dataclasses import dataclass
 import numpy as np
 import pandas as pd
+
+# abort_check 无循环依赖，可安全在模块顶层 import（backtest_service 走延迟 import）。
+from backend.services.abort_check import AbortedError
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -347,3 +356,261 @@ def summarize(res: SignalResult) -> dict:
         "exit_reason_dist": exit_reason_dist,
         "skipped_count": skipped_count,
     }
+
+
+# ---------------------------- 编排层：接入系统回测流程 ----------------------------
+#
+# 以下把纯引擎（simulate_signal_book + summarize）接到系统回测的编排层：
+# 状态机（running/success/aborted/failed）、价格成本准备（复用分位路径的
+# _prepare_price_cost）、parquet 产物落盘、指标计算、写 fr_backtest_metrics /
+# fr_backtest_artifacts。产物结构（equity/orders/trades 三个 parquet）与分位
+# 回测对齐，便于前端详情页复用。
+#
+# 循环 import 说明：backtest_service 目前不 import 本模块，但 Task 16 会让
+# run_backtest 按 body["mode"] 分发到这里（大概率用延迟 import）。为稳妥，本层
+# 对 backtest_service 一律采用「函数内延迟 import」——既避免潜在的循环 import，
+# 又能让测试对 bs.<name> 的 monkeypatch 生效（引擎通过 bs 模块命名空间引用它们）。
+
+
+def _signal_config_from_body(body: dict, bundle) -> SignalConfig:
+    """从 body 的信号配置字段 + bundle 的成本标量构造 SignalConfig。
+
+    费率换算（bps → 小数）：
+    - 买入 = 佣金 + 过户费；
+    - 卖出 = 佣金 + 过户费 + 印花税（印花税仅卖出单边征收）。
+    """
+    buy_fee = (bundle.commission_bps + bundle.transfer_fee_bps) / 1e4
+    sell_fee = (
+        bundle.commission_bps + bundle.transfer_fee_bps + bundle.stamp_tax_bps
+    ) / 1e4
+    return SignalConfig(
+        signal_threshold=float(body.get("signal_threshold", 0.0)),
+        cash_per_lot=float(body.get("cash_per_lot", 1_000_000.0)),
+        max_concurrent_lots=int(body.get("max_concurrent_lots", 10)),
+        allow_pyramiding=bool(body.get("allow_pyramiding", False)),
+        max_adds_per_symbol=int(body.get("max_adds_per_symbol", 0)),
+        stop_loss_pct=float(body.get("stop_loss_pct", 0.08)),
+        take_profit_pct=float(body.get("take_profit_pct", 0.20)),
+        stop_mode=str(body.get("stop_mode", "per_lot")),
+        min_hold_days=int(body.get("min_hold_days", 0)),
+        max_hold_days=int(body.get("max_hold_days", 0)),
+        buy_fee_rate=buy_fee,
+        sell_fee_rate=sell_fee,
+    )
+
+
+def _build_signal_metrics_payload(
+    res: SignalResult, summary: dict, init_cash: float,
+    close: pd.DataFrame | None,
+) -> dict:
+    """把引擎结果 + summarize 汇总 + 收益指标组装成可 JSON 序列化的 payload。
+
+    纯函数（无 DB / 无副作用），单独抽出便于无 DB 单测其结构与 json 安全性。
+
+    关键：summarize 的 ``profit_factor`` 在「有盈利无亏损」时为 ``inf``，
+    ``json.dumps(..., allow_nan=False)`` 遇到 inf/nan 会抛 ValueError，故落库前
+    统一用 ``_nan_to_none`` 把所有非有限浮点兜底成 None。
+
+    Args:
+        res: 引擎结果（含 equity / trades）。
+        summary: ``summarize(res)`` 的输出。
+        init_cash: 初始资金，用于收益率兜底语义。
+        close: qfq close 宽表，用于基准对比；None 时跳过基准。
+
+    Returns:
+        可被 ``json.dumps(payload, ensure_ascii=False, allow_nan=False)`` 序列化的 dict。
+    """
+    from backend.services import backtest_service as bs
+
+    equity = res.equity
+    # 收益指标：从净值序列直接算，与分位路径口径一致。
+    if len(equity) >= 2 and equity.iloc[0] not in (0.0, None) \
+            and math.isfinite(float(equity.iloc[0])):
+        total_return = float(equity.iloc[-1]) / float(equity.iloc[0]) - 1.0
+    else:
+        total_return = 0.0
+    # 最大回撤：净值相对历史峰值的最深跌幅（<=0）。
+    if len(equity) >= 1:
+        max_drawdown = float((equity / equity.cummax() - 1.0).min())
+    else:
+        max_drawdown = 0.0
+    # 夏普：日收益 mean/std × sqrt(252)，std=0（净值恒定）兜底 0。
+    daily_ret = equity.pct_change(fill_method=None).dropna()
+    if len(daily_ret) >= 2:
+        std = float(daily_ret.std(ddof=1))
+        sharpe = (float(daily_ret.mean()) / std * math.sqrt(252)) \
+            if std > 1e-12 else 0.0
+    else:
+        sharpe = 0.0
+    # 年化：净值序列长度归一化，与 run_backtest 同款兜底（亏光→-100%）。
+    n_bars = len(equity)
+    years = max(n_bars / 252.0, 1e-9)
+    base = 1.0 + total_return
+    if n_bars == 0:
+        annual_return = 0.0
+    elif base <= 0:
+        annual_return = -1.0
+    else:
+        annual_return = base ** (1.0 / years) - 1.0
+
+    win_rate = float(summary.get("win_rate", 0.0))
+    trade_count = int(summary.get("total_trades", 0))
+
+    # payload：summarize 全部指标 + 上述收益指标。所有值经 _nan_to_none 兜底，
+    # 确保 inf/nan（尤其 profit_factor=inf）转 None，json allow_nan=False 不抛。
+    payload: dict = {}
+    for k, v in summary.items():
+        payload[k] = bs._nan_to_none(v)
+    payload.update({
+        "total_return": bs._nan_to_none(total_return),
+        "annual_return": bs._nan_to_none(annual_return),
+        "sharpe": bs._nan_to_none(sharpe),
+        "max_drawdown": bs._nan_to_none(max_drawdown),
+        "win_rate": bs._nan_to_none(win_rate),
+        "trade_count": trade_count,
+    })
+    # 基准对比：等权市场组合（签名与分位路径一致）。close 缺省则跳过。
+    if close is not None and not close.empty:
+        payload["benchmark"] = bs._benchmark_metrics(equity, close)
+    return payload
+
+
+def run_signal_backtest(run_id: str, body: dict) -> None:
+    """执行一次信号（择时/事件型）回测，把纯引擎接到系统回测流程。
+
+    编排：状态机 → _prepare_price_cost → 构造 SignalConfig → 固定滑点面板 →
+    simulate_signal_book + summarize → 落 equity/orders/trades parquet →
+    组装 metrics payload → 写 fr_backtest_metrics + 3 条 fr_backtest_artifacts。
+    结构完全仿 run_backtest，产物对齐分位回测，前端详情页可复用。
+
+    Args:
+        run_id: ``fr_backtest_runs.run_id``，由 API 层生成并传入。
+        body: 请求体 dict。除因子/股票池/窗口/成本字段外，信号配置字段：
+            ``signal_threshold / cash_per_lot / stop_loss_pct / take_profit_pct /
+            stop_mode / min_hold_days / max_hold_days / allow_pyramiding /
+            max_adds_per_symbol / max_concurrent_lots``。
+
+    副作用：更新 run 状态；成功写 metrics 一条 + artifacts 三条 +
+    ``<ARTIFACT_DIR>/<run_id>/{equity,orders,trades}.parquet``。
+    """
+    # 延迟 import：见模块内「循环 import 说明」。通过 bs.<name> 引用，
+    # 让测试对 bs 命名空间的 monkeypatch 生效。
+    from backend.services import backtest_service as bs
+
+    try:
+        bs._update_status(run_id, status="running", started=True, progress=5)
+        bs.check_abort("backtest", run_id)
+
+        # 1) 价格 / 成本面板（复用分位路径的公共 prepare）
+        bundle = bs._prepare_price_cost(body)
+        init_cash = float(bundle.init_cash)
+
+        bs._update_status(run_id, progress=40)
+        bs.check_abort("backtest", run_id)
+
+        # 2) 信号配置 + 面板。阈值比较在引擎里做（signal > threshold），
+        # 故直接把因子宽表当 signal 传入。
+        cfg = _signal_config_from_body(body, bundle)
+        signal = bundle.factor
+        close = bundle.close
+
+        # 3) 固定滑点面板：值 = slippage_bps/1e4，与 close 同 shape。
+        # 简化说明：信号路径不建模平方根市场冲击——冲击依赖动态订单规模，
+        # 本轮信号模式只用固定滑点（分位路径才用容量相关的动态冲击）。
+        slip_df = pd.DataFrame(
+            bundle.slippage_bps / 1e4, index=close.index, columns=close.columns
+        )
+
+        # 4) 引擎 + 汇总
+        res = simulate_signal_book(
+            signal, bundle.open_, bundle.high, bundle.low, close,
+            bundle.exec_price, slip_df, bundle.limit_up_mask,
+            bundle.limit_down_mask, init_cash, cfg,
+        )
+        summary = summarize(res)
+
+        bs._update_status(run_id, progress=85)
+        bs.check_abort("backtest", run_id)  # 落盘前最后一次检查
+
+        # 5) 产物落盘：equity/orders/trades 三个 parquet（结构对齐分位回测）
+        run_dir = bs.ARTIFACT_DIR / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        equity_df = res.equity.to_frame(name="equity")
+        equity_df.index.name = "trade_date"
+        equity_path = run_dir / "equity.parquet"
+        equity_df.to_parquet(equity_path)
+
+        orders_path = run_dir / "orders.parquet"
+        res.orders.to_parquet(orders_path)
+
+        trades_path = run_dir / "trades.parquet"
+        res.trades.to_parquet(trades_path)
+
+        # 6) 指标 + JSON payload（profit_factor=inf 已在 helper 里兜底成 None）
+        payload = _build_signal_metrics_payload(res, summary, init_cash, close)
+
+        total_return = payload.get("total_return")
+        annual_return = payload.get("annual_return")
+        sharpe_ratio = payload.get("sharpe")
+        max_drawdown = payload.get("max_drawdown")
+        win_rate = payload.get("win_rate")
+        trade_count = int(payload.get("trade_count", 0) or 0)
+
+        with bs.mysql_conn() as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    """
+                    REPLACE INTO fr_backtest_metrics
+                    (run_id, total_return, annual_return, sharpe_ratio,
+                     max_drawdown, win_rate, trade_count, payload_json)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        run_id,
+                        total_return if total_return is not None else 0.0,
+                        annual_return if annual_return is not None else 0.0,
+                        sharpe_ratio if sharpe_ratio is not None else 0.0,
+                        max_drawdown if max_drawdown is not None else 0.0,
+                        win_rate if win_rate is not None else 0.0,
+                        trade_count,
+                        json.dumps(
+                            payload, ensure_ascii=False, allow_nan=False
+                        ),
+                    ),
+                )
+                for artifact_type, path in (
+                    ("equity", equity_path),
+                    ("orders", orders_path),
+                    ("trades", trades_path),
+                ):
+                    cur.execute(
+                        """
+                        REPLACE INTO fr_backtest_artifacts
+                        (run_id, artifact_type, artifact_path)
+                        VALUES (%s, %s, %s)
+                        """,
+                        (run_id, artifact_type, str(path)),
+                    )
+            c.commit()
+
+        bs._update_status(
+            run_id, status="success", progress=100, finished=True
+        )
+    except AbortedError as exc:
+        log.info("signal backtest aborted: run_id=%s reason=%s", run_id, exc)
+        try:
+            bs._update_status(run_id, status="aborted", finished=True)
+        except Exception:
+            log.exception("_update_status 落 aborted 失败: run_id=%s", run_id)
+    except Exception:
+        log.exception("signal backtest failed: run_id=%s", run_id)
+        try:
+            bs._update_status(
+                run_id, status="failed",
+                error=traceback.format_exc()[:4000], finished=True,
+            )
+        except Exception:
+            log.exception(
+                "_update_status 记录失败时自身也抛异常: run_id=%s", run_id
+            )
