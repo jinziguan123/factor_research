@@ -78,6 +78,11 @@ const takeProfitPctUi = ref(20)       // %
 const stopMode = ref<'per_lot' | 'avg_cost'>('per_lot')
 const minHoldDays = ref(0)
 const maxHoldDays = ref(0)
+// 增强：ATR 止损 / 跟踪止损 / 条件加仓
+const atrStopMultiplier = ref(0)   // 0=关闭，用固定百分比止损
+const atrWindow = ref(14)
+const trailingStop = ref(false)
+const pyramidMinProfitPctUi = ref(0)   // %（浮盈门槛），0=不限
 
 const stopModeOptions = [
   { label: '分笔独立止盈止损 (per_lot)', value: 'per_lot' },
@@ -159,6 +164,10 @@ async function handleSubmit() {
       stop_mode: stopMode.value,
       min_hold_days: minHoldDays.value,
       max_hold_days: maxHoldDays.value,
+      atr_stop_multiplier: atrStopMultiplier.value,
+      atr_window: atrWindow.value,
+      trailing_stop: trailingStop.value,
+      pyramid_min_profit_pct: pyramidMinProfitPctUi.value / 100,
     })
   } else {
     // 分位换仓专用参数
@@ -280,6 +289,21 @@ async function handleSubmit() {
         <n-form-item label="止损模式">
           <n-select v-model:value="stopMode" :options="stopModeOptions" style="width: 280px" />
         </n-form-item>
+        <n-form-item label="ATR 止损倍数">
+          <n-input-number v-model:value="atrStopMultiplier" :min="0" :max="20" :precision="2" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">
+            &gt;0 时止损距离=倍数×ATR，替代固定百分比；0=用上面的止损%
+          </span>
+        </n-form-item>
+        <n-form-item v-if="atrStopMultiplier > 0" label="ATR 窗口(天)">
+          <n-input-number v-model:value="atrWindow" :min="2" :max="250" style="width: 160px" />
+        </n-form-item>
+        <n-form-item label="跟踪止损">
+          <n-switch v-model:value="trailingStop" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">
+            开启后止损位随持仓期最高价上移（棘轮，只上不下）
+          </span>
+        </n-form-item>
         <n-form-item label="每笔金额">
           <n-input-number v-model:value="cashPerLot" :min="1000" :step="100000" style="width: 200px" />
         </n-form-item>
@@ -292,6 +316,10 @@ async function handleSubmit() {
         </n-form-item>
         <n-form-item v-if="allowPyramiding" label="每股最大加仓笔数">
           <n-input-number v-model:value="maxAddsPerSymbol" :min="0" :max="50" style="width: 160px" />
+        </n-form-item>
+        <n-form-item v-if="allowPyramiding" label="加仓浮盈门槛(%)">
+          <n-input-number v-model:value="pyramidMinProfitPctUi" :min="0" :max="100" :precision="2" style="width: 160px" />
+          <span style="margin-left: 12px; color: #999; font-size: 12px">仅当浮盈≥该值(相对均价)才加仓；0=不限</span>
         </n-form-item>
         <n-form-item label="最小持仓天数">
           <n-input-number v-model:value="minHoldDays" :min="0" :max="250" style="width: 160px" />

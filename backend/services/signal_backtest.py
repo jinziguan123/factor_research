@@ -27,13 +27,22 @@ class SignalConfig:
     max_concurrent_lots: int = 10
     allow_pyramiding: bool = False
     max_adds_per_symbol: int = 0
-    stop_loss_pct: float = 0.08          # 0=关闭
+    stop_loss_pct: float = 0.08          # 0=关闭；固定百分比止损距离
     take_profit_pct: float = 0.20        # 0=关闭
     stop_mode: str = "per_lot"           # per_lot | avg_cost
     min_hold_days: int = 0
     max_hold_days: int = 0               # 0=不限
     buy_fee_rate: float = 0.00026
     sell_fee_rate: float = 0.00076
+    # —— 增强（正交模型）——
+    # 止损"距离"来源：atr_stop_multiplier>0 时 = 倍数×ATR(atr_window)（随波动自适应），
+    #   否则 = 成本价×stop_loss_pct（固定百分比）。
+    # 跟踪止损 trailing_stop：开→止损位=持仓期最高价−距离（棘轮上移）；关→=成本价−距离。
+    atr_stop_multiplier: float = 0.0     # 0=关闭 ATR 止损，用固定百分比
+    atr_window: int = 14                 # ATR 窗口（交易日）
+    trailing_stop: bool = False          # 跟踪止损开关
+    # 条件加仓：>0 时仅当持仓浮盈≥该比例（相对均价）才允许加仓（顺势加盈利仓）。
+    pyramid_min_profit_pct: float = 0.0
 
 
 @dataclass
@@ -42,10 +51,19 @@ class Lot:
     entry_date: pd.Timestamp
     entry_price: float                   # 成交价（不含费用）
     qty: float
-    sl_price: float | None
+    stop_distance: float | None          # 止损"距离"（绝对价格差）；None=无止损
     tp_price: float | None
     lot_id: int
     add_seq: int                         # 0=首仓
+    peak: float = 0.0                    # 持仓期最高价（跟踪止损棘轮参照），init=成本价
+
+    @property
+    def sl_price(self) -> float | None:
+        """固定止损位（参照成本价）= 成本价 − 距离。跟踪止损的动态止损位在
+        出场判定处按 peak 现算，不走这里；本属性保留是为读性与非跟踪场景取值。"""
+        if self.stop_distance is None:
+            return None
+        return self.entry_price - self.stop_distance
 
 
 @dataclass
@@ -91,6 +109,21 @@ def simulate_signal_book(
              else np.zeros_like(close_np, dtype=bool))
     ld_np = (limit_down_mask.to_numpy(bool) if limit_down_mask is not None
              else np.zeros_like(close_np, dtype=bool))
+
+    # ATR 预计算（仅在 ATR 止损开启时）：TR=max(H-L,|H-Cprev|,|L-Cprev|)，
+    # ATR=TR 的 atr_window 日简单滚动均值。窗口未就绪处为 NaN，建仓时回退固定百分比。
+    atr_np = None
+    if cfg.atr_stop_multiplier > 0:
+        prev_close = np.vstack([np.full((1, close_np.shape[1]), np.nan),
+                                close_np[:-1]])         # close 上移一行
+        tr = np.maximum.reduce([
+            high_np - low_np,
+            np.abs(high_np - prev_close),
+            np.abs(low_np - prev_close),
+        ])
+        atr_np = (pd.DataFrame(tr)
+                  .rolling(cfg.atr_window, min_periods=cfg.atr_window)
+                  .mean().to_numpy(float))
 
     # 状态
     book: dict[str, list[Lot]] = {sym: [] for sym in symbols}
@@ -156,6 +189,17 @@ def simulate_signal_book(
                     skipped.append({"date": dates[t], "symbol": sym,
                                     "reason": "max_adds_reached"})
                     continue
+                # 条件加仓：仅当持仓浮盈≥阈值（用本次成交价 vs 现有持仓均价）才加，
+                # 即"只加盈利仓/顺势加仓"。阈值=0 时不设限。
+                if cfg.pyramid_min_profit_pct > 0 and np.isfinite(exec_np[t, j]):
+                    lots0 = book[sym]
+                    avg0 = (sum(l.entry_price * l.qty for l in lots0)
+                            / sum(l.qty for l in lots0))
+                    add_px = exec_np[t, j] * (1.0 + slip_np[t, j])
+                    if add_px < avg0 * (1.0 + cfg.pyramid_min_profit_pct):
+                        skipped.append({"date": dates[t], "symbol": sym,
+                                        "reason": "pyramid_profit_gate"})
+                        continue
             # 并发上限：当前总持仓笔数（含本日已建的首仓/加仓）达上限则跳过。
             # 循环内实时重算，保证同日多信号按列序建仓、超限者被拒。
             total_lots = sum(len(v) for v in book.values())
@@ -183,13 +227,18 @@ def simulate_signal_book(
                 continue
             cash -= cost
             lot_counter += 1
-            sl_price = (eff_buy * (1.0 - cfg.stop_loss_pct)
-                        if cfg.stop_loss_pct > 0 else None)
+            # 止损距离：ATR 止损开启且当日 ATR 就绪 → 倍数×ATR；否则回退固定百分比。
+            stop_distance = None
+            if (cfg.atr_stop_multiplier > 0 and atr_np is not None
+                    and np.isfinite(atr_np[t, j]) and atr_np[t, j] > 0):
+                stop_distance = cfg.atr_stop_multiplier * atr_np[t, j]
+            elif cfg.stop_loss_pct > 0:
+                stop_distance = eff_buy * cfg.stop_loss_pct
             tp_price = (eff_buy * (1.0 + cfg.take_profit_pct)
                         if cfg.take_profit_pct > 0 else None)
             lot = Lot(symbol=sym, entry_date=dates[t], entry_price=eff_buy,
-                      qty=qty, sl_price=sl_price, tp_price=tp_price,
-                      lot_id=lot_counter, add_seq=add_seq)
+                      qty=qty, stop_distance=stop_distance, tp_price=tp_price,
+                      lot_id=lot_counter, add_seq=add_seq, peak=eff_buy)
             book[sym].append(lot)
             entry_index[lot_counter] = t
             orders.append({"date": dates[t], "symbol": sym, "side": "buy",
@@ -213,7 +262,24 @@ def simulate_signal_book(
                 # 合并仓持仓加权均价
                 tot_qty = sum(lot.qty for lot in lots)
                 avg = sum(lot.entry_price * lot.qty for lot in lots) / tot_qty
-                sl = avg * (1.0 - cfg.stop_loss_pct) if cfg.stop_loss_pct > 0 else None
+                # 更新各笔 peak（合并仓 peak = 各笔 peak 的 max，即自最早建仓以来最高价）
+                if np.isfinite(high_np[t, jj]):
+                    for lot in lots:
+                        lot.peak = max(lot.peak, high_np[t, jj])
+                # 止损距离：ATR（当日就绪）优先，否则均价×固定百分比
+                if (cfg.atr_stop_multiplier > 0 and atr_np is not None
+                        and np.isfinite(atr_np[t, jj]) and atr_np[t, jj] > 0):
+                    dist = cfg.atr_stop_multiplier * atr_np[t, jj]
+                elif cfg.stop_loss_pct > 0:
+                    dist = avg * cfg.stop_loss_pct
+                else:
+                    dist = None
+                if dist is not None:
+                    ref = (max(lot.peak for lot in lots) if cfg.trailing_stop
+                           else avg)
+                    sl = ref - dist
+                else:
+                    sl = None
                 tp = avg * (1.0 + cfg.take_profit_pct) if cfg.take_profit_pct > 0 else None
                 hold_days = t - earliest_ei
                 fill = None
@@ -251,13 +317,20 @@ def simulate_signal_book(
                     # T+1 守卫：建仓当日不可卖，只对 t>建仓行号 的 Lot 判出场
                     if t <= entry_index[lot.lot_id]:
                         continue
-                    # 止损：当日 low 触及止损位；跳空穿越（open<=sl）则以 open 成交
-                    # 止损优先级最高，不受 min_hold 约束（风控优先）
-                    if lot.sl_price is not None and low_np[t, jj] <= lot.sl_price:
-                        fill = (open_np[t, jj] if open_np[t, jj] <= lot.sl_price
-                                else lot.sl_price)
-                        _sell(lot, sym, jj, t, fill, "stop_loss")
-                        continue  # 已平仓，不再判止盈（同 lot 同日只出场一次）
+                    # 更新持仓期最高价（跟踪止损棘轮参照），用当日 high（与盘中触发口径一致）
+                    if np.isfinite(high_np[t, jj]):
+                        lot.peak = max(lot.peak, high_np[t, jj])
+                    # 止损：有效止损位 = 参照点 − 距离。跟踪→参照持仓期最高价（棘轮上移）；
+                    # 固定→参照成本价。当日 low 触及即触发；跳空穿越（open<=sl）以 open 成交。
+                    # 止损优先级最高，不受 min_hold 约束（风控优先）。
+                    if lot.stop_distance is not None:
+                        ref = lot.peak if cfg.trailing_stop else lot.entry_price
+                        eff_sl = ref - lot.stop_distance
+                        if low_np[t, jj] <= eff_sl:
+                            fill = (open_np[t, jj] if open_np[t, jj] <= eff_sl
+                                    else eff_sl)
+                            _sell(lot, sym, jj, t, fill, "stop_loss")
+                            continue  # 已平仓，不再判止盈（同 lot 同日只出场一次）
                     # 止盈：当日 high 触及止盈位，且满足 min_hold；
                     # 跳空高开（open>=tp）则以 open 成交，否则以止盈位成交
                     hold_days = t - entry_index[lot.lot_id]
@@ -400,6 +473,10 @@ def _signal_config_from_body(body: dict, bundle) -> SignalConfig:
         stop_mode=str(body.get("stop_mode", "per_lot")),
         min_hold_days=int(body.get("min_hold_days", 0)),
         max_hold_days=int(body.get("max_hold_days", 0)),
+        atr_stop_multiplier=float(body.get("atr_stop_multiplier", 0.0)),
+        atr_window=int(body.get("atr_window", 14)),
+        trailing_stop=bool(body.get("trailing_stop", False)),
+        pyramid_min_profit_pct=float(body.get("pyramid_min_profit_pct", 0.0)),
         buy_fee_rate=buy_fee,
         sell_fee_rate=sell_fee,
     )
