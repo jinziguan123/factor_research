@@ -156,6 +156,44 @@ def test_load_trades_page_basic(tmp_path):
     assert out["rows"][0]["Size"] == 100.0
 
 
+def _write_signal_trades_parquet(path, n: int = 10) -> None:
+    """信号回测的按笔 trades：列名是 entry_date / symbol（非 vectorbt 口径）。"""
+    df = pd.DataFrame(
+        {
+            "symbol": [f"00053{i % 3}.SZ" for i in range(n)],
+            "entry_date": pd.to_datetime(
+                [f"2026-01-{(i % 28) + 1:02d}" for i in range(n)]
+            ),
+            "exit_date": pd.to_datetime(
+                [f"2026-06-{(i % 28) + 1:02d}" for i in range(n)]
+            ),
+            "pnl": [i * 1.5 for i in range(n)],
+            "exit_reason": ["stop_loss"] * n,
+        }
+    )
+    df.to_parquet(path)
+
+
+def test_load_trades_page_signal_entry_date_filter(tmp_path):
+    """回归：信号回测产物用 entry_date 列，按开仓日筛选不应报 400。"""
+    from backend.services.backtest_artifact_view import load_trades_page
+
+    p = tmp_path / "trades.parquet"
+    _write_signal_trades_parquet(p, n=10)
+    # 全区间：10 笔（entry_date 都在 2026-01）
+    out = load_trades_page(p, page=1, size=20,
+                           start_date="2026-01-01", end_date="2026-08-01")
+    assert out["total"] == 10
+    # 收窄到只含前 5 天开仓：entry_date 为 01-01..01-05
+    out2 = load_trades_page(p, page=1, size=20,
+                            start_date="2026-01-01", end_date="2026-01-05")
+    assert out2["total"] == 5
+    # symbol 子串 + 日期同时用，不报错
+    out3 = load_trades_page(p, page=1, size=20, symbol="00053",
+                            start_date="2026-01-01", end_date="2026-08-01")
+    assert out3["total"] == 10
+
+
 def test_load_trades_page_last_page(tmp_path):
     from backend.services.backtest_artifact_view import load_trades_page
 

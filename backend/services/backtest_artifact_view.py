@@ -103,8 +103,16 @@ def _resolve_symbol_column(columns: list[str]) -> str | None:
 
 
 def _resolve_entry_time_column(columns: list[str]) -> str | None:
-    """找表示开仓时间的列。同上，VectorBT 默认 ``Entry Timestamp``。"""
-    candidates = ("Entry Timestamp", "entry_time", "Entry Time", "entry_timestamp")
+    """找表示开仓时间的列。
+
+    VectorBT 分位回测的 ``records_readable`` 默认叫 ``Entry Timestamp``；
+    信号回测（按笔 trades）用 ``entry_date``。两者都兜住，避免按开仓日筛选时
+    在信号回测产物上找不到列而报 400。
+    """
+    candidates = (
+        "Entry Timestamp", "entry_time", "Entry Time", "entry_timestamp",
+        "entry_date", "Entry Date",
+    )
     for c in candidates:
         if c in columns:
             return c
