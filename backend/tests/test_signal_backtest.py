@@ -167,3 +167,25 @@ def test_t1_no_same_day_sell():
     res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
                                    slip, None, None, 1000.0, cfg)
     assert res.trades.iloc[0]["exit_date"] == dates[2]  # 非 dates[1]
+
+
+def test_avg_cost_mode_uses_blended_stop():
+    dates = pd.date_range("2026-01-05", periods=8, freq="B")
+    # dates[0]、dates[2] 两次信号 → dates[1]@10、dates[3]@12 两笔建仓
+    close = pd.DataFrame({"A": [10, 10, 12, 12, 11.0, 11.0, 11.0, 11.0]}, index=dates)
+    open_ = close.copy(); high = close.copy()
+    low = pd.DataFrame({"A": [10, 10, 12, 12, 10.4, 11, 11, 11]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    base = dict(cash_per_lot=1200, stop_loss_pct=0.08, take_profit_pct=0.0,
+                allow_pyramiding=True, max_adds_per_symbol=1,
+                max_concurrent_lots=5, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    # avg_cost：均价=(10*100+12*100)/200=11，止损位11*0.92=10.12；dates[4] low=10.4 未破→不触发
+    res_avg = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+        slip, None, None, 2400.0, sbt.SignalConfig(stop_mode="avg_cost", **base))
+    assert (res_avg.trades["exit_reason"] == "end_of_data").all()
+    # per_lot：首笔止损位10*0.92=9.2（不破），第二笔12*0.92=11.04；dates[4] low=10.4<11.04→第二笔止损
+    res_lot = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+        slip, None, None, 2400.0, sbt.SignalConfig(stop_mode="per_lot", **base))
+    reasons = set(res_lot.trades["exit_reason"])
+    assert "stop_loss" in reasons

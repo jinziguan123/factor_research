@@ -143,37 +143,76 @@ def simulate_signal_book(
                            "price": eff_buy, "qty": qty})
         pending_entries = next_pending
 
-        # 2) 出场：优先级 止损 > ...（后续任务插止盈/到期）> 末日强平
-        for jj, sym in enumerate(symbols):
-            if not book[sym]:
-                continue
-            # 复制一份遍历，_sell 会从 book[sym] 移除，避免边遍历边删
-            for lot in list(book[sym]):
-                # T+1 守卫：建仓当日不可卖，只对 t>建仓行号 的 Lot 判出场
-                if t <= entry_index[lot.lot_id]:
+        # 2) 出场：优先级 止损 > 止盈 > 到期 > 末日强平。
+        #    stop_mode 决定判定粒度：
+        #    - per_lot：每笔独立 sl/tp，独立判定与平仓；
+        #    - avg_cost：同 symbol 全部未平仓 Lot 视为合并仓，用持仓加权
+        #      均价算统一 sl/tp，触发时整只清仓（各写一条 trade）。
+        if cfg.stop_mode == "avg_cost":
+            for jj, sym in enumerate(symbols):
+                lots = book[sym]
+                if not lots:
                     continue
-                # 止损：当日 low 触及止损位；跳空穿越（open<=sl）则以 open 成交
-                # 止损优先级最高，不受 min_hold 约束（风控优先）
-                if lot.sl_price is not None and low_np[t, jj] <= lot.sl_price:
-                    fill = (open_np[t, jj] if open_np[t, jj] <= lot.sl_price
-                            else lot.sl_price)
-                    _sell(lot, sym, jj, t, fill, "stop_loss")
-                    continue  # 已平仓，不再判止盈（同 lot 同日只出场一次）
-                # 止盈：当日 high 触及止盈位，且满足 min_hold；
-                # 跳空高开（open>=tp）则以 open 成交，否则以止盈位成交
-                hold_days = t - entry_index[lot.lot_id]
-                if (lot.tp_price is not None
-                        and hold_days >= cfg.min_hold_days
-                        and high_np[t, jj] >= lot.tp_price):
-                    fill = (open_np[t, jj] if open_np[t, jj] >= lot.tp_price
-                            else lot.tp_price)
-                    _sell(lot, sym, jj, t, fill, "take_profit")
-                    continue  # 已平仓，不再判到期
-                # 到期强平：持有天数达到上限（计划内平仓，用 exec_price 成交）。
-                # 不受 min_hold 约束（到期是上限，优先级低于止损/止盈）。
-                if (cfg.max_hold_days > 0
-                        and hold_days >= cfg.max_hold_days):
-                    _sell(lot, sym, jj, t, exec_np[t, jj], "max_hold")
+                # T+1 守卫：用最早一笔建仓行号；t<=该值则整只跳过出场
+                earliest_ei = min(entry_index[lot.lot_id] for lot in lots)
+                if t <= earliest_ei:
+                    continue
+                # 合并仓持仓加权均价
+                tot_qty = sum(lot.qty for lot in lots)
+                avg = sum(lot.entry_price * lot.qty for lot in lots) / tot_qty
+                sl = avg * (1.0 - cfg.stop_loss_pct) if cfg.stop_loss_pct > 0 else None
+                tp = avg * (1.0 + cfg.take_profit_pct) if cfg.take_profit_pct > 0 else None
+                hold_days = t - earliest_ei
+                fill = None
+                reason = None
+                # 止损（风控优先，不受 min_hold 约束）
+                if sl is not None and low_np[t, jj] <= sl:
+                    fill = open_np[t, jj] if open_np[t, jj] <= sl else sl
+                    reason = "stop_loss"
+                # 止盈（受 min_hold 约束）
+                elif (tp is not None and hold_days >= cfg.min_hold_days
+                        and high_np[t, jj] >= tp):
+                    fill = open_np[t, jj] if open_np[t, jj] >= tp else tp
+                    reason = "take_profit"
+                # 到期
+                elif cfg.max_hold_days > 0 and hold_days >= cfg.max_hold_days:
+                    fill = exec_np[t, jj]
+                    reason = "max_hold"
+                if reason is not None:
+                    # 整只清仓：_sell 改 book[sym]，用快照遍历
+                    for lot in list(lots):
+                        _sell(lot, sym, jj, t, fill, reason)
+        else:
+            for jj, sym in enumerate(symbols):
+                if not book[sym]:
+                    continue
+                # 复制一份遍历，_sell 会从 book[sym] 移除，避免边遍历边删
+                for lot in list(book[sym]):
+                    # T+1 守卫：建仓当日不可卖，只对 t>建仓行号 的 Lot 判出场
+                    if t <= entry_index[lot.lot_id]:
+                        continue
+                    # 止损：当日 low 触及止损位；跳空穿越（open<=sl）则以 open 成交
+                    # 止损优先级最高，不受 min_hold 约束（风控优先）
+                    if lot.sl_price is not None and low_np[t, jj] <= lot.sl_price:
+                        fill = (open_np[t, jj] if open_np[t, jj] <= lot.sl_price
+                                else lot.sl_price)
+                        _sell(lot, sym, jj, t, fill, "stop_loss")
+                        continue  # 已平仓，不再判止盈（同 lot 同日只出场一次）
+                    # 止盈：当日 high 触及止盈位，且满足 min_hold；
+                    # 跳空高开（open>=tp）则以 open 成交，否则以止盈位成交
+                    hold_days = t - entry_index[lot.lot_id]
+                    if (lot.tp_price is not None
+                            and hold_days >= cfg.min_hold_days
+                            and high_np[t, jj] >= lot.tp_price):
+                        fill = (open_np[t, jj] if open_np[t, jj] >= lot.tp_price
+                                else lot.tp_price)
+                        _sell(lot, sym, jj, t, fill, "take_profit")
+                        continue  # 已平仓，不再判到期
+                    # 到期强平：持有天数达到上限（计划内平仓，用 exec_price 成交）。
+                    # 不受 min_hold 约束（到期是上限，优先级低于止损/止盈）。
+                    if (cfg.max_hold_days > 0
+                            and hold_days >= cfg.max_hold_days):
+                        _sell(lot, sym, jj, t, exec_np[t, jj], "max_hold")
 
         # 末日强平仍未平仓的 Lot（止损已平的不重复处理）
         if t == n - 1:
