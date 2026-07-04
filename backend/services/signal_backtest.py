@@ -120,6 +120,22 @@ def simulate_signal_book(
         next_pending: list[int] = []
         for j in pending_entries:
             sym = symbols[j]
+            # 加仓门控：已持仓该股时，本次信号视为加仓意向。
+            #   - 首仓（book[sym] 为空）永远允许（并发/资金上限由后续任务处理）。
+            #   - 已持仓且 not allow_pyramiding → 跳过，记 pyramiding_disabled。
+            #   - 已加仓次数达上限（已有 len-1 笔加仓 >= max_adds）→ 跳过，
+            #     记 max_adds_reached。
+            n_lots = len(book[sym])
+            add_seq = n_lots  # 首仓0、第1次加仓1、以此类推
+            if n_lots > 0:
+                if not cfg.allow_pyramiding:
+                    skipped.append({"date": dates[t], "symbol": sym,
+                                    "reason": "pyramiding_disabled"})
+                    continue
+                if n_lots - 1 >= cfg.max_adds_per_symbol:
+                    skipped.append({"date": dates[t], "symbol": sym,
+                                    "reason": "max_adds_reached"})
+                    continue
             eff_buy = exec_np[t, j] * (1.0 + slip_np[t, j])
             if not np.isfinite(eff_buy) or eff_buy <= 0:
                 continue
@@ -136,7 +152,7 @@ def simulate_signal_book(
                         if cfg.take_profit_pct > 0 else None)
             lot = Lot(symbol=sym, entry_date=dates[t], entry_price=eff_buy,
                       qty=qty, sl_price=sl_price, tp_price=tp_price,
-                      lot_id=lot_counter, add_seq=0)
+                      lot_id=lot_counter, add_seq=add_seq)
             book[sym].append(lot)
             entry_index[lot_counter] = t
             orders.append({"date": dates[t], "symbol": sym, "side": "buy",

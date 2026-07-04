@@ -189,3 +189,36 @@ def test_avg_cost_mode_uses_blended_stop():
         slip, None, None, 2400.0, sbt.SignalConfig(stop_mode="per_lot", **base))
     reasons = set(res_lot.trades["exit_reason"])
     assert "stop_loss" in reasons
+
+
+def test_pyramiding_equal_add_and_cap():
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    close = pd.DataFrame({"A": [10, 10, 10, 10, 10, 10]}, index=dates)
+    open_ = close.copy(); high = close.copy(); low = close.copy()
+    # 连续3次信号，但 max_adds_per_symbol=1 → 最多首仓+1加仓=2笔
+    signal = pd.DataFrame({"A": [1, 1, 1, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, allow_pyramiding=True,
+                           max_adds_per_symbol=1, max_concurrent_lots=10,
+                           stop_loss_pct=0.0, take_profit_pct=0.0,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 5000.0, cfg)
+    buys = res.orders[res.orders["side"] == "buy"]
+    assert len(buys) == 2                       # 首仓 + 1次加仓
+    assert set(res.trades["add_seq"]) == {0, 1}
+
+
+def test_pyramiding_disabled_skips_adds():
+    dates = pd.date_range("2026-01-05", periods=5, freq="B")
+    close = pd.DataFrame({"A": [10]*5}, index=dates)
+    open_=close.copy(); high=close.copy(); low=close.copy()
+    signal = pd.DataFrame({"A": [1, 1, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, allow_pyramiding=False,
+                           stop_loss_pct=0.0, take_profit_pct=0.0,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 5000.0, cfg)
+    assert len(res.orders[res.orders["side"]=="buy"]) == 1
+    assert len(res.skipped) >= 1                # 第二次信号被跳过并记录
