@@ -72,6 +72,12 @@ def simulate_signal_book(
     exec_np = exec_price.to_numpy(float)
     slip_np = slippage.to_numpy(float)
 
+    # 涨跌停锁定掩码：None 视为全 False（无锁定）。行/列已与 close 对齐。
+    lu_np = (limit_up_mask.to_numpy(bool) if limit_up_mask is not None
+             else np.zeros_like(close_np, dtype=bool))
+    ld_np = (limit_down_mask.to_numpy(bool) if limit_down_mask is not None
+             else np.zeros_like(close_np, dtype=bool))
+
     # 状态
     book: dict[str, list[Lot]] = {sym: [] for sym in symbols}
     cash: float = float(init_cash)
@@ -143,11 +149,17 @@ def simulate_signal_book(
                 skipped.append({"date": dates[t], "symbol": sym,
                                 "reason": "max_concurrent"})
                 continue
-            eff_buy = exec_np[t, j] * (1.0 + slip_np[t, j])
-            if not np.isfinite(eff_buy) or eff_buy <= 0:
+            # 停牌：成交价无效（NaN/非正）→ 无法成交，记 suspended。
+            if not np.isfinite(exec_np[t, j]) or exec_np[t, j] <= 0:
                 skipped.append({"date": dates[t], "symbol": sym,
-                                "reason": "insufficient_cash"})
+                                "reason": "suspended"})
                 continue
+            # 封涨停：买不进，记 limit_up。
+            if lu_np[t, j]:
+                skipped.append({"date": dates[t], "symbol": sym,
+                                "reason": "limit_up"})
+                continue
+            eff_buy = exec_np[t, j] * (1.0 + slip_np[t, j])
             qty = np.floor(cfg.cash_per_lot / eff_buy / 100.0) * 100.0
             cost = qty * eff_buy * (1.0 + cfg.buy_fee_rate)
             if qty <= 0 or cost > cash:
@@ -201,10 +213,14 @@ def simulate_signal_book(
                         and high_np[t, jj] >= tp):
                     fill = open_np[t, jj] if open_np[t, jj] >= tp else tp
                     reason = "take_profit"
-                # 到期
-                elif cfg.max_hold_days > 0 and hold_days >= cfg.max_hold_days:
+                # 到期：停牌（exec 无效）则不以 NaN 成交，顺延到下一交易日
+                elif (cfg.max_hold_days > 0 and hold_days >= cfg.max_hold_days
+                        and np.isfinite(exec_np[t, jj])):
                     fill = exec_np[t, jj]
                     reason = "max_hold"
+                # 封跌停：卖不出，本日不清仓，顺延（下一交易日仍触发再卖）
+                if reason is not None and ld_np[t, jj]:
+                    continue
                 if reason is not None:
                     # 整只清仓：_sell 改 book[sym]，用快照遍历
                     for lot in list(lots):
@@ -214,6 +230,9 @@ def simulate_signal_book(
                 if not book[sym]:
                     continue
                 # 复制一份遍历，_sell 会从 book[sym] 移除，避免边遍历边删
+                # 封跌停：本日整只卖不出，跳过所有出场判定，顺延到下一交易日
+                if ld_np[t, jj]:
+                    continue
                 for lot in list(book[sym]):
                     # T+1 守卫：建仓当日不可卖，只对 t>建仓行号 的 Lot 判出场
                     if t <= entry_index[lot.lot_id]:
@@ -237,8 +256,10 @@ def simulate_signal_book(
                         continue  # 已平仓，不再判到期
                     # 到期强平：持有天数达到上限（计划内平仓，用 exec_price 成交）。
                     # 不受 min_hold 约束（到期是上限，优先级低于止损/止盈）。
+                    # 停牌（exec 无效）则不以 NaN 成交，顺延到下一交易日
                     if (cfg.max_hold_days > 0
-                            and hold_days >= cfg.max_hold_days):
+                            and hold_days >= cfg.max_hold_days
+                            and np.isfinite(exec_np[t, jj])):
                         _sell(lot, sym, jj, t, exec_np[t, jj], "max_hold")
 
         # 末日强平仍未平仓的 Lot（止损已平的不重复处理）

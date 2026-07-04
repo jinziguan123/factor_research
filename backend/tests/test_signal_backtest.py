@@ -259,3 +259,19 @@ def test_fees_and_slippage_asymmetric():
     assert buy["qty"] == expected_qty
     sell = res.orders[res.orders["side"]=="sell"].iloc[0]
     assert sell["price"] == pytest.approx(10 * (1 - 0.01))   # 卖出有效价含反向滑点
+
+
+def test_limit_and_suspension_block_trades():
+    dates = pd.date_range("2026-01-05", periods=5, freq="B")
+    close = pd.DataFrame({"A": [10, 10, 9, 9, 9]}, index=dates)
+    open_ = close.copy(); high = close.copy()
+    low = pd.DataFrame({"A": [10, 10, 8, 9, 9]}, index=dates)  # dates[2] 破止损
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    # dates[2] 封跌停 → 卖不出，顺延到 dates[3]
+    ld = pd.DataFrame({"A": [False, False, True, False, False]}, index=dates)
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.0, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, ld, 1000.0, cfg)
+    assert res.trades.iloc[0]["exit_date"] == dates[3]  # 跌停日卖不出，顺延
