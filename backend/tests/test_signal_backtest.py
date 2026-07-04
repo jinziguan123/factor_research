@@ -238,3 +238,24 @@ def test_max_concurrent_and_cash_cap():
                                    slip, None, None, 10000.0, cfg)
     assert len(res.orders[res.orders["side"]=="buy"]) == 2   # 只建2笔（A、B）
     assert (res.skipped["symbol"] == "C").any()              # C 因并发上限跳过
+
+
+def test_fees_and_slippage_asymmetric():
+    dates = pd.date_range("2026-01-05", periods=4, freq="B")
+    close = pd.DataFrame({"A": [10, 10, 10, 10]}, index=dates)
+    open_ = close.copy(); high = close.copy(); low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.01, index=dates, columns=["A"])   # 1% 滑点
+    cfg = sbt.SignalConfig(cash_per_lot=100000, stop_loss_pct=0.0,
+                           take_profit_pct=0.0, buy_fee_rate=0.001,
+                           sell_fee_rate=0.002)
+    # init_cash 留手续费余量（qty 按 cash_per_lot/eff_buy 定，含买费后 cost 略超 cash_per_lot）
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 200000.0, cfg)
+    buy = res.orders[res.orders["side"]=="buy"].iloc[0]
+    # 买入有效价 = 10*(1+0.01)=10.1；qty=floor(100000/10.1/100)*100
+    assert buy["price"] == pytest.approx(10.1)
+    expected_qty = (100000 // (10.1) // 100) * 100
+    assert buy["qty"] == expected_qty
+    sell = res.orders[res.orders["side"]=="sell"].iloc[0]
+    assert sell["price"] == pytest.approx(10 * (1 - 0.01))   # 卖出有效价含反向滑点
