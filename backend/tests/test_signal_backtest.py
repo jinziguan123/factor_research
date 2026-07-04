@@ -151,3 +151,19 @@ def test_max_hold_days_force_exit():
     assert tr["exit_reason"] == "max_hold"
     # 建仓 dates[1]，持有3个交易日 → dates[4] 强平（走 exec_price=当日open）
     assert tr["exit_date"] == dates[4]
+
+
+def test_t1_no_same_day_sell():
+    dates = pd.date_range("2026-01-05", periods=5, freq="B")
+    # dates[0]信号 → dates[1]建仓。dates[1]当日 low=8(破止损) 但T+1不许卖 → dates[2]才卖
+    close = pd.DataFrame({"A": [10, 9, 9, 9, 9]}, index=dates)
+    open_ = pd.DataFrame({"A": [10, 10, 9, 9, 9]}, index=dates)
+    high = close.copy()
+    low = pd.DataFrame({"A": [10, 8, 8, 9, 9]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.0, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    assert res.trades.iloc[0]["exit_date"] == dates[2]  # 非 dates[1]
