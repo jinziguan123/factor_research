@@ -121,6 +121,11 @@ class CreateBacktestIn(BaseModel):
     stop_mode: str = "per_lot"                                      # per_lot 分笔独立 | avg_cost 均价统一
     min_hold_days: int = Field(default=0, ge=0)                    # 最小持仓交易日（止损优先，不锁止损）
     max_hold_days: int = Field(default=0, ge=0)                    # 最大持仓交易日，0=不限
+    # 增强（正交模型）：ATR 止损 / 跟踪止损 / 条件加仓
+    atr_stop_multiplier: float = Field(default=0.0, ge=0)         # >0 用 倍数×ATR 作止损距离，替代固定%
+    atr_window: int = Field(default=14, ge=2, le=250)            # ATR 窗口（交易日）
+    trailing_stop: bool = False                                    # 跟踪止损：止损位随持仓期最高价上移
+    pyramid_min_profit_pct: float = Field(default=0.0, ge=0)     # 加仓浮盈门槛（相对均价），0=不限
 
 
 class CreateCostSensitivityIn(BaseModel):

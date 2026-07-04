@@ -473,6 +473,10 @@ def _signal_config_from_body(body: dict, bundle) -> SignalConfig:
         stop_mode=str(body.get("stop_mode", "per_lot")),
         min_hold_days=int(body.get("min_hold_days", 0)),
         max_hold_days=int(body.get("max_hold_days", 0)),
+        atr_stop_multiplier=float(body.get("atr_stop_multiplier", 0.0)),
+        atr_window=int(body.get("atr_window", 14)),
+        trailing_stop=bool(body.get("trailing_stop", False)),
+        pyramid_min_profit_pct=float(body.get("pyramid_min_profit_pct", 0.0)),
         buy_fee_rate=buy_fee,
         sell_fee_rate=sell_fee,
     )

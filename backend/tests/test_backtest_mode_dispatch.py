@@ -19,10 +19,33 @@ def test_schema_signal_fields_roundtrip():
                          start_date="2026-01-01", end_date="2026-06-30",
                          mode="signal", stop_loss_pct=0.05, take_profit_pct=0.15,
                          stop_mode="avg_cost", allow_pyramiding=True,
-                         max_adds_per_symbol=2, min_hold_days=3, max_hold_days=20)
+                         max_adds_per_symbol=2, min_hold_days=3, max_hold_days=20,
+                         atr_stop_multiplier=2.5, atr_window=10,
+                         trailing_stop=True, pyramid_min_profit_pct=0.03)
     assert m.mode == "signal"
     assert m.stop_mode == "avg_cost"
     assert m.max_adds_per_symbol == 2
+    assert m.atr_stop_multiplier == 2.5
+    assert m.trailing_stop is True
+    assert m.pyramid_min_profit_pct == 0.03
+
+
+def test_signal_config_from_body_maps_enhancements():
+    """body → SignalConfig 映射覆盖增强字段（ATR/跟踪/条件加仓）。"""
+    from backend.services.signal_backtest import _signal_config_from_body, SignalConfig
+    from types import SimpleNamespace
+
+    bundle = SimpleNamespace(commission_bps=2.5, transfer_fee_bps=0.1, stamp_tax_bps=5.0)
+    cfg = _signal_config_from_body(
+        {"atr_stop_multiplier": 2.5, "atr_window": 10, "trailing_stop": True,
+         "pyramid_min_profit_pct": 0.03, "stop_mode": "avg_cost"},
+        bundle,
+    )
+    assert isinstance(cfg, SignalConfig)
+    assert cfg.atr_stop_multiplier == 2.5
+    assert cfg.atr_window == 10
+    assert cfg.trailing_stop is True
+    assert cfg.pyramid_min_profit_pct == 0.03
 
 
 def test_run_backtest_dispatches_signal(monkeypatch):
