@@ -82,3 +82,39 @@ def test_stop_loss_gap_through_open():
     res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
                                    slip, None, None, 1000.0, cfg)
     assert res.trades.iloc[0]["exit_price"] == pytest.approx(8.8)  # 跳空→open成交
+
+
+def test_take_profit_intraday_high():
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    close = pd.DataFrame({"A": [10, 10, 11, 11.5, 11.5, 11.5]}, index=dates)
+    open_ = close.copy()
+    high = pd.DataFrame({"A": [10, 10, 12.5, 11.5, 11.5, 11.5]}, index=dates)  # 第2日冲到12.5
+    low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.0,
+                           take_profit_pct=0.20, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    tr = res.trades.iloc[0]
+    assert tr["exit_reason"] == "take_profit"
+    assert tr["exit_price"] == pytest.approx(12.0)  # 止盈位10*1.2=12，非跳空成交在12
+
+
+def test_min_hold_delays_take_profit():
+    dates = pd.date_range("2026-01-05", periods=7, freq="B")
+    # 建仓在dates[1]（第0日信号）。min_hold=3 → 前3个交易日内不许止盈
+    close = pd.DataFrame({"A": [10, 10, 10, 10, 10, 10, 10]}, index=dates)
+    high = pd.DataFrame({"A": [10, 10, 20, 20, 20, 20, 20]}, index=dates)  # 建仓后立刻可止盈
+    open_ = close.copy(); low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.0,
+                           take_profit_pct=0.20, min_hold_days=3,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    tr = res.trades.iloc[0]
+    # 建仓 dates[1]，min_hold=3 → 最早 dates[1]+3交易日=dates[4] 才允许止盈
+    assert tr["exit_date"] == dates[4]
+    assert tr["hold_days"] >= 3

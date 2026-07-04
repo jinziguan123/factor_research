@@ -132,8 +132,10 @@ def simulate_signal_book(
             lot_counter += 1
             sl_price = (eff_buy * (1.0 - cfg.stop_loss_pct)
                         if cfg.stop_loss_pct > 0 else None)
+            tp_price = (eff_buy * (1.0 + cfg.take_profit_pct)
+                        if cfg.take_profit_pct > 0 else None)
             lot = Lot(symbol=sym, entry_date=dates[t], entry_price=eff_buy,
-                      qty=qty, sl_price=sl_price, tp_price=None,
+                      qty=qty, sl_price=sl_price, tp_price=tp_price,
                       lot_id=lot_counter, add_seq=0)
             book[sym].append(lot)
             entry_index[lot_counter] = t
@@ -151,10 +153,21 @@ def simulate_signal_book(
                 if t <= entry_index[lot.lot_id]:
                     continue
                 # 止损：当日 low 触及止损位；跳空穿越（open<=sl）则以 open 成交
+                # 止损优先级最高，不受 min_hold 约束（风控优先）
                 if lot.sl_price is not None and low_np[t, jj] <= lot.sl_price:
                     fill = (open_np[t, jj] if open_np[t, jj] <= lot.sl_price
                             else lot.sl_price)
                     _sell(lot, sym, jj, t, fill, "stop_loss")
+                    continue  # 已平仓，不再判止盈（同 lot 同日只出场一次）
+                # 止盈：当日 high 触及止盈位，且满足 min_hold；
+                # 跳空高开（open>=tp）则以 open 成交，否则以止盈位成交
+                hold_days = t - entry_index[lot.lot_id]
+                if (lot.tp_price is not None
+                        and hold_days >= cfg.min_hold_days
+                        and high_np[t, jj] >= lot.tp_price):
+                    fill = (open_np[t, jj] if open_np[t, jj] >= lot.tp_price
+                            else lot.tp_price)
+                    _sell(lot, sym, jj, t, fill, "take_profit")
 
         # 末日强平仍未平仓的 Lot（止损已平的不重复处理）
         if t == n - 1:
