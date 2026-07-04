@@ -24,3 +24,26 @@ def test_config_and_result_types_exist():
                   entry_price=10.0, qty=100, sl_price=9.2, tp_price=12.0,
                   lot_id=1, add_seq=0)
     assert lot.qty == 100
+
+
+def test_entry_t1_and_equity_curve():
+    dates = pd.date_range("2026-01-05", periods=5, freq="B")
+    # A: 第0日出信号，第1日开盘=10 建仓，之后涨到 12
+    open_, high, low, close = _panels(
+        {"A": [10, 10, 11, 12, 12]}, dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, max_concurrent_lots=5,
+                           stop_loss_pct=0.0, take_profit_pct=0.0,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(
+        signal, open_, high, low, close, close, slip, None, None,
+        init_cash=1000.0, cfg=cfg)
+    # 第1日开盘价10成交，1000/10=100股（整手）
+    assert res.orders.iloc[0]["side"] == "buy"
+    assert res.orders.iloc[0]["qty"] == 100
+    # 末日净值 = 100股 × 12 = 1200（现金 1000-1000=0）
+    assert res.equity.iloc[-1] == pytest.approx(1200.0)
+    # 数据末尾强平一笔
+    assert (res.trades["exit_reason"] == "end_of_data").all()
+    assert len(res.trades) == 1
