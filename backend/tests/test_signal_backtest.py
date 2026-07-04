@@ -118,3 +118,19 @@ def test_min_hold_delays_take_profit():
     # 建仓 dates[1]，min_hold=3 → 最早 dates[1]+3交易日=dates[4] 才允许止盈
     assert tr["exit_date"] == dates[4]
     assert tr["hold_days"] >= 3
+
+
+def test_same_day_both_hit_stop_wins():
+    dates = pd.date_range("2026-01-05", periods=4, freq="B")
+    # 第2日 high=13(触止盈12) 且 low=9(触止损9.2) 同日双触发 → 止损优先
+    close = pd.DataFrame({"A": [10, 10, 10, 10]}, index=dates)
+    open_ = close.copy()
+    high = pd.DataFrame({"A": [10, 10, 13, 10]}, index=dates)
+    low = pd.DataFrame({"A": [10, 10, 9, 10]}, index=dates)
+    signal = pd.DataFrame({"A": [1, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.08,
+                           take_profit_pct=0.20, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    assert res.trades.iloc[0]["exit_reason"] == "stop_loss"
