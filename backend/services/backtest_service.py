@@ -388,6 +388,44 @@ def _load_or_compute_factor(
 
 
 @dataclass
+class PriceCostBundle:
+    """价格与成本面板：分位回测与信号回测共用的公共产物。
+
+    只放「两条路径都需要、且计算方式一致」的东西——因子宽表、对齐后的 OHLC、
+    成交价、当日成交额、方向涨跌停 mask，以及从 ``body`` 解析出的执行 / 成本标量。
+
+    不含分位专用的 W 权重 / size / slippage 数组（slippage 的平方根冲击依赖订单
+    规模，信号路径订单规模是动态的，故留在分位路径构造）。
+    """
+
+    factor_id: str
+    factor_version: int
+    params_hash: str
+    params: dict
+    pool_id: int
+    symbols: list[str]
+    factor: pd.DataFrame  # 因子宽表 F，已与 close 按 (date × symbol) 内连接对齐
+    close: pd.DataFrame  # qfq close 宽表，对齐后（尚未做非正数占位）
+    open_: pd.DataFrame  # 对齐后的 open 宽表（vwap 模式下为 NaN 占位表）
+    high: pd.DataFrame  # 对齐后的 high 宽表
+    low: pd.DataFrame  # 对齐后的 low 宽表
+    exec_price: pd.DataFrame  # 成交价宽表（T+1 open / vwap），已非正数占位
+    daily_amount: pd.DataFrame  # 当日成交额（元）
+    limit_up_mask: pd.DataFrame  # 当日收盘封涨停 bool 宽表（挡买入）
+    limit_down_mask: pd.DataFrame  # 当日收盘封跌停 bool 宽表（挡卖出）
+    # 执行 / 成本标量（body 解析）
+    n_groups: int
+    exec_mode: str
+    commission_bps: float
+    stamp_tax_bps: float
+    transfer_fee_bps: float
+    slippage_bps: float
+    impact_coef: float
+    max_volume_pct: float
+    init_cash: float
+
+
+@dataclass
 class BacktestInputs:
     """从 ``body`` 准备好的一次回测所需全部输入，pickle 友好、无 DB 句柄。
 
@@ -419,11 +457,14 @@ class BacktestInputs:
     n_bars: int
 
 
-def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
-    """把 ``body`` 翻译成一组可直接投喂 ``vbt.Portfolio.from_orders`` 的输入。
+def _prepare_price_cost(body: dict) -> PriceCostBundle:
+    """把 ``body`` 翻译成分位 / 信号回测共用的价格与成本面板。
+
+    职责：加载因子宽表 + 加载并对齐 OHLC + 构造 exec_price + daily_amount +
+    方向涨跌停 mask + 解析执行 / 成本标量。逻辑与原 ``_prepare_backtest_inputs``
+    的对应片段完全一致，仅将公共部分提取出来供两条回测路径复用。
 
     纯函数（无 status 更新），异常直接抛，由调用方决定落到哪张表的 ``error_message``。
-    与 ``run_backtest`` 内嵌版本行为完全等价，逐步骤注释详见原实现。
     """
     # 1) 参数解析 + 因子实例 + 版本 / hash 固化
     reg = FactorRegistry()
@@ -483,10 +524,8 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
     close = close.loc[common_index, common_cols].astype("float64")
     F = F.loc[common_index, common_cols].astype("float64")
 
-    # 4) 价格面板（成交价 / 滑点 / 容量所需）+ 权重 → size
+    # 4) 价格面板（成交价 / 滑点 / 容量所需）
     n_groups = n_groups_req
-    rebalance = int(body.get("rebalance_period", 1))
-    position = str(body.get("position", "top"))
     init_cash = float(body.get("init_cash", 1e7))
 
     # 执行/成本参数（2026-06-23 改造，默认值见 CreateBacktestIn / 设计文档）。
@@ -509,8 +548,13 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
             p.reindex(index=close.index, columns=close.columns).astype("float64")
         )
 
+    # 对齐后的 OHLC：high / low 供信号回测使用（分位路径不用，仅 open 参与 exec_price）。
+    high = _aligned("high")
+    low = _aligned("low")
+
     # 成交价：open 模式取 open；vwap 模式用真实成交额 VWAP（amount/volume 复权）。
     if exec_mode == "vwap":
+        open_ = pd.DataFrame(np.nan, index=close.index, columns=close.columns)
         vwap_panel = _aligned("vwap")
         exec_price = execution.build_exec_price(
             close, close, close, close, "vwap", vwap=vwap_panel
@@ -523,6 +567,67 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
 
     # 当日成交额（元）：amount_k 单位千元，不受 qfq 影响，用 adjust='none' 取原值。
     daily_amount = (_aligned("amount_k", adjust="none") * 1000.0).fillna(0.0)
+
+    # 方向涨跌停 mask：limit_up 挡买入、limit_down 挡卖出（纯 close 派生，无副作用）。
+    limit_up_mask, limit_down_mask = _compute_directional_limit_masks(close)
+
+    return PriceCostBundle(
+        factor_id=body["factor_id"],
+        factor_version=version,
+        params_hash=phash,
+        params=params,
+        pool_id=pool_id,
+        symbols=list(symbols),
+        factor=F,
+        close=close,
+        open_=open_,
+        high=high,
+        low=low,
+        exec_price=exec_price,
+        daily_amount=daily_amount,
+        limit_up_mask=limit_up_mask,
+        limit_down_mask=limit_down_mask,
+        n_groups=n_groups,
+        exec_mode=exec_mode,
+        commission_bps=commission_bps,
+        stamp_tax_bps=stamp_tax_bps,
+        transfer_fee_bps=transfer_fee_bps,
+        slippage_bps=slippage_bps,
+        impact_coef=impact_coef,
+        max_volume_pct=max_volume_pct,
+        init_cash=init_cash,
+    )
+
+
+def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
+    """把 ``body`` 翻译成一组可直接投喂 ``vbt.Portfolio.from_orders`` 的输入。
+
+    纯函数（无 status 更新），异常直接抛，由调用方决定落到哪张表的 ``error_message``。
+    与 ``run_backtest`` 内嵌版本行为完全等价，逐步骤注释详见原实现。
+    """
+    # 1~3) 公共价格 / 成本面板：因子 + 对齐 OHLC + exec_price + daily_amount + 成本标量。
+    bundle = _prepare_price_cost(body)
+    version = bundle.factor_version
+    phash = bundle.params_hash
+    params = bundle.params
+    pool_id = bundle.pool_id
+    symbols = bundle.symbols
+    F = bundle.factor
+    close = bundle.close
+    exec_price = bundle.exec_price
+    daily_amount = bundle.daily_amount
+    n_groups = bundle.n_groups
+    init_cash = bundle.init_cash
+    commission_bps = bundle.commission_bps
+    stamp_tax_bps = bundle.stamp_tax_bps
+    transfer_fee_bps = bundle.transfer_fee_bps
+    slippage_bps = bundle.slippage_bps
+    impact_coef = bundle.impact_coef
+    max_volume_pct = bundle.max_volume_pct
+
+    # 4) 分位专用：权重 → size + 费率 / 滑点数组
+    rebalance = int(body.get("rebalance_period", 1))
+    position = str(body.get("position", "top"))
 
     # 涨跌停过滤：默认开启（2026-06-23 起），剔除当日触板票。
     filter_pl = bool(body.get("filter_price_limit", True))
@@ -554,9 +659,10 @@ def _prepare_backtest_inputs(body: dict) -> BacktestInputs:
     size = w_exec * init_cash / exec_price
     size = size.replace([np.inf, -np.inf], 0.0).fillna(0.0)
     # 涨跌停滞留 + 成交量容量约束：封板日无法买入/卖出，超量成交按比例裁剪。
+    # 方向 mask 已在 bundle 里由同一 close 派生，这里按 lock_pl 决定是否启用。
     lock_pl = bool(body.get("lock_price_limit", True))
     if lock_pl:
-        limit_up_mask, limit_down_mask = _compute_directional_limit_masks(close)
+        limit_up_mask, limit_down_mask = bundle.limit_up_mask, bundle.limit_down_mask
     else:
         limit_up_mask = limit_down_mask = None
     size = execution.apply_trading_constraints(
