@@ -78,6 +78,11 @@ def simulate_signal_book(
     high_np = high.to_numpy(float)
     low_np = low.to_numpy(float)
     close_np = close.to_numpy(float)
+    # 估值/末日强平用前向填充的 close：持仓期若停牌（close 为 NaN），用最近一个
+    # 有效收盘价计价，避免当日净值变 NaN 污染整条净值曲线与夏普/回撤。触发判定
+    # （止损/止盈）仍用原始 close_np/low/high —— NaN 参与比较返回 False，停牌日
+    # 天然不触发，语义正确。
+    close_val_np = close.ffill().to_numpy(float)
     exec_np = exec_price.to_numpy(float)
     slip_np = slippage.to_numpy(float)
 
@@ -271,11 +276,12 @@ def simulate_signal_book(
                             and np.isfinite(exec_np[t, jj])):
                         _sell(lot, sym, jj, t, exec_np[t, jj], "max_hold")
 
-        # 末日强平仍未平仓的 Lot（止损已平的不重复处理）
+        # 末日强平仍未平仓的 Lot（止损已平的不重复处理）。
+        # 用前向填充 close：末日恰好停牌时以最近有效价平仓，避免 NaN 成交价。
         if t == n - 1:
             for jj, sym in enumerate(symbols):
                 for lot in list(book[sym]):
-                    _sell(lot, sym, jj, t, close_np[t, jj], "end_of_data")
+                    _sell(lot, sym, jj, t, close_val_np[t, jj], "end_of_data")
 
         # 3) 产生今日信号的 pending（下一日消化）
         if t + 1 < n:
@@ -283,11 +289,11 @@ def simulate_signal_book(
                 if sig_np[t, j] > cfg.signal_threshold:
                     pending_entries.append(j)
 
-        # 4) 估值：现金 + 所有持仓按当日 close 计价
+        # 4) 估值：现金 + 所有持仓按当日 close 计价（停牌日用前向填充价，见上）
         holdings_val = 0.0
         for j, sym in enumerate(symbols):
             for lot in book[sym]:
-                holdings_val += lot.qty * close_np[t, j]
+                holdings_val += lot.qty * close_val_np[t, j]
         equity.append(cash + holdings_val)
 
     equity_s = pd.Series(equity, index=dates)

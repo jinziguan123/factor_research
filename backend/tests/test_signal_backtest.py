@@ -327,3 +327,18 @@ def test_no_lookahead_truncation():
     assert len(a) == len(b)
     for col in ["symbol", "entry_date", "exit_date", "exit_price", "exit_reason"]:
         assert list(a[col]) == list(b[col])
+
+
+def test_suspension_during_hold_valuation_not_nan():
+    # 持仓期停牌（dates[2] close 为 NaN）：当日净值应以最近有效价计价，不能是 NaN
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    close = pd.DataFrame({"A": [10, 10, np.nan, 11, 11, 11]}, index=dates)
+    open_ = close.copy(); high = close.copy(); low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.0,
+                           take_profit_pct=0.0, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    assert res.equity.notna().all()                      # 整条净值无 NaN
+    assert res.equity.iloc[2] == pytest.approx(1000.0)   # 停牌日用停牌前 close=10 计价
