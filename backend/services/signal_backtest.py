@@ -136,13 +136,24 @@ def simulate_signal_book(
                     skipped.append({"date": dates[t], "symbol": sym,
                                     "reason": "max_adds_reached"})
                     continue
+            # 并发上限：当前总持仓笔数（含本日已建的首仓/加仓）达上限则跳过。
+            # 循环内实时重算，保证同日多信号按列序建仓、超限者被拒。
+            total_lots = sum(len(v) for v in book.values())
+            if total_lots >= cfg.max_concurrent_lots:
+                skipped.append({"date": dates[t], "symbol": sym,
+                                "reason": "max_concurrent"})
+                continue
             eff_buy = exec_np[t, j] * (1.0 + slip_np[t, j])
             if not np.isfinite(eff_buy) or eff_buy <= 0:
+                skipped.append({"date": dates[t], "symbol": sym,
+                                "reason": "insufficient_cash"})
                 continue
             qty = np.floor(cfg.cash_per_lot / eff_buy / 100.0) * 100.0
             cost = qty * eff_buy * (1.0 + cfg.buy_fee_rate)
             if qty <= 0 or cost > cash:
-                # 本任务先简单丢弃该意向（skipped 明细留给后续任务完善）
+                # 数量为 0 或现金不足：记 skipped 便于复盘"没吃到"的信号
+                skipped.append({"date": dates[t], "symbol": sym,
+                                "reason": "insufficient_cash"})
                 continue
             cash -= cost
             lot_counter += 1

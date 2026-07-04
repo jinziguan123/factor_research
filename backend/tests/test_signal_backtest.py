@@ -222,3 +222,19 @@ def test_pyramiding_disabled_skips_adds():
                                    slip, None, None, 5000.0, cfg)
     assert len(res.orders[res.orders["side"]=="buy"]) == 1
     assert len(res.skipped) >= 1                # 第二次信号被跳过并记录
+
+
+def test_max_concurrent_and_cash_cap():
+    dates = pd.date_range("2026-01-05", periods=4, freq="B")
+    close = pd.DataFrame({"A": [10]*4, "B": [10]*4, "C": [10]*4}, index=dates)
+    open_=close.copy(); high=close.copy(); low=close.copy()
+    signal = pd.DataFrame({"A":[1,0,0,0],"B":[1,0,0,0],"C":[1,0,0,0]},
+                          index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A","B","C"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, max_concurrent_lots=2,
+                           stop_loss_pct=0.0, take_profit_pct=0.0,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 10000.0, cfg)
+    assert len(res.orders[res.orders["side"]=="buy"]) == 2   # 只建2笔（A、B）
+    assert (res.skipped["symbol"] == "C").any()              # C 因并发上限跳过
