@@ -134,3 +134,20 @@ def test_same_day_both_hit_stop_wins():
     res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
                                    slip, None, None, 1000.0, cfg)
     assert res.trades.iloc[0]["exit_reason"] == "stop_loss"
+
+
+def test_max_hold_days_force_exit():
+    dates = pd.date_range("2026-01-05", periods=8, freq="B")
+    close = pd.DataFrame({"A": [10]*8}, index=dates)
+    open_ = close.copy(); high = close.copy(); low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.0,
+                           take_profit_pct=0.0, max_hold_days=3,
+                           buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 1000.0, cfg)
+    tr = res.trades.iloc[0]
+    assert tr["exit_reason"] == "max_hold"
+    # 建仓 dates[1]，持有3个交易日 → dates[4] 强平（走 exec_price=当日open）
+    assert tr["exit_date"] == dates[4]

@@ -168,6 +168,12 @@ def simulate_signal_book(
                     fill = (open_np[t, jj] if open_np[t, jj] >= lot.tp_price
                             else lot.tp_price)
                     _sell(lot, sym, jj, t, fill, "take_profit")
+                    continue  # 已平仓，不再判到期
+                # 到期强平：持有天数达到上限（计划内平仓，用 exec_price 成交）。
+                # 不受 min_hold 约束（到期是上限，优先级低于止损/止盈）。
+                if (cfg.max_hold_days > 0
+                        and hold_days >= cfg.max_hold_days):
+                    _sell(lot, sym, jj, t, exec_np[t, jj], "max_hold")
 
         # 末日强平仍未平仓的 Lot（止损已平的不重复处理）
         if t == n - 1:
