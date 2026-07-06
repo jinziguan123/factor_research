@@ -358,14 +358,31 @@ function downloadArtifact(type: string) {
           <n-descriptions-item label="年化收益率">{{ fmtPct(metrics.annual_return) }}</n-descriptions-item>
           <n-descriptions-item label="Sharpe 比率">{{ fmtNum(metrics.sharpe_ratio, 2) }}</n-descriptions-item>
           <n-descriptions-item label="最大回撤">{{ fmtPct(metrics.max_drawdown) }}</n-descriptions-item>
-          <n-descriptions-item label="胜率">{{ fmtPct(metrics.win_rate) }}</n-descriptions-item>
+          <n-descriptions-item :label="metrics.payload?.win_rate_closed != null ? '胜率(全量)' : '胜率'">
+            {{ fmtPct(metrics.win_rate) }}
+          </n-descriptions-item>
           <n-descriptions-item label="交易次数">{{ metrics.trade_count ?? '-' }}</n-descriptions-item>
           <!-- 信号回测专属指标（分位模式 payload 无这些字段，自动隐藏） -->
-          <n-descriptions-item v-if="metrics.payload?.profit_factor != null" label="盈亏比">
+          <n-descriptions-item v-if="metrics.payload?.profit_factor != null"
+            :label="metrics.payload?.profit_factor_closed != null ? '盈亏比(全量)' : '盈亏比'">
             {{ fmtNum(metrics.payload.profit_factor, 2) }}
           </n-descriptions-item>
-          <n-descriptions-item v-if="metrics.payload?.avg_hold_days != null" label="平均持有天数">
+          <n-descriptions-item v-if="metrics.payload?.avg_hold_days != null"
+            :label="metrics.payload?.avg_hold_days_closed != null ? '平均持有(全量)' : '平均持有天数'">
             {{ fmtNum(metrics.payload.avg_hold_days, 1) }}
+          </n-descriptions-item>
+          <!-- 仅策略规则平仓口径（剔除回测结束的末日强平） -->
+          <n-descriptions-item v-if="metrics.payload?.win_rate_closed != null" label="胜率(仅规则平仓)">
+            {{ fmtPct(metrics.payload.win_rate_closed) }}
+          </n-descriptions-item>
+          <n-descriptions-item v-if="metrics.payload?.profit_factor_closed != null" label="盈亏比(仅规则平仓)">
+            {{ fmtNum(metrics.payload.profit_factor_closed, 2) }}
+          </n-descriptions-item>
+          <n-descriptions-item v-if="metrics.payload?.avg_hold_days_closed != null" label="平均持有(仅规则)">
+            {{ fmtNum(metrics.payload.avg_hold_days_closed, 1) }}
+          </n-descriptions-item>
+          <n-descriptions-item v-if="metrics.payload?.open_at_end != null" label="结束时未平仓">
+            {{ metrics.payload.open_at_end }} 笔
           </n-descriptions-item>
         </n-descriptions>
         <n-alert v-else type="info" style="margin-bottom: 24px">

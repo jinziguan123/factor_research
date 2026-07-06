@@ -399,30 +399,14 @@ def simulate_signal_book(
                         orders=orders_df, skipped=skipped_df)
 
 
-def summarize(res: SignalResult) -> dict:
-    """把 SignalResult 汇总成一组标量指标，供 Phase 2 落到 metrics payload。
-
-    产出：胜率、盈亏比、平均持有天数、出场原因分布、总笔数、跳过数。
-    所有数值均转成 Python float/int，避免 numpy 类型影响后续 json 序列化。
-    """
-    trades = res.trades
-    total = int(len(trades))
-    skipped_count = int(len(res.skipped))
-
-    if total == 0:
-        return {
-            "total_trades": 0,
-            "win_rate": 0.0,
-            "profit_factor": 0.0,
-            "avg_hold_days": 0.0,
-            "exit_reason_dist": {},
-            "skipped_count": skipped_count,
-        }
-
+def _trade_stats(trades: pd.DataFrame) -> dict:
+    """对一组交易算 胜率 / 盈亏比 / 平均持有天数 / 笔数。空集返回全 0。"""
+    n = int(len(trades))
+    if n == 0:
+        return {"count": 0, "win_rate": 0.0, "profit_factor": 0.0, "avg_hold_days": 0.0}
     pnl = trades["pnl"].to_numpy(float)
     wins = pnl > 0
-    win_rate = float(wins.sum()) / total
-
+    win_rate = float(wins.sum()) / n
     gross_profit = float(pnl[wins].sum())
     gross_loss = float(-pnl[pnl < 0].sum())   # 亏损绝对值之和（>=0）
     if gross_loss > 0:
@@ -430,19 +414,61 @@ def summarize(res: SignalResult) -> dict:
     else:
         # 无亏损：有盈利则视为无穷大盈亏比，无盈利（全为 0）则 0.0
         profit_factor = float("inf") if gross_profit > 0 else 0.0
-
-    avg_hold_days = float(trades["hold_days"].mean())
-
-    exit_reason_dist = {
-        str(k): int(v)
-        for k, v in trades["exit_reason"].value_counts().to_dict().items()
+    return {
+        "count": n,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "avg_hold_days": float(trades["hold_days"].mean()),
     }
 
+
+def summarize(res: SignalResult) -> dict:
+    """把 SignalResult 汇总成一组标量指标，供 Phase 2 落到 metrics payload。
+
+    交易类指标给**两套口径**：
+    - 全量（含末日强平 end_of_data）：``win_rate`` / ``profit_factor`` / ``avg_hold_days``
+      / ``total_trades``。向后兼容，也是 fr_backtest_metrics.win_rate 的来源。
+    - 仅策略规则平仓（剔除 end_of_data，即真正被止损/止盈/到期平掉的交易）：
+      ``win_rate_closed`` / ``profit_factor_closed`` / ``avg_hold_days_closed`` /
+      ``closed_trades``。剔除"被回测窗口边界截断、按末日收盘 mark 的未平仓头寸"，
+      更贴近策略真实兑现的表现。
+    - ``open_at_end``：回测结束时仍未平仓（被末日强平）的笔数，供透明参考。
+
+    净值类指标（总收益/夏普/回撤）不在此，另在 payload 里从净值曲线算——净值本就
+    每日 mark-to-market 未平仓头寸，口径正确、不受本问题影响。
+    """
+    trades = res.trades
+    total = int(len(trades))
+    skipped_count = int(len(res.skipped))
+
+    all_stats = _trade_stats(trades)
+    # 剔除末日强平 → 仅策略规则平掉的交易
+    if total:
+        closed = trades[trades["exit_reason"] != "end_of_data"]
+        open_at_end = int((trades["exit_reason"] == "end_of_data").sum())
+        exit_reason_dist = {
+            str(k): int(v)
+            for k, v in trades["exit_reason"].value_counts().to_dict().items()
+        }
+    else:
+        closed = trades
+        open_at_end = 0
+        exit_reason_dist = {}
+    closed_stats = _trade_stats(closed)
+
     return {
+        # 全量（含末日强平）
         "total_trades": total,
-        "win_rate": float(win_rate),
-        "profit_factor": float(profit_factor),
-        "avg_hold_days": avg_hold_days,
+        "win_rate": float(all_stats["win_rate"]),
+        "profit_factor": float(all_stats["profit_factor"]),
+        "avg_hold_days": float(all_stats["avg_hold_days"]),
+        # 仅策略规则平仓（剔除 end_of_data）
+        "closed_trades": int(closed_stats["count"]),
+        "win_rate_closed": float(closed_stats["win_rate"]),
+        "profit_factor_closed": float(closed_stats["profit_factor"]),
+        "avg_hold_days_closed": float(closed_stats["avg_hold_days"]),
+        # 回测结束时仍未平仓（被末日强平）的笔数
+        "open_at_end": open_at_end,
         "exit_reason_dist": exit_reason_dist,
         "skipped_count": skipped_count,
     }

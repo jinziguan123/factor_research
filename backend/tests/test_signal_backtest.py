@@ -304,6 +304,37 @@ def test_summary_metrics():
     assert m["total_trades"] == len(res.trades)
 
 
+def test_summary_closed_vs_all_metrics():
+    """两套口径：全量(含末日强平) vs 仅规则平仓(剔除 end_of_data)。"""
+    dates = pd.date_range("2026-01-05", periods=6, freq="B")
+    # A：dates[2] 冲高止盈（规则平仓，赢）。B：无止损止盈，持有到末日强平，
+    #    末日收盘 8 < 建仓 10 → end_of_data 亏损。
+    close = pd.DataFrame({"A": [10, 10, 13, 13, 13, 13],
+                          "B": [10, 10, 9, 9, 9, 8]}, index=dates)
+    open_ = close.copy()
+    high = pd.DataFrame({"A": [10, 10, 13, 13, 13, 13],
+                         "B": [10, 10, 9, 9, 9, 8]}, index=dates)
+    low = close.copy()
+    signal = pd.DataFrame({"A": [1, 0, 0, 0, 0, 0],
+                           "B": [1, 0, 0, 0, 0, 0]}, index=dates).astype(float)
+    slip = pd.DataFrame(0.0, index=dates, columns=["A", "B"])
+    cfg = sbt.SignalConfig(cash_per_lot=1000, stop_loss_pct=0.0,
+                           take_profit_pct=0.20, buy_fee_rate=0.0, sell_fee_rate=0.0)
+    res = sbt.simulate_signal_book(signal, open_, high, low, close, open_,
+                                   slip, None, None, 2000.0, cfg)
+    m = sbt.summarize(res)
+    # 全量：2 笔（A 止盈赢、B 末日强平亏）→ 胜率 0.5
+    assert m["total_trades"] == 2
+    assert m["win_rate"] == pytest.approx(0.5)
+    # 仅规则平仓：只剩 A 止盈这一笔 → 胜率 1.0
+    assert m["closed_trades"] == 1
+    assert m["win_rate_closed"] == pytest.approx(1.0)
+    # 回测结束仍未平仓（被强平）的笔数 = 1（B）
+    assert m["open_at_end"] == 1
+    assert "profit_factor_closed" in m
+    assert "avg_hold_days_closed" in m
+
+
 def test_no_lookahead_truncation():
     dates = pd.date_range("2026-01-05", periods=30, freq="B")
     rng = np.random.default_rng(3)
