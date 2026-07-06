@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS `fr_backtest_runs` (
   `factor_version`  int unsigned NOT NULL,
   `params_hash`     char(40) NOT NULL,
   `params_json`     longtext,
+  `config_json`     longtext,
   `pool_id`         bigint unsigned NOT NULL,
   `freq`            varchar(8) NOT NULL DEFAULT '1d',
   `start_date`      date NOT NULL,

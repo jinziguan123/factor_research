@@ -42,6 +42,16 @@ export function useCreateBacktest() {
   })
 }
 
+/** 重新回测：按原 run 的配置快照再跑一遍，返回新 run_id（degraded=true 表示旧 run 无完整快照、部分参数走了默认）。 */
+export function useRerunBacktest() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runId: string) =>
+      client.post(`/backtests/${runId}/rerun`).then(r => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests'] }),
+  })
+}
+
 /** 创建 walk-forward 样本外验证任务（复用回测 run 表，结果 payload.method='walk_forward'）。 */
 export function useCreateWalkForward() {
   return useMutation({

@@ -47,8 +47,12 @@ _ALLOWED_ARTIFACT_TYPES = ("equity", "orders", "trades")
 
 
 @router.post("")
-def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
-    """创建回测任务并派发到 ProcessPool。"""
+def _start_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> str:
+    """校验因子 → 落 run 记录（含完整 config_json 快照）→ 派发到 ProcessPool。
+
+    创建与"重新回测"共用：config_json 存创建请求体全量，供 /rerun 忠实重跑与审计。
+    返回 run_id。
+    """
     reg = FactorRegistry()
     reg.scan_and_register()
     try:
@@ -60,6 +64,7 @@ def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
     params = body.params or factor.default_params
     phash = params_hash(params)
     run_id = uuid.uuid4().hex
+    config = body.model_dump(mode="json")
 
     with mysql_conn() as c:
         with c.cursor() as cur:
@@ -67,9 +72,9 @@ def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
                 """
                 INSERT INTO fr_backtest_runs
                 (run_id, factor_id, factor_version, params_hash, params_json,
-                 pool_id, freq, start_date, end_date,
+                 config_json, pool_id, freq, start_date, end_date,
                  status, progress, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',0,%s)
                 """,
                 (
                     run_id,
@@ -77,6 +82,7 @@ def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
                     version,
                     phash,
                     json.dumps(params, ensure_ascii=False),
+                    json.dumps(config, ensure_ascii=False),
                     body.pool_id,
                     body.freq,
                     body.start_date,
@@ -87,8 +93,61 @@ def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
             )
         c.commit()
 
-    bt.add_task(submit, backtest_entry, run_id, body.model_dump(mode="json"))
+    bt.add_task(submit, backtest_entry, run_id, config)
+    return run_id
+
+
+def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
+    """创建回测任务并派发到 ProcessPool。"""
+    run_id = _start_backtest(body, bt)
     return ok({"run_id": run_id, "status": "pending"})
+
+
+@router.post("/{run_id}/rerun")
+def rerun_backtest(run_id: str, bt: BackgroundTasks) -> dict:
+    """按原回测的配置重新跑一遍，生成一条新 run。
+
+    优先用 ``config_json``（创建时的完整配置快照）忠实重跑；旧 run 无该快照时，
+    用库里已存的因子/参数/池/日期/频率重建一个最小配置（执行/成本/mode 等走默认，
+    并在响应里标注 ``degraded=true`` 提示无法完全复现）。
+    """
+    with mysql_conn() as c:
+        with c.cursor() as cur:
+            cur.execute(
+                "SELECT factor_id, params_json, config_json, pool_id, freq, "
+                "start_date, end_date FROM fr_backtest_runs WHERE run_id=%s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="backtest run not found")
+
+    cfg_raw = row.get("config_json")
+    degraded = False
+    if cfg_raw:
+        try:
+            body = CreateBacktestIn(**json.loads(cfg_raw))
+        except Exception as e:  # 快照损坏/schema 变更不兼容
+            raise HTTPException(status_code=400, detail=f"配置快照无法解析: {e}")
+    else:
+        # 旧 run：无完整快照，尽力用已存字段重建（其余字段走 CreateBacktestIn 默认）。
+        degraded = True
+        body = CreateBacktestIn(
+            factor_id=row["factor_id"],
+            params=json.loads(row["params_json"]) if row.get("params_json") else None,
+            pool_id=row["pool_id"],
+            start_date=row["start_date"],
+            end_date=row["end_date"],
+            freq=row.get("freq") or "1d",
+        )
+
+    new_run_id = _start_backtest(body, bt)
+    return ok({
+        "run_id": new_run_id,
+        "status": "pending",
+        "source_run_id": run_id,
+        "degraded": degraded,
+    })
 
 
 class WalkForwardIn(BaseModel):
@@ -205,6 +264,15 @@ def get_backtest(run_id: str) -> dict:
         except (ValueError, TypeError):
             m["payload"] = None
     run["metrics"] = m
+    # config_json（创建时的完整配置快照）解析成对象回前端，供展示/克隆；旧 run 为 None。
+    if run.get("config_json"):
+        try:
+            run["config"] = json.loads(run.pop("config_json"))
+        except (ValueError, TypeError):
+            run["config"] = None
+    else:
+        run.pop("config_json", None)
+        run["config"] = None
     # artifact_path 是服务器本地路径，不直接回前端——前端应通过专门的下载端点取。
     run["artifacts"] = [
         {"artifact_type": a["artifact_type"]} for a in (arts or [])

@@ -9,9 +9,10 @@ import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem,
   NProgress, NSpin, NButton, NSpace, NAlert, NEmpty, NDataTable, NTag,
   NInput, NDatePicker, NGrid, NGridItem, NFormItem, NSelect,
+  useMessage,
   type DataTableColumns,
 } from 'naive-ui'
-import { useBacktest, useEquitySeries, useTradesPage, type TradesFilter } from '@/api/backtests'
+import { useBacktest, useEquitySeries, useTradesPage, useRerunBacktest, type TradesFilter } from '@/api/backtests'
 import { useFactors } from '@/api/factors'
 import { usePoolNameMap } from '@/api/pools'
 import StatusBadge from '@/components/layout/StatusBadge.vue'
@@ -68,6 +69,23 @@ const TRADE_VALUE_LABELS: Record<string, Record<string, string>> = {
 
 const route = useRoute()
 const router = useRouter()
+const message = useMessage()
+
+// 重新回测：按原配置再跑一遍，成功后跳到新 run。
+const rerun = useRerunBacktest()
+async function handleRerun() {
+  try {
+    const res = await rerun.mutateAsync(runId.value)
+    if (res.degraded) {
+      message.warning('原回测无完整配置快照，已用可还原的参数重跑（部分执行/成本参数走默认）')
+    } else {
+      message.success('已按原配置重新回测')
+    }
+    router.push(`/backtests/${res.run_id}`)
+  } catch (e: any) {
+    message.error(e?.response?.data?.message ?? e?.message ?? '重新回测失败')
+  }
+}
 
 const runId = computed(() => route.params.runId as string)
 const { data: btRun, isLoading } = useBacktest(runId)
@@ -252,7 +270,19 @@ function downloadArtifact(type: string) {
       style="margin-bottom: 16px"
     >
       <template #extra>
-        <status-badge v-if="btRun" :status="btRun.status" />
+        <n-space align="center">
+          <status-badge v-if="btRun" :status="btRun.status" />
+          <n-button
+            v-if="btRun"
+            size="small"
+            type="primary"
+            secondary
+            :loading="rerun.isPending.value"
+            @click="handleRerun"
+          >
+            重新回测
+          </n-button>
+        </n-space>
       </template>
     </n-page-header>
 
