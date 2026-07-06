@@ -199,9 +199,19 @@ async function handleSubmit() {
     })
   }
 
-  const result = await createBacktest.mutateAsync(body)
-  message.success('回测任务已提交')
-  router.push(`/backtests/${result.run_id}`)
+  try {
+    const result = await createBacktest.mutateAsync(body)
+    if (!result?.run_id) {
+      // 极端情况：后端返回 200 但结构异常，避免跳到 /backtests/undefined
+      message.error('创建成功但未返回 run_id，请去列表页查看')
+      return
+    }
+    message.success('回测任务已提交')
+    router.push(`/backtests/${result.run_id}`)
+  } catch (e: any) {
+    // 之前没有 catch，创建失败会静默（不跳转、不提示）。这里把后端报错显式弹出。
+    message.error(e?.response?.data?.message ?? e?.detail ?? e?.message ?? '创建回测失败')
+  }
 }
 </script>
 
