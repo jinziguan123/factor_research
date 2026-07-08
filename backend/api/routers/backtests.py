@@ -46,12 +46,11 @@ _ARTIFACT_DIR_RESOLVED = str(Path(settings.artifact_dir).resolve())
 _ALLOWED_ARTIFACT_TYPES = ("equity", "orders", "trades")
 
 
-@router.post("")
 def _start_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> str:
     """校验因子 → 落 run 记录（含完整 config_json 快照）→ 派发到 ProcessPool。
 
-    创建与"重新回测"共用：config_json 存创建请求体全量，供 /rerun 忠实重跑与审计。
-    返回 run_id。
+    **内部 helper（非路由端点）**，被 create_backtest / rerun_backtest 共用。
+    config_json 存创建请求体全量，供 /rerun 忠实重跑与审计。返回 run_id。
     """
     reg = FactorRegistry()
     reg.scan_and_register()
@@ -97,6 +96,7 @@ def _start_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> str:
     return run_id
 
 
+@router.post("")
 def create_backtest(body: CreateBacktestIn, bt: BackgroundTasks) -> dict:
     """创建回测任务并派发到 ProcessPool。"""
     run_id = _start_backtest(body, bt)

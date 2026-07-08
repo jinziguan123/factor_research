@@ -4,6 +4,21 @@ from __future__ import annotations
 from backend.api.schemas import CreateBacktestIn
 
 
+def test_create_route_maps_to_ok_envelope_endpoint():
+    """回归：POST /api/backtests 必须路由到返回 ok 信封的 create_backtest，
+    而非内部 helper _start_backtest（它 return 裸 run_id，会让前端拦截器报 API error）。"""
+    from backend.api.routers.backtests import router
+
+    posts = {
+        r.path: r.endpoint.__name__
+        for r in router.routes
+        if getattr(r, "methods", None) and "POST" in r.methods
+    }
+    assert posts.get("/api/backtests") == "create_backtest"
+    # _start_backtest 不应作为任何路由端点暴露
+    assert "_start_backtest" not in posts.values()
+
+
 def test_schema_signal_fields_defaults():
     m = CreateBacktestIn(factor_id="f", pool_id=1,
                          start_date="2026-01-01", end_date="2026-06-30")
