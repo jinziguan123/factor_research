@@ -49,8 +49,8 @@ class WeeklyBullDailyAbsorb(BaseFactor):
     supported_freqs = ("1d",)
 
     # —— 策略签名常数（固定不参数化）——
-    _WEEKLY_FAST = 21          # 周线快线 EMA
-    _WEEKLY_SLOW = 55          # 周线慢线 EMA
+    _WEEKLY_FAST = 13          # 周线快线 EMA
+    _WEEKLY_SLOW = 34          # 周线慢线 EMA
     _WEEKLY_KDJ_N = 9          # 周线标准 KDJ 的 RSV 窗口
     _SMOOTH_ALPHA = 1.0 / 3.0  # SMA(_,3,1)
 
